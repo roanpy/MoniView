@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array><string>en</string><string>zh-Hans</string></array>
+	<key>CFBundleExecutable</key>
+	<string>MoniView</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.moniview.app</string>
+	<key>CFBundleIconFile</key>
+	<string>MoniView.icns</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MoniView</string>
+	<key>CFBundleDisplayName</key>
+	<string>MoniView</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSCameraUsageDescription</key>
+	<string>MoniView 需要访问 USB 视频采集卡以显示 HDMI 画面。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MoniView 需要访问采集卡音频输入以实时播放和录制画面声音。</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+</dict>
+</plist>

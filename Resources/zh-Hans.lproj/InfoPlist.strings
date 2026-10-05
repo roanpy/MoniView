@@ -1,0 +1,4 @@
+/* MoniView — Simplified Chinese Info.plist strings. */
+
+"NSCameraUsageDescription" = "MoniView 需要访问 USB 视频采集卡以显示 HDMI 画面。";
+"NSMicrophoneUsageDescription" = "MoniView 需要访问采集卡音频输入以实时播放和录制画面声音。";

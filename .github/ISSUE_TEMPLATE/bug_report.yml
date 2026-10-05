@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a problem with MoniView
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not include capture card serial numbers, device identifiers, private file paths, usernames, or full diagnostic logs.
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. macOS 14.5"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Capture card
+      description: Model name only. Do not include a serial number.
+      placeholder: "e.g. Jemdo Video USB capture"
+    validations:
+      required: true
+
+  - type: input
+    id: format
+    attributes:
+      label: Format in use
+      placeholder: "e.g. 1920x1080 @ 60"
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed serial numbers, device identifiers, private paths, and full diagnostic logs.
+          required: true

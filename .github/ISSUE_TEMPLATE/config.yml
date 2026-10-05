@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the README first
+    url: https://github.com/roanpy/MoniView#readme
+    about: Build steps, device limits, and the recording behavior are documented there.
+  - name: Contributing guide
+    url: https://github.com/roanpy/MoniView/blob/main/CONTRIBUTING.md
+    about: Build and privacy ground rules for changes.

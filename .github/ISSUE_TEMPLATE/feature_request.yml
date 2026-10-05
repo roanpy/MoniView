@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement for MoniView
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem before the solution. MoniView is a native, dependency-free macOS preview app; proposals that keep it small are easier to consider.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: device
+    attributes:
+      label: Device context
+      description: If this depends on a capture card capability, name the model and format. Do not include a serial number.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: honesty
+    attributes:
+      label: Scope
+      options:
+        - label: I understand GPU upscaling in MoniView is spatial (MetalFX / Lanczos), not AI super resolution.
+          required: true
