@@ -67,8 +67,9 @@ final class CaptureRecorder {
                 // Fragmented MOV keeps finished segments playable if the process dies mid-recording.
                 writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 1)
                 self.lock.lock()
-                let appliesPictureProcessing = self.picture != nil
+                let pictureSnapshot = self.picture
                 self.lock.unlock()
+                let appliesPictureProcessing = pictureSnapshot != nil
                 var videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,
                     AVVideoWidthKey: width, AVVideoHeightKey: height,
@@ -108,7 +109,7 @@ final class CaptureRecorder {
                 if let audioInput { writer.add(audioInput) }
                 guard writer.startWriting() else { throw writer.error ?? CaptureFailure.message("无法开始录制。") }
                 self.adaptor = adaptor
-                self.mode = appliesPictureProcessing ? .processed(self.picture!) : .source
+                self.mode = appliesPictureProcessing ? .processed(pictureSnapshot!) : .source
                 self.workingURL = working
                 self.destinationURL = destination
                 self.writer = writer; self.videoInput = video; self.audioInput = audioInput

@@ -56,7 +56,7 @@ The brief status line shows the device name, the actual buffer resolution, and t
 
 **画面比例** (Aspect) sets how the image fills the window: **适应画面** (fit) shows the whole image, **填满窗口** (fill) keeps the ratio and crops the overflow, and **拉伸填满** (stretch) fills the window and may distort the ratio.
 
-Shortcuts: `⌘R` record/stop, `⌘M` mute monitoring, `⌘I` show or hide the info card, `⌘,` open settings, `⌃⌘F` or a double-click on the image to toggle native full screen, and `Esc` to close a panel or leave full screen. In full screen, the buttons and cursor hide after three seconds of inactivity and reappear on movement.
+Shortcuts: `⌘R` record/stop, `⌘⇧M` mute monitoring, `⌘I` show or hide the info card, `⌘,` open settings, `⌃⌘F` or a double-click on the image to toggle native full screen, and `Esc` to close a panel or leave full screen. In full screen, the buttons and cursor hide after three seconds of inactivity and reappear on movement.
 
 ## Preview and frame rate
 

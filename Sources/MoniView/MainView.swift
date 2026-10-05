@@ -519,7 +519,7 @@ struct MainView: View {
                     choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
                     .disabled(capture.isRecording)
                 labeledPicker("音频输入", fieldWidth: 195,
-                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0) }),
+                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
                     choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
                     .disabled(capture.isRecording)
 

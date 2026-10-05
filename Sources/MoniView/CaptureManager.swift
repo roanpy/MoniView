@@ -161,17 +161,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
             recorder.setPicture(recordIncludesPicture ? picture : nil)
             // Slider drags fire dozens of times per second; persist once the value settles.
-            picturePersistWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, let data = try? JSONEncoder().encode(self.picture) else { return }
-                UserDefaults.standard.set(data, forKey: "view.picture")
-            }
-            picturePersistWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+            schedulePicturePersistence()
         }
     }
     @Published private(set) var selectedColorPreset: String? = "自然" {
-        didSet { UserDefaults.standard.set(selectedColorPreset ?? "自定义", forKey: "view.colorPreset") }
+        didSet { schedulePicturePersistence() }
     }
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
     @Published var showsStatusBar = true { didSet { UserDefaults.standard.set(showsStatusBar, forKey: "view.statusBar") } }
@@ -216,6 +210,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var displaySleepToken: NSObjectProtocol?
     /// Audio-callback queue only: last time the meter level was published to the UI.
     private var lastLevelPublish = 0.0
+    /// Audio-callback queue only: loudest sample since the last publish.
+    private var audioLevelPeak: Float = 0
     private var statusDismissal: DispatchWorkItem?
     private var observers: [NSObjectProtocol] = []
     // Session configuration state is accessed only on sessionQueue.
@@ -323,6 +319,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         if let id = selectedAudioID, !audios.contains(where: { $0.uniqueID == id }) { selectAudioDevice(id: nil, persist: false) }
         if let id = selectedVideoID, videos.contains(where: { $0.uniqueID == id }) {
             if force { selectVideoDevice(id: id) }
+            restoreSavedAudioIfNeeded(audios: audios)
             return
         }
         // Prefer a USB capture device over Continuity Camera.
@@ -403,7 +400,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
                         self.isSwitchingVideoDevice = false
                         self.isRunning = false
-                        self.selectAudioDevice(id: nil)
+                        self.selectAudioDevice(id: nil, persist: false)
                     }
                 }
             } catch {
@@ -425,6 +422,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
     }
 
+    /// Reconnect the user's saved audio input when it reappears while video stays connected.
+    private func restoreSavedAudioIfNeeded(audios: [AVCaptureDevice]) {
+        guard !isRecording, let saved = UserDefaults.standard.string(forKey: "audio.selection"), saved != "off" else { return }
+        guard selectedAudioID != saved, audios.contains(where: { $0.uniqueID == saved }) else { return }
+        selectAudioDevice(id: saved, persist: false)
+    }
+
     private func autoSelectAudio(for device: AVCaptureDevice, replacePair: Bool) {
         // An explicit user choice wins: "off" stays off, a saved device is reselected when present.
         if let saved = UserDefaults.standard.string(forKey: "audio.selection") {
@@ -436,11 +440,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let audios = Self.devices(.audio)
         let matched = audios.first { $0.localizedName == device.localizedName }
             ?? audios.first { $0.transportType == 0x75736220 && ($0.localizedName.localizedCaseInsensitiveContains(device.localizedName) || device.localizedName.localizedCaseInsensitiveContains($0.localizedName)) }
-        if let matched { selectAudioDevice(id: matched.uniqueID) }
-        else { selectAudioDevice(id: nil); audioStatus = "未找到采集卡音频，请在设置中选择" }
+        if let matched { selectAudioDevice(id: matched.uniqueID, persist: false) }
+        else { selectAudioDevice(id: nil, persist: false); audioStatus = "未找到采集卡音频，请在设置中选择" }
     }
 
-    func selectAudioDevice(id: String?, persist: Bool = true) {
+    /// Only the settings picker persists the choice; internal pairing and cleanup stay implicit.
+    func selectAudioDevice(id: String?, persist: Bool = false) {
         guard !isRecording else { statusMessage = "停止录制后可更换音频。"; return }
         selectedAudioID = id
         if persist { UserDefaults.standard.set(id ?? "off", forKey: "audio.selection") }
@@ -723,13 +728,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             let power = connection.audioChannels.map(\.averagePowerLevel).max() ?? -160
             let level = power <= -80 ? 0 : min(1, pow(10, power / 20))
             frames.setLevel(level)
+            audioLevelPeak = max(audioLevelPeak, level)
             let now = ProcessInfo.processInfo.systemUptime
             if now - lastLevelPublish >= 0.12 {
                 lastLevelPublish = now
+                let peak = audioLevelPeak
+                audioLevelPeak = 0
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     // Instant attack, gentle decay so the meter reads like a real level meter.
-                    self.audioLevel = max(level, self.audioLevel * 0.75)
+                    self.audioLevel = max(peak, self.audioLevel * 0.75)
                 }
             }
             recorder.append(sampleBuffer, video: false)
@@ -785,6 +793,21 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         timer.resume(); statsTimer = timer
     }
+    private func schedulePicturePersistence() {
+        picturePersistWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flushPicturePersistence() }
+        picturePersistWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Persist parameters and the preset name together so a quick quit never splits them.
+    func flushPicturePersistence() {
+        picturePersistWork?.cancel()
+        picturePersistWork = nil
+        if let data = try? JSONEncoder().encode(picture) { UserDefaults.standard.set(data, forKey: "view.picture") }
+        UserDefaults.standard.set(selectedColorPreset ?? "自定义", forKey: "view.colorPreset")
+    }
+
     /// Game and camera monitoring runs for long stretches without keyboard or mouse input;
     /// keep the display awake while a signal is being previewed.
     private func updatePowerAssertions() {

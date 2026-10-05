@@ -35,6 +35,7 @@ struct MoniViewApp: App {
 final class MoniViewAppDelegate: NSObject, NSApplicationDelegate {
     weak var capture: CaptureManager?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        capture?.flushPicturePersistence()
         guard let capture, capture.isRecording else { return .terminateNow }
         capture.finishRecordingBeforeExit {
             if let message = capture.recordingError {
