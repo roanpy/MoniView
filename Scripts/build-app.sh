@@ -9,14 +9,17 @@ APP_BUNDLE="$PROJECT_ROOT/build/MoniView.app"
 #   MONIVIEW_ARCH                      pass an explicit architecture (for example arm64 or x86_64)
 #   MONIVIEW_ENTITLEMENTS=1            sign with Resources/MoniView.entitlements for sandbox verification
 #   MONIVIEW_SIGN_IDENTITY             codesign identity; defaults to ad-hoc "-"
+#   MONIVIEW_DISABLE_AI=1              compile spatial fallback without SDK 26 ML symbols
 MONIVIEW_VERSION="${MONIVIEW_VERSION:-}"
 MONIVIEW_BUILD="${MONIVIEW_BUILD:-}"
 MONIVIEW_ARCH="${MONIVIEW_ARCH:-}"
 MONIVIEW_ENTITLEMENTS="${MONIVIEW_ENTITLEMENTS:-0}"
 MONIVIEW_SIGN_IDENTITY="${MONIVIEW_SIGN_IDENTITY:--}"
+MONIVIEW_DISABLE_AI="${MONIVIEW_DISABLE_AI:-0}"
 
 BUILD_ARGS=(--package-path "$PROJECT_ROOT" -c release --product MoniView)
 if [[ -n "$MONIVIEW_ARCH" ]]; then BUILD_ARGS+=(--arch "$MONIVIEW_ARCH"); fi
+if [[ "$MONIVIEW_DISABLE_AI" == "1" ]]; then BUILD_ARGS+=(-Xswiftc -DMONIVIEW_DISABLE_AI); fi
 
 swift build "${BUILD_ARGS[@]}"
 
