@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased / 未发布
+
+- Align enhancement switches with the panel's right edge; simplify their labels. / 画质面板开关统一右对齐，简化说明。
+- Dismiss a successful recording notification after five seconds. Errors and dropped-sample warnings stay visible. / 录制成功提示五秒后消失，错误和丢样本警告保留。
+
 ## v0.2.0 — English
 
 First public release. This is an ad-hoc signed local build; it is not on the Mac App Store.

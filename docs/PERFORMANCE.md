@@ -31,6 +31,12 @@ Use the capture card's native 1080p60 format when available, fit aspect, low lat
 
 约一分钟的 1080p60 录制经 `ffprobe` 检查为 H.264 60 FPS、AAC 48 kHz 双声道、BT.709 色彩元数据。将饱和度设为零后，解码帧的色度也呈中性，确认色彩设置写入录制。这只验证一张采集卡的录制路径，不代表已验证听感或长时间稳定性。
 
+## Black preview with live frames / 有帧但画面黑屏
+
+A capture card may continue delivering frames and silent audio while its HDMI source is paused or asleep. A live capture FPS counter confirms frame delivery, not valid HDMI content. During a manual check, an unprocessed recording contained uniform dark frames and silent audio; disabling enhancement did not change the preview. Check the source and HDMI connection before treating this as a rendering fault. Dark scenes alone are not a reliable signal-loss detector, so MoniView does not automatically label them as disconnected.
+
+主机暂停或休眠时，采集卡可能继续发送暗色帧和静音。采集 FPS 代表有帧到达，不保证 HDMI 内容有效。本次手动检查的原始录制是均匀暗色帧和静音，关闭增强后预览仍相同；用户随后确认主机可能已暂停。遇到此情况先检查主机和 HDMI 连接。正常的暗场也可能接近黑色，因此程序不凭画面亮度自动判定断线。
+
 ## References
 
 - [Apple TN2445: handling frame drops](https://developer.apple.com/library/archive/technotes/tn2445/_index.html)

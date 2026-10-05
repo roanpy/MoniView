@@ -164,7 +164,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private(set) var recordingError: String?
     @Published private(set) var recordingVideoDrops = 0
     @Published private(set) var recordingAudioDrops = 0
-    @Published private(set) var statusMessage: String?
+    @Published private(set) var statusMessage: String? {
+        didSet { statusDismissal?.cancel(); statusDismissal = nil }
+    }
     @Published private(set) var permissionDenied = false
     @Published private(set) var cameraPermissionPending = false
     @Published private(set) var audioVolume: Float = 0.8
@@ -180,6 +182,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private let audioPreview = AVCaptureAudioPreviewOutput()
     private let recorder = CaptureRecorder()
     private var statsTimer: DispatchSourceTimer?
+    private var statusDismissal: DispatchWorkItem?
     private var observers: [NSObjectProtocol] = []
     // Session configuration state is accessed only on sessionQueue.
     private var videoInput: AVCaptureDeviceInput?
@@ -231,6 +234,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     deinit {
         statsTimer?.cancel()
+        statusDismissal?.cancel()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
@@ -578,6 +582,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     let warning = drops.video + drops.audio > 0 ? L10n.format(" · 录制丢弃视频 %d 帧 / 音频 %d 包", drops.video, drops.audio) : ""
                     self.recordingError = error?.localizedDescription
                     self.statusMessage = error.map { L10n.format("录制失败：%@", $0.localizedDescription) } ?? L10n.format("已保存到 %@%@", url.lastPathComponent, warning)
+                    if error == nil && drops.video == 0 && drops.audio == 0 {
+                        let dismiss = DispatchWorkItem { [weak self] in self?.statusMessage = nil }
+                        self.statusDismissal = dismiss
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: dismiss)
+                    }
                     let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
                 }
             }

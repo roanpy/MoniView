@@ -428,24 +428,10 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 15) {
             panelHeading("画质增强", subtitle: "实时预览处理", icon: "sparkles.tv")
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("低延迟模式", isOn: $capture.picture.lowLatency)
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12, weight: .medium))
+                settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
                 Text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。")
                     .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                Toggle(isOn: Binding(
-                    get: { capture.picture.enhancementEnabled },
-                    set: { capture.picture.enhancementEnabled = $0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("启用画质增强")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("按需调整处理强度")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(hex: 0x98908a))
-                    }
-                }
-                .toggleStyle(.switch)
+                settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
                 labeledPicker("放大方式", selection: $capture.picture.upscaleMethod,
