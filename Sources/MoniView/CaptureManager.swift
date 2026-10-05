@@ -35,8 +35,24 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
     case native = "原始"
     case qhd = "2K"
     case uhd = "4K"
+    case screen = "屏幕"
     var id: String { rawValue }
-    var longEdge: Double? { self == .native ? nil : (self == .qhd ? 2560 : 3840) }
+    /// Fixed long edge for fixed targets; nil for native (no scaling) and screen (resolved per display).
+    var longEdge: Double? {
+        switch self {
+        case .native, .screen: return nil
+        case .qhd: return 2560
+        case .uhd: return 3840
+        }
+    }
+    /// Resolves the processing long edge; the screen target adapts to the display's native pixel count.
+    func resolvedLongEdge(screenLongEdge: Double?, sourceLongEdge: Double) -> Double {
+        switch self {
+        case .native: return sourceLongEdge
+        case .qhd, .uhd: return longEdge ?? sourceLongEdge
+        case .screen: return screenLongEdge ?? sourceLongEdge
+        }
+    }
 }
 
 enum UpscaleMethod: String, CaseIterable, Identifiable, Codable {

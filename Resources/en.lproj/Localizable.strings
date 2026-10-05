@@ -37,10 +37,6 @@
 "低延迟 · 按显示尺寸处理" = "Low latency · process at display size";
 "按完整目标尺寸处理" = "Process at full target size";
 "静音监听 · ⌘M" = "Mute monitoring · ⌘M";
-"GPU 画质增强已关闭" = "GPU enhancement is off";
-"GPU 增强目标 · 原始尺寸" = "Enhancement target · native size";
-"GPU 放大目标 · 2K（2560 px 宽）" = "Scaling target · 2K (2560 px wide)";
-"GPU 放大目标 · 4K（3840 px 宽）" = "Scaling target · 4K (3840 px wide)";
 "实际处理 %@ · 目标上限 %@" = "Processing %@ · target cap %@";
 "原始输入" = "Native input";
 "原始" = "Native";
@@ -57,7 +53,9 @@
 "增强强度" = "Strength";
 "放大方式" = "Scaling method";
 "放大目标" = "Scaling target";
-"MetalFX 在支持的 GPU 上进行空间放大；否则使用 Lanczos。2K 为 2560 × 1440、4K 为 3840 × 2160（16:9）。不改变采集卡输入分辨率。" = "MetalFX performs spatial scaling on supported GPUs; otherwise Lanczos is used. 2K is 2560 × 1440 and 4K is 3840 × 2160 (16:9). The capture input resolution is not changed.";
+"MetalFX 在支持的 GPU 上进行空间放大；否则使用 Lanczos。匹配屏幕按当前显示器的物理像素放大，全屏时与屏幕像素一一对应。不改变采集卡输入分辨率。" = "MetalFX performs spatial scaling on supported GPUs; otherwise Lanczos is used. Match Display scales to the native pixels of the current display for a one-to-one fullscreen pixel mapping. The capture input resolution is not changed.";
+"匹配屏幕" = "Match Display";
+"屏幕" = "Display";
 
 /* Color panel */
 "自定义" = "Custom";
@@ -154,3 +152,4 @@
 "等待摄像头权限" = "Waiting for camera access";
 
 "请在系统权限弹窗中允许访问摄像头。" = "Allow camera access in the system permission dialog.";
+"增强" = "Enhanced";

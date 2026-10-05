@@ -159,12 +159,25 @@ struct MainView: View {
             Text(actualBufferResolution).fixedSize()
             Text("·")
             Text("\(capture.measuredFPS) FPS").fixedSize()
+            if capture.picture.enhancementEnabled {
+                Text("·")
+                Text(enhancementSummary)
+                    .fixedSize()
+                    .foregroundStyle(Color(hex: 0xec8718))
+            }
         }
         .font(.system(size: 11, weight: .medium, design: .monospaced))
         .foregroundStyle(Color(hex: 0xe6ddd4))
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color.black.opacity(isFullscreen ? 0.56 : 0.22), in: Capsule())
+    }
+
+    private var enhancementSummary: String {
+        if let enhancedSize = capture.enhancedSize {
+            return "\(capture.upscaleEngine) \(enhancedSize)"
+        }
+        return L10n.text("增强")
     }
 
     private var previewArea: some View {
@@ -362,12 +375,12 @@ struct MainView: View {
                 Text(capture.pixelFormat)
             }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0xb5aaa0))
             HStack {
-                Text(L10n.text(capture.upscaleEngine) + (capture.picture.upscaleTarget == .native ? "" : " · " + capture.picture.upscaleTarget.rawValue))
+                Text(L10n.text(capture.upscaleEngine) + (capture.picture.upscaleTarget == .native ? "" : " · " + L10n.text(capture.picture.upscaleTarget.rawValue)))
                 Spacer(minLength: 0)
                 Text(String(format: "GPU %.1f ms", capture.gpuMilliseconds))
             }.font(.system(size: 9, design: .monospaced)).foregroundStyle(Color(hex: 0xaaa199))
             if let enhancedSize = capture.enhancedSize {
-                Text(L10n.format("实际处理 %@ · 目标上限 %@", enhancedSize, capture.picture.upscaleTarget.rawValue))
+                Text(L10n.format("实际处理 %@ · 目标上限 %@", enhancedSize, L10n.text(capture.picture.upscaleTarget.rawValue)))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
@@ -407,15 +420,6 @@ struct MainView: View {
         }
     }
 
-    private var enhancementDescription: String {
-        guard capture.picture.enhancementEnabled else { return "GPU 画质增强已关闭" }
-        switch capture.picture.upscaleTarget {
-        case .native: return "GPU 增强目标 · 原始尺寸"
-        case .qhd: return "GPU 放大目标 · 2K（2560 px 宽）"
-        case .uhd: return "GPU 放大目标 · 4K（3840 px 宽）"
-        }
-    }
-
     private var actualBufferResolution: String {
         guard let (buffer, _, _) = capture.frames.latest() else { return "—" }
         return "\(CVPixelBufferGetWidth(buffer)) × \(CVPixelBufferGetHeight(buffer))"
@@ -426,6 +430,7 @@ struct MainView: View {
         case .native: return "原始输入"
         case .qhd: return "2K · 2560 px 宽"
         case .uhd: return "4K · 3840 px 宽"
+        case .screen: return "匹配屏幕"
         }
     }
 
@@ -445,7 +450,7 @@ struct MainView: View {
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
                     .disabled(!capture.picture.enhancementEnabled)
-                Text("MetalFX 在支持的 GPU 上进行空间放大；否则使用 Lanczos。2K 为 2560 × 1440、4K 为 3840 × 2160（16:9）。不改变采集卡输入分辨率。")
+                Text("MetalFX 在支持的 GPU 上进行空间放大；否则使用 Lanczos。匹配屏幕按当前显示器的物理像素放大，全屏时与屏幕像素一一对应。不改变采集卡输入分辨率。")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(hex: 0x98908a))
                     .fixedSize(horizontal: false, vertical: true)

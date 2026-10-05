@@ -143,7 +143,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let displayScale = max(1, screenScale)
         let sourceLongEdge = max(source.width, source.height)
         let visibleLongEdge = sourceLongEdge * displayScale
-        let requestedLongEdge = settings.upscaleTarget.longEdge ?? sourceLongEdge
+        // "Match display" resolves against the native pixel size of the screen showing the window.
+        let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
+        let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
         let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
         let workingScale = settings.enhancementEnabled ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
