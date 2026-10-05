@@ -43,6 +43,10 @@
 "2K · 2560 px 宽" = "2K · 2560 px wide";
 "4K · 3840 px 宽" = "4K · 3840 px wide";
 "原始＋锐化" = "Native + sharpen";
+"采集丢帧" = "Capture drops";
+"2K · 长边 2560 px" = "2K · long edge 2560 px";
+"4K · 长边 3840 px" = "4K · long edge 3840 px";
+"支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。" = "AI upscaling is optional when supported, with spatial fallback. Match Display uses the current display's backing-store size, not a guaranteed one-to-one mapping to physical panel pixels. Capture input resolution is unchanged.";
 
 /* Quality panel */
 "实时预览处理" = "Real-time preview";

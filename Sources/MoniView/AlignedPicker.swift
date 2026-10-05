@@ -28,7 +28,8 @@ struct AlignedPicker<Value: Hashable>: NSViewRepresentable {
             view.removeAllItems()
             view.addItems(withTitles: titles)
         }
-        if let index = choices.firstIndex(where: { $0.value == selection }) { view.selectItem(at: index) }
+        // Do not leave a stale or automatically selected first item when the model has no match.
+        view.selectItem(at: choices.firstIndex(where: { $0.value == selection }) ?? -1)
         view.isEnabled = isEnabled && !choices.isEmpty
         view.setAccessibilityLabel(L10n.text(title))
         context.coordinator.onSelect = { index in

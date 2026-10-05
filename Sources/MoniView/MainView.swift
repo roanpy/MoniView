@@ -175,7 +175,7 @@ struct MainView: View {
 
     private var enhancementSummary: String {
         if let enhancedSize = capture.enhancedSize {
-            return "\(capture.upscaleEngine) \(enhancedSize)"
+            return "\(L10n.text(capture.upscaleEngine)) \(enhancedSize)"
         }
         return L10n.text("增强")
     }
@@ -371,13 +371,13 @@ struct MainView: View {
             HStack(spacing: 17) {
                 informationMetric("采集", value: "\(capture.measuredFPS)")
                 informationMetric("渲染", value: "\(capture.renderedFPS)")
-                informationMetric("丢帧", value: "\(capture.droppedFrames)")
+                informationMetric("采集丢帧", value: "\(capture.droppedFrames)")
                 Spacer(minLength: 0)
             }
             HStack {
                 Text(actualBufferResolution)
                 Spacer(minLength: 0)
-                Text(capture.pixelFormat)
+                Text(actualBufferPixelFormat)
             }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0xb5aaa0))
             HStack {
                 Text(L10n.text(capture.upscaleEngine) + (capture.picture.upscaleTarget == .native ? "" : " · " + L10n.text(capture.picture.upscaleTarget.rawValue)))
@@ -430,11 +430,17 @@ struct MainView: View {
         return "\(CVPixelBufferGetWidth(buffer)) × \(CVPixelBufferGetHeight(buffer))"
     }
 
+    private var actualBufferPixelFormat: String {
+        guard let (buffer, _, _) = capture.frames.latest() else { return "—" }
+        let value = CVPixelBufferGetPixelFormatType(buffer)
+        return String(bytes: [UInt8((value >> 24) & 255), UInt8((value >> 16) & 255), UInt8((value >> 8) & 255), UInt8(value & 255)], encoding: .ascii) ?? "—"
+    }
+
     private func upscaleTargetTitle(_ target: UpscaleTarget) -> String {
         switch target {
         case .native: return "原始输入"
-        case .qhd: return "2K · 2560 px 宽"
-        case .uhd: return "4K · 3840 px 宽"
+        case .qhd: return "2K · 长边 2560 px"
+        case .uhd: return "4K · 长边 3840 px"
         case .screen: return "匹配屏幕"
         }
     }
@@ -455,10 +461,15 @@ struct MainView: View {
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
                     .disabled(!capture.picture.enhancementEnabled)
-                Text("MetalFX 在支持的 GPU 上进行空间放大；否则使用 Lanczos。匹配屏幕按当前显示器的物理像素放大，全屏时与屏幕像素一一对应。不改变采集卡输入分辨率。")
+                Text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(hex: 0x98908a))
                     .fixedSize(horizontal: false, vertical: true)
+                if recordingFreezesColor {
+                    Text("本次录制使用开始时的设置")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                }
             }
             .padding(13)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
@@ -709,7 +720,7 @@ struct MainView: View {
     }
 
     private func fpsButton(_ fps: Int, title: String) -> some View {
-        let selected = capture.selectedFPS == fps
+        let selected = abs(capture.selectedFrameRate - Double(fps)) < 0.01
         let option = capture.formatOptions.first(where: { $0.id == capture.selectedFormatID })
         let isSupported = fps == 0 || (option?.supportsFPS(fps) ?? false)
 
@@ -724,7 +735,7 @@ struct MainView: View {
                 .background(selected ? Color(hex: 0x635850) : .clear, in: Capsule())
         }
         .buttonStyle(.plain)
-        .disabled(!isSupported || capture.isRecording)
+        .disabled(!isSupported || capture.isRecording || capture.formatOptions.isEmpty)
     }
 
     private var audioLevelValue: Double {
