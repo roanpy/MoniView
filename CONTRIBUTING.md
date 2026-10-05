@@ -22,7 +22,7 @@ swift build -c release
 open build/MoniView.app
 ```
 
-GitHub Actions runs a build-only workflow. Hardware behavior cannot be covered there, so describe the device and the format you tested against in the pull request.
+A build-only workflow is available for manual runs and is not triggered on push or pull request. Hardware behavior cannot be covered there, so describe the device and the format you tested against in the pull request.
 
 ## Pull requests
 
@@ -52,7 +52,7 @@ swift build -c release
 open build/MoniView.app
 ```
 
-GitHub Actions 只做构建；硬件行为无法在 CI 覆盖，请在 PR 中说明所用设备和格式。
+仓库提供仅构建的 workflow，只能手动触发，不会在 push 或 PR 时运行；硬件行为无法在 CI 覆盖，请在 PR 中说明所用设备和格式。
 
 ### Pull request
 

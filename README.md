@@ -8,7 +8,6 @@ Live preview, audio monitoring, recording, color tools, and MetalFX spatial scal
 
 **English · [简体中文](README.zh-CN.md)**
 
-[![Build](https://github.com/roanpy/MoniView/actions/workflows/build.yml/badge.svg)](https://github.com/roanpy/MoniView/actions/workflows/build.yml)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?logo=apple)
 ![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-f05138?logo=swift&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-16a34a.svg)](LICENSE)
@@ -107,7 +106,7 @@ Reference material for the capture and rendering approach. No third-party code w
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for build and privacy ground rules, and [CHANGELOG.md](CHANGELOG.md) for release history. GitHub Actions runs a build-only workflow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build and privacy ground rules, and [CHANGELOG.md](CHANGELOG.md) for release history. A build-only workflow is available for manual runs; it is not triggered on push or pull request.
 
 ## License
 

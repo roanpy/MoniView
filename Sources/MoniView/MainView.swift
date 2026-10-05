@@ -504,7 +504,7 @@ struct MainView: View {
                 labeledPicker("分辨率", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedFormatID }, set: { capture.selectFormat(id: $0) }),
                     choices: capture.formatOptions.map { PickerChoice(value: Optional($0.id), title: $0.title) })
-                    .disabled(capture.isRecording)
+                    .disabled(capture.isRecording || capture.formatOptions.isEmpty)
 
                 HStack {
                     Text("帧率")
@@ -523,7 +523,7 @@ struct MainView: View {
                 labeledPicker("帧率档位", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
                     choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
-                    .disabled(capture.isRecording)
+                    .disabled(capture.isRecording || capture.formatOptions.isEmpty)
                 labeledPicker("画面比例", fieldWidth: 195, selection: $capture.aspectMode,
                     choices: AspectMode.allCases.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                 Text(L10n.text(capture.aspectMode == .stretch ? "铺满窗口，画面比例可能变形。" : (capture.aspectMode == .fill ? "保持比例，裁切超出窗口的部分。" : "保持比例，完整显示画面。")))

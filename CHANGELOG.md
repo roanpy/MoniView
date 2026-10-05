@@ -5,6 +5,38 @@
 - Align enhancement switches with the panel's right edge; simplify their labels. / 画质面板开关统一右对齐，简化说明。
 - Dismiss a successful recording notification after five seconds. Errors and dropped-sample warnings stay visible. / 录制成功提示五秒后消失，错误和丢样本警告保留。
 
+### Fixed
+
+- Redraw is no longer skipped when a settings change, resize, or aspect change arrives while the GPU is still presenting the previous frame; a failed command buffer also requests a redraw instead of freezing on the old image.
+- The preview redraws once the window becomes visible again or is un-minimized, even if no new frame arrives.
+- The Metal drawable now uses the same color space as the renderer, avoiding a color shift on wide-gamut or color-managed displays.
+- A 2K/4K target is now applied to the source's long edge, so portrait signals are no longer over-scaled and 16:9 behavior is unchanged.
+- Changing capture devices clears the previous device's format list immediately, so a stale format index can no longer be applied to the new device.
+- A failed device switch no longer leaves the device name and resolution showing the previous device; the UI now matches the session state.
+- Disconnecting the last capture device also clears the pixel format and frame-rate state.
+- An audio-permission callback, or an audio device change, no longer reconfigures the capture session during a recording; the change is applied after the recording finishes.
+- Granting camera access in System Settings now clears the denied state when the app becomes active, without a relaunch.
+
+### Changed
+
+- The build workflow is manual-only and no longer runs on push or pull request.
+
+### 修复
+
+- GPU 仍在呈现上一帧时，设置、尺寸或画面比例变化不再丢失重绘；命令缓冲失败时也会请求重绘，不会停在旧画面。
+- 窗口重新可见或取消最小化后会补一次重绘，即使没有新帧到达。
+- Metal drawable 与渲染使用相同色彩空间，避免宽色域或色彩管理显示器上的偏色。
+- 2K/4K 目标改为按源画面长边计算，竖屏信号不再被过度放大，16:9 行为不变。
+- 切换采集设备时立即清空上一台设备的格式列表，旧格式索引不会再被应用到新设备。
+- 切换设备失败后，界面不再残留上一台设备的名称和分辨率，状态与 session 保持一致。
+- 断开最后一个采集设备时，一并重置像素格式与帧率状态。
+- 音频权限回调或音频设备切换不再在录制期间改动采集 session，改为录制结束后应用。
+- 在系统设置中授予摄像头权限后，应用恢复活跃时即清除拒绝状态，无需重启。
+
+### 变更
+
+- 构建 workflow 改为仅手动触发，不再在 push 或 PR 时运行。
+
 ## v0.2.0 — English
 
 First public release. This is an ad-hoc signed local build; it is not on the Mac App Store.

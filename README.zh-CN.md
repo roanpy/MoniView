@@ -8,7 +8,6 @@
 
 **[English](README.md) · 简体中文**
 
-[![Build](https://github.com/roanpy/MoniView/actions/workflows/build.yml/badge.svg)](https://github.com/roanpy/MoniView/actions/workflows/build.yml)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?logo=apple)
 ![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-f05138?logo=swift&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-16a34a.svg)](LICENSE)
@@ -107,7 +106,7 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 
 ## 参与贡献
 
-构建与隐私约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。GitHub Actions 只做构建。
+构建与隐私约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。仓库提供一个仅构建的 workflow，只能手动触发，不会在 push 或 PR 时运行。
 
 ## 许可证
 

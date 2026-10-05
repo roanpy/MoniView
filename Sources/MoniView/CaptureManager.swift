@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import AppKit
 import Combine
 import CoreImage
 import Foundation
@@ -195,6 +196,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var recordingFinished: (() -> Void)?
     private var discoveryRetryCount = 0
     private var discoveryRetryScheduled = false
+    private var isSwitchingVideoDevice = false
+    private var pendingAudioDeviceID: String?
 
     override init() {
         super.init()
@@ -228,6 +231,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if self.isRecording { self.stopRecording() }
             self.statusMessage = (note.userInfo?[AVCaptureSessionErrorKey] as? Error)?.localizedDescription ?? "采集发生错误，请重新连接设备。"
         })
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            // Re-read authorization so granting access in System Settings takes effect without a relaunch.
+            self?.refreshDevices(force: false)
+        })
         startStatsTimer()
         requestInitialPermission()
     }
@@ -243,6 +250,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func refreshDevices(force: Bool = true) {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            permissionDenied = false
+        case .notDetermined:
+            cameraPermissionPending = true
+            return
+        default:
+            permissionDenied = true
+            return
+        }
         let videos = Self.devices(.video)
         let audios = Self.devices(.audio)
         if !videos.isEmpty { discoveryRetryCount = 0 }
@@ -281,6 +298,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         guard !isRecording else { statusMessage = "停止录制后可更换设备。"; return }
         let previouslyPaired = selectedAudioID == nil || audioOptions.first(where: { $0.id == selectedAudioID })?.name == deviceName
         selectedVideoID = id
+        // Invalidate the previous device's format list immediately; its indices are not valid for the new device.
+        formatOptions = []
+        selectedFormatID = nil
+        frameRateOptions = [0]
+        selectedFrameRate = 0
+        selectedFPS = 0
+        isSwitchingVideoDevice = true
         if let id { UserDefaults.standard.set(id, forKey: "device.lastVideo") }
         frames.clear()
         let device = Self.devices(.video).first { $0.uniqueID == id }
@@ -321,6 +345,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         self.selectedFPS = Int(desiredFPS.rounded())
                         self.selectedFrameRate = desiredFPS
                         self.frameRateOptions = Self.frameRates(for: device)
+                        self.isSwitchingVideoDevice = false
                         self.statusMessage = nil
                         self.autoSelectAudio(for: device, replacePair: previouslyPaired)
                     }
@@ -328,14 +353,25 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.session.commitConfiguration()
                     self.session.stopRunning()
                     DispatchQueue.main.async {
-                        self.deviceName = "未连接"; self.resolution = "—"; self.formatOptions = []; self.selectedFormatID = nil
+                        self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
+                        self.formatOptions = []; self.selectedFormatID = nil
+                        self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
+                        self.isSwitchingVideoDevice = false
                         self.isRunning = false
                         self.selectAudioDevice(id: nil)
                     }
                 }
             } catch {
                 self.session.commitConfiguration()
-                DispatchQueue.main.async { self.statusMessage = L10n.format("连接失败：%@", error.localizedDescription) }
+                // Keep the UI consistent with a session that no longer has a usable video input.
+                DispatchQueue.main.async {
+                    self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
+                    self.formatOptions = []; self.selectedFormatID = nil
+                    self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
+                    self.isSwitchingVideoDevice = false
+                    self.isRunning = false
+                    self.statusMessage = L10n.format("连接失败：%@", error.localizedDescription)
+                }
             }
         }
     }
@@ -360,7 +396,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self, self.selectedAudioID == id else { return }
-                    if granted { self.configureAudioInput(id: id) }
+                    // Never reconfigure the session while a recording is in progress.
+                    if granted { if self.isRecording { self.pendingAudioDeviceID = id } else { self.configureAudioInput(id: id) } }
                     else { self.audioStatus = "需要麦克风权限"; self.statusMessage = "请在系统设置 › 隐私与安全性 › 麦克风中允许 MoniView。" }
                 }
             }
@@ -371,6 +408,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     private func configureAudioInput(id: String?) {
+        guard !isRecording else { pendingAudioDeviceID = id; return }
         let device = Self.devices(.audio).first { $0.uniqueID == id }
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -586,6 +624,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         let dismiss = DispatchWorkItem { [weak self] in self?.statusMessage = nil }
                         self.statusDismissal = dismiss
                         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: dismiss)
+                    }
+                    // Apply an audio device change that was deferred to avoid reconfiguring a live recording.
+                    if let pending = self.pendingAudioDeviceID {
+                        self.pendingAudioDeviceID = nil
+                        self.selectedAudioID = pending
+                        self.configureAudioInput(id: pending)
                     }
                     let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
                 }

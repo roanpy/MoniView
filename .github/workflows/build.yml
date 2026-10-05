@@ -1,8 +1,8 @@
 name: Build
 
 on:
-  push:
-  pull_request:
+  # Manual only: this repository does not run hosted builds on push or pull request.
+  workflow_dispatch:
 
 jobs:
   build:

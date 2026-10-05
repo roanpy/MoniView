@@ -28,6 +28,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private let inFlight = DispatchSemaphore(value: 1)
     private let drawLock = NSLock()
     private var drawScheduled = false
+    private var pendingRedraw = false
     private var lastSequence: UInt64 = 0
     private var lastSettings: PictureSettings?
     private var lastSize = CGSize.zero
@@ -50,11 +51,29 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         if let metalLayer = layer as? CAMetalLayer {
             metalLayer.maximumDrawableCount = 3
             metalLayer.presentsWithTransaction = false
+            // Match the color space used for rendering so wide-gamut displays do not shift colors.
+            metalLayer.colorspace = colorSpace
         }
         delegate = self
         frames.setFrameHandler { [weak self] in self?.requestRender() }
     }
     required init(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Redraw once the window becomes visible again, even when no new frame arrives.
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: nil)
+        guard let window else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didDeminiaturizeNotification, object: window)
+    }
+
+    /// Redraw when the window becomes visible again, even if no new frame has arrived.
+    @objc private func windowBecameVisible() { requestRender() }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { lastSize = .zero; requestRender() }
 
     func requestRender() {
@@ -70,13 +89,18 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        guard let window, window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible), let ciContext, let commands,
+        guard let ciContext, let commands else { return }
+        guard let window, window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
               let initial = frames.latest() else { return }
         var (buffer, sequence, receivedAt) = initial
         let size = drawableSize
         guard size.width > 0, size.height > 0 else { return }
         guard sequence != lastSequence || settings != lastSettings || size != lastSize || aspectMode != lastAspect else { return }
-        guard inFlight.wait(timeout: .now()) == .success else { return }
+        // The GPU is still busy: remember that this state change still needs a draw.
+        guard inFlight.wait(timeout: .now()) == .success else {
+            drawLock.lock(); pendingRedraw = true; drawLock.unlock()
+            return
+        }
         guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else { inFlight.signal(); return }
 
         // A drawable may have waited for presentation. Always take the newest frame afterwards.
@@ -87,10 +111,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         image = VideoImageProcessor.color(image, settings: settings)
         let source = image.extent
         let screenScale = aspectMode == .fit ? min(size.width / source.width, size.height / source.height) : max(size.width / source.width, size.height / source.height)
-        let visibleWidth = source.width * max(1, screenScale)
-        let requestedWidth = settings.upscaleTarget.longEdge ?? visibleWidth
-        let targetWidth = settings.lowLatency ? min(requestedWidth, visibleWidth) : requestedWidth
-        let workingScale = settings.enhancementEnabled ? max(1, targetWidth / source.width) : 1
+        // Long-edge targets follow the source's own long edge, so portrait signals are not over-scaled.
+        let displayScale = max(1, screenScale)
+        let sourceLongEdge = max(source.width, source.height)
+        let visibleLongEdge = sourceLongEdge * displayScale
+        let requestedLongEdge = settings.upscaleTarget.longEdge ?? sourceLongEdge
+        let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
+        let workingScale = settings.enhancementEnabled ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
         var usedMetalFX = false
@@ -124,7 +151,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         command.addCompletedHandler { [weak self] completed in
             if completed.status == .completed { frameStore.markRendered(receivedAt: receivedAt, gpuMS: max(0, completed.gpuEndTime - completed.gpuStartTime) * 1000) }
             semaphore.signal()
-            if frameStore.latest()?.1 != sequence { self?.requestRender() }
+            guard let self else { return }
+            self.drawLock.lock()
+            let pending = self.pendingRedraw
+            self.pendingRedraw = false
+            self.drawLock.unlock()
+            // A skipped or failed draw must not strand a state change that arrived while the GPU was busy.
+            if pending || completed.status != .completed || frameStore.latest()?.1 != sequence { self.requestRender() }
         }
         command.commit()
         lastSequence = sequence; lastSettings = settings; lastSize = size; lastAspect = aspectMode
