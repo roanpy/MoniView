@@ -25,7 +25,7 @@ MoniView turns a USB (UVC) capture card into a low-latency monitor window for an
 - Monitors the capture card's audio input in real time with a level meter.
 - Records H.264 video with AAC audio to a `.mov` file.
 - Adjusts color and sharpening: brightness, contrast, saturation, vibrance, and highlight recovery.
-- Scales the preview on the GPU with MetalFX, with a Lanczos compatibility fallback.
+- Scales the preview on the GPU with MetalFX, with a Lanczos compatibility fallback. On macOS 26+, Apple's low-latency ML super-resolution scaler is available as an optional method.
 - Writes a diagnostics snapshot on the local machine only.
 
 ## Screenshots
@@ -68,10 +68,11 @@ When the window is minimized or fully occluded by another window, preview render
 
 See [performance notes](docs/PERFORMANCE.md) for the pipeline, observed device samples, and measurement limits.
 
-## GPU spatial scaling is not AI
+## Honest upscaling
 
-MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. This version has no AI model and no frame interpolation.
+MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. This version has no frame interpolation.
 
+- **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX while the model loads or when unsupported.
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
 - **Lanczos** is the compatibility path, used automatically when the device does not support MetalFX or the requested scale exceeds its current limits.
 - Targets are original, 2K (long edge 2560), and 4K (long edge 3840). Those sizes are stated at 16:9; other aspect ratios are measured by their long edge and keep their own ratio.

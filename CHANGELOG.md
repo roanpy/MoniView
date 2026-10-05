@@ -2,6 +2,7 @@
 
 ## Unreleased / 未发布
 
+- Optional AI super-resolution upscaling via Apple's low-latency ML scaler on macOS 26+, with MetalFX fallback while the model loads. / macOS 26+ 可选 AI 超分放大（Apple 低延迟机器学习超分），模型加载期间自动回退 MetalFX。
 - Align enhancement switches with the panel's right edge; simplify their labels. / 画质面板开关统一右对齐，简化说明。
 - Dismiss a successful recording notification after five seconds. Errors and dropped-sample warnings stay visible. / 录制成功提示五秒后消失，错误和丢样本警告保留。
 
