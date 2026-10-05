@@ -1,155 +1,183 @@
 import CoreImage
 import CoreVideo
+import Foundation
 import Metal
 import VideoToolbox
 
-/// Apple's low-latency ML super-resolution (macOS 26+). Processing is inserted into the app's
-/// existing Metal command buffer, so it stays inside the preview's single-in-flight pipeline.
-/// The session is prepared on a background queue because ML model loading can exceed a frame time.
-
-/// Ungated support probe so UI code on older macOS versions can hide the AI option.
+/// Runtime availability does not make new SDK symbols visible to older compilers.
+/// Apple Swift 6.2 ships with SDK 26; custom toolchains can disable AI explicitly.
 enum AIUpscalerSupport {
-    static var isSupported: Bool {
+    static let isSupported: Bool = {
+        #if compiler(>=6.2) && !MONIVIEW_DISABLE_AI
         if #available(macOS 26.0, *) { return VTLowLatencySuperResolutionScalerConfiguration.isSupported }
+        #endif
         return false
-    }
+    }()
 }
 
+#if compiler(>=6.2) && !MONIVIEW_DISABLE_AI
 @available(macOS 26.0, *)
 final class AIUpscaler {
-    private let processor = VTFrameProcessor()
-    private var textureCache: CVMetalTextureCache?
+    private struct Key: Equatable {
+        let width: Int
+        let height: Int
+        let factor: Float
+    }
+
+    /// A session is prepared once, then used only by the main-thread draw path.
+    /// Each submitted command retains it until completion, even after a setting changes.
+    private final class Session {
+        let key: Key
+        let processor: VTFrameProcessor
+        let sourcePool: CVPixelBufferPool
+        let destinationPool: CVPixelBufferPool
+        let textureCache: CVMetalTextureCache
+        private let cleanupQueue: DispatchQueue
+
+        init(key: Key, device: MTLDevice, cleanupQueue: DispatchQueue) throws {
+            let config = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: key.width, frameHeight: key.height, scaleFactor: key.factor)
+            let extra: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferCGImageCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+            let source = try Self.makePool(config.sourcePixelBufferAttributes, extra: extra)
+            let destination = try Self.makePool(config.destinationPixelBufferAttributes, extra: extra)
+            var cache: CVMetalTextureCache?
+            guard CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let cache else { throw SetupFailure.unavailable }
+            let processor = VTFrameProcessor()
+            do { try processor.startSession(configuration: config) }
+            catch { processor.endSession(); throw error }
+            self.key = key
+            self.processor = processor
+            sourcePool = source
+            destinationPool = destination
+            textureCache = cache
+            self.cleanupQueue = cleanupQueue
+        }
+
+        private static func makePool(_ base: [String: Any], extra: [String: Any]) throws -> CVPixelBufferPool {
+            var resolved: CFDictionary?
+            guard CVPixelBufferCreateResolvedAttributesDictionary(nil, [base as CFDictionary, extra as CFDictionary] as CFArray, &resolved) == kCVReturnSuccess,
+                  let resolved else { throw SetupFailure.unavailable }
+            var pool: CVPixelBufferPool?
+            guard CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, resolved, &pool) == kCVReturnSuccess,
+                  let pool else { throw SetupFailure.unavailable }
+            return pool
+        }
+
+        deinit {
+            // This cannot run until the last command retaining this session has completed.
+            // Keep potentially expensive teardown away from capture, draw and UI queues.
+            let processor = processor
+            cleanupQueue.async { processor.endSession() }
+        }
+    }
+
+    private enum SetupFailure: Error { case unavailable }
+    private let device: MTLDevice
     private let prepareQueue = DispatchQueue(label: "dev.moniview.ai-upscale", qos: .userInitiated)
-    private var sessionKey: String?
-    private var sourcePool: CVPixelBufferPool?
-    private var destinationPool: CVPixelBufferPool?
-    private var destinationSize = CGSize.zero
-    /// Buffers handed to the command buffer are released only after the GPU finishes with them.
-    private var inFlight: [AnyObject] = []
-    private let lock = NSLock()
-    private(set) var isReady = false
-    private var lastPrepareAttempt = Date.distantPast
-
-    init(device: MTLDevice) {
-        var cache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
-        textureCache = cache
+    // Everything below is main-thread only, including publication of prepared sessions.
+    private var requestedKey: Key?
+    private var session: Session?
+    private var preparing = false
+    private var generation: UInt64 = 0
+    private var failedKey: Key?
+    private var retryAfter = 0.0
+    var isReady: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return session != nil && session?.key == requestedKey
     }
 
-    /// Smallest supported scale factor that covers the requested scale, so the ML pass works at the
-    /// lightest useful size; the final CI pass then lands on the exact drawable size.
+    init(device: MTLDevice) { self.device = device }
+
+    /// Never exceed the caller's processing-size cap just to reach a supported AI factor.
+    /// MetalFX/Lanczos remain available when no supported factor fits the requested budget.
     static func scaleFactor(for sourceWidth: Int, sourceHeight: Int, requested: Double) -> Float? {
-        guard AIUpscalerSupport.isSupported else { return nil }
-        let factors = VTLowLatencySuperResolutionScalerConfiguration.__supportedScaleFactors(forFrameWidth: sourceWidth, frameHeight: sourceHeight)
+        guard AIUpscalerSupport.isSupported, sourceWidth > 0, sourceHeight > 0, requested.isFinite else { return nil }
+        return VTLowLatencySuperResolutionScalerConfiguration.__supportedScaleFactors(forFrameWidth: sourceWidth, frameHeight: sourceHeight)
             .map { $0.floatValue }
-            .sorted()
-        guard !factors.isEmpty else { return nil }
-        return factors.first { Double($0) >= requested - 0.01 } ?? factors.last
+            .filter { $0.isFinite && $0 > 1 && Double($0) <= requested + 0.000001 }
+            .max()
     }
 
-    /// Warm up on a background queue; the caller falls back to MetalFX/Lanczos until ready.
     func prepare(sourceWidth: Int, sourceHeight: Int, factor: Float, colorSpace: CGColorSpace) {
-        let key = "\(sourceWidth)x\(sourceHeight)@\(factor)"
-        lock.lock()
-        let unchanged = sessionKey == key && isReady
-        // A failed or in-flight preparation is retried at most every couple of seconds.
-        let throttled = !unchanged && Date().timeIntervalSince(lastPrepareAttempt) < 1.5
-        if !unchanged { lastPrepareAttempt = Date() }
-        lock.unlock()
-        if unchanged || throttled { return }
-        prepareQueue.async { [weak self] in
-            guard let self else { return }
-            let config = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: sourceWidth, frameHeight: sourceHeight, scaleFactor: factor)
-            let sourceAttrs = self.resolve(config.sourcePixelBufferAttributes, extra: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferCGImageCompatibilityKey as String: true,
-            ])
-            let destinationAttrs = self.resolve(config.destinationPixelBufferAttributes, extra: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferCGImageCompatibilityKey as String: true,
-            ])
-            var sourcePool: CVPixelBufferPool?
-            var destinationPool: CVPixelBufferPool?
-            CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, sourceAttrs as CFDictionary, &sourcePool)
-            CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, destinationAttrs as CFDictionary, &destinationPool)
-            self.processor.endSession()
-            do {
-                try self.processor.startSession(configuration: config)
-                guard let sourcePool, let destinationPool else { throw CaptureFailure.message("AI 超分初始化失败。") }
-                self.lock.lock()
-                self.sourcePool = sourcePool
-                self.destinationPool = destinationPool
-                self.destinationSize = CGSize(width: Int(Double(sourceWidth) * Double(factor)), height: Int(Double(sourceHeight) * Double(factor)))
-                self.sessionKey = key
-                self.isReady = true
-                self.lock.unlock()
-            } catch {
-                self.lock.lock()
-                self.isReady = false
-                self.sessionKey = nil
-                self.lock.unlock()
+        dispatchPrecondition(condition: .onQueue(.main))
+        let key = Key(width: sourceWidth, height: sourceHeight, factor: factor)
+        if requestedKey != key {
+            requestedKey = key
+            generation &+= 1
+            session = nil // Never feed a new size into the previous session's pools.
+            failedKey = nil
+        }
+        guard session == nil, !preparing else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard failedKey != key || now >= retryAfter else { return }
+        preparing = true
+        let expectedGeneration = generation
+        let device = device
+        let queue = prepareQueue
+        queue.async { [weak self] in
+            let prepared = try? Session(key: key, device: device, cleanupQueue: queue)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.preparing = false
+                guard self.generation == expectedGeneration, self.requestedKey == key else { return }
+                self.session = prepared
+                if prepared == nil {
+                    self.failedKey = key
+                    // Only an actual failed attempt advances the deadline, not each arriving frame.
+                    self.retryAfter = ProcessInfo.processInfo.systemUptime + 1.5
+                }
             }
         }
     }
 
     func stop() {
-        lock.lock()
-        let active = isReady || sessionKey != nil
-        lock.unlock()
-        guard active else { return }
-        prepareQueue.async { [weak self] in
-            self?.processor.endSession()
-            if let cache = self?.textureCache { CVMetalTextureCacheFlush(cache, 0) }
-            self?.lock.lock()
-            self?.isReady = false
-            self?.sessionKey = nil
-            self?.sourcePool = nil
-            self?.destinationPool = nil
-            self?.lock.unlock()
-        }
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard requestedKey != nil || session != nil else { return }
+        generation &+= 1 // Also invalidates a warmup that has not published a session yet.
+        requestedKey = nil
+        session = nil
+        failedKey = nil
+        // Leave preparing set until the outstanding attempt returns; at most one warmup exists.
     }
 
-    /// Renders the color-processed image into a source buffer, upscales it with the ML processor
-    /// inside the given command buffer, and returns the result as a CIImage for the remaining passes.
     func upscale(_ image: CIImage, context: CIContext, command: MTLCommandBuffer, colorSpace: CGColorSpace) -> CIImage? {
-        lock.lock()
-        let ready = isReady, sourcePool = self.sourcePool, destinationPool = self.destinationPool
-        lock.unlock()
-        guard ready, let sourcePool, let destinationPool else { return nil }
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let session, session.key == requestedKey,
+              Int(image.extent.width.rounded()) == session.key.width,
+              Int(image.extent.height.rounded()) == session.key.height else { return nil }
         var sourceBuffer: CVPixelBuffer?
         var destinationBuffer: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBuffer(nil, sourcePool, &sourceBuffer) == kCVReturnSuccess, let sourceBuffer,
-              CVPixelBufferPoolCreatePixelBuffer(nil, destinationPool, &destinationBuffer) == kCVReturnSuccess, let destinationBuffer else { return nil }
-        let extent = image.extent
-        // Render through a Metal texture view of the pixel buffer so the work stays in the
-        // caller's command buffer alongside the ML pass.
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, session.sourcePool, &sourceBuffer) == kCVReturnSuccess, let sourceBuffer,
+              CVPixelBufferPoolCreatePixelBuffer(nil, session.destinationPool, &destinationBuffer) == kCVReturnSuccess, let destinationBuffer else { return nil }
         var cvTexture: CVMetalTexture?
-        guard let textureCache,
-              CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, sourceBuffer, nil, .bgra8Unorm, CVPixelBufferGetWidth(sourceBuffer), CVPixelBufferGetHeight(sourceBuffer), 0, &cvTexture) == kCVReturnSuccess,
-              let cvTexture, let sourceTexture = CVMetalTextureGetTexture(cvTexture) else { return nil }
-        context.render(image, to: sourceTexture, commandBuffer: command, bounds: extent, colorSpace: colorSpace)
-        guard let sourceFrame = VTFrameProcessorFrame(buffer: sourceBuffer, presentationTimeStamp: .zero),
+        guard CVMetalTextureCacheCreateTextureFromImage(nil, session.textureCache, sourceBuffer, nil, .bgra8Unorm, CVPixelBufferGetWidth(sourceBuffer), CVPixelBufferGetHeight(sourceBuffer), 0, &cvTexture) == kCVReturnSuccess,
+              let cvTexture, let sourceTexture = CVMetalTextureGetTexture(cvTexture),
+              let sourceFrame = VTFrameProcessorFrame(buffer: sourceBuffer, presentationTimeStamp: .zero),
               let destinationFrame = VTFrameProcessorFrame(buffer: destinationBuffer, presentationTimeStamp: .zero) else { return nil }
         let parameters = VTLowLatencySuperResolutionScalerParameters(sourceFrame: sourceFrame, destinationFrame: destinationFrame)
-        processor.process(with: command, parameters: parameters)
-        lock.lock()
-        inFlight.append(parameters)
-        inFlight.append(sourceBuffer)
-        inFlight.append(destinationBuffer)
-        lock.unlock()
-        command.addCompletedHandler { [weak self] _ in
-            self?.lock.lock()
-            if let self { self.inFlight.removeAll { $0 === parameters || $0 === sourceBuffer || $0 === destinationBuffer } }
-            self?.lock.unlock()
+        // Retain the CVMetalTexture wrapper as well as its pixel buffers and processor.
+        // Install this before encoding, so all submitted work has a complete lifetime owner.
+        command.addCompletedHandler { _ in
+            withExtendedLifetime((session, parameters, sourceBuffer, destinationBuffer, cvTexture)) {}
         }
-        return CIImage(cvPixelBuffer: destinationBuffer)
-    }
-
-    private func resolve(_ base: [String: Any], extra: [String: Any]) -> [String: Any] {
-        var resolved: CFDictionary?
-        CVPixelBufferCreateResolvedAttributesDictionary(nil, [base as CFDictionary, extra as CFDictionary] as CFArray, &resolved)
-        return (resolved as? [String: Any]) ?? extra
+        context.render(image, to: sourceTexture, commandBuffer: command, bounds: image.extent, colorSpace: colorSpace)
+        session.processor.process(with: command, parameters: parameters)
+        return CIImage(cvPixelBuffer: destinationBuffer, options: [.colorSpace: colorSpace])
     }
 }
+#else
+/// Older Apple SDK/toolchain builds keep the existing renderer interface and use spatial fallback.
+@available(macOS 26.0, *)
+final class AIUpscaler {
+    init(device: MTLDevice) {}
+    var isReady: Bool { false }
+    static func scaleFactor(for sourceWidth: Int, sourceHeight: Int, requested: Double) -> Float? { nil }
+    func prepare(sourceWidth: Int, sourceHeight: Int, factor: Float, colorSpace: CGColorSpace) {}
+    func stop() {}
+    func upscale(_ image: CIImage, context: CIContext, command: MTLCommandBuffer, colorSpace: CGColorSpace) -> CIImage? { nil }
+}
+#endif
