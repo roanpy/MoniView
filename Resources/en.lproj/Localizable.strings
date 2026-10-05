@@ -159,3 +159,4 @@
 "本次录制使用开始时的设置" = "This recording keeps the settings from when it started";
 "录制画面处理不可用。" = "Recording image processing is unavailable.";
 "录制画面缓冲池不可用。" = "Recording pixel buffer pool is unavailable.";
+"AI 超分" = "AI Upscale";

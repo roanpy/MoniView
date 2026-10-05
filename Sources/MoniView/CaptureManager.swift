@@ -58,6 +58,7 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
 enum UpscaleMethod: String, CaseIterable, Identifiable, Codable {
     case metalFX = "MetalFX"
     case lanczos = "Lanczos"
+    case ai = "AI 超分"
     var id: String { rawValue }
 }
 

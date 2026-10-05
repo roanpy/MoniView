@@ -22,6 +22,7 @@ struct PreviewLayerView: NSViewRepresentable {
         view.settings = capture.picture
         view.aspectMode = capture.aspectMode
         (view.layer as? CAMetalLayer)?.displaySyncEnabled = !capture.picture.lowLatency
+        if capture.picture.upscaleMethod != .ai { view.stopAIUpscaler() }
         view.requestRender()
     }
 }
@@ -34,6 +35,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private let ciContext: CIContext?
     private let commands: MTLCommandQueue?
     private let upscaler: MetalUpscaler?
+    /// Stored as AnyObject so the class itself can stay below the macOS 26 deployment gate.
+    private var _aiUpscaler: AnyObject?
+    @available(macOS 26.0, *) private var aiUpscaler: AIUpscaler? { _aiUpscaler as? AIUpscaler }
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let inFlight = DispatchSemaphore(value: 1)
     private let drawLock = NSLock()
@@ -48,6 +52,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let gpu = MTLCreateSystemDefaultDevice()
         commands = gpu?.makeCommandQueue()
         upscaler = gpu.flatMap { MetalUpscaler(device: $0) }
+        if AIUpscalerSupport.isSupported, #available(macOS 26.0, *), let gpu { _aiUpscaler = AIUpscaler(device: gpu) }
         ciContext = gpu.map { CIContext(mtlDevice: $0, options: [.cacheIntermediates: false, .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]) }
         super.init(frame: .zero, device: gpu)
         colorPixelFormat = .bgra8Unorm
@@ -84,6 +89,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     @objc private func windowBecameVisible() {
         forceDraw = true
         requestRender()
+    }
+
+    func stopAIUpscaler() {
+        if #available(macOS 26.0, *) { aiUpscaler?.stop() }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -151,17 +160,31 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
         var usedMetalFX = false
-        if settings.enhancementEnabled, workingScale > 1.01 {
-            if settings.upscaleMethod == .metalFX, let scaled = upscaler?.upscale(image, width: workingWidth, height: workingHeight, context: ciContext, command: command, colorSpace: colorSpace) {
+        var usedAI = false
+        if settings.enhancementEnabled, workingScale > 1.01, settings.upscaleMethod == .ai {
+            let sourceWidth = Int(source.width.rounded())
+            let sourceHeight = Int(source.height.rounded())
+            if #available(macOS 26.0, *), let ai = aiUpscaler,
+               let factor = AIUpscaler.scaleFactor(for: sourceWidth, sourceHeight: sourceHeight, requested: workingScale) {
+                // Session warmup happens off the draw path; frames fall back until the model is ready.
+                ai.prepare(sourceWidth: sourceWidth, sourceHeight: sourceHeight, factor: factor, colorSpace: colorSpace)
+                if ai.isReady, let scaled = ai.upscale(image, context: ciContext, command: command, colorSpace: colorSpace) {
+                    image = scaled
+                    usedAI = true
+                }
+            }
+        }
+        if settings.enhancementEnabled, workingScale > 1.01, !usedAI {
+            if settings.upscaleMethod != .lanczos, let scaled = upscaler?.upscale(image, width: workingWidth, height: workingHeight, context: ciContext, command: command, colorSpace: colorSpace) {
                 image = scaled; usedMetalFX = true
             } else {
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: workingScale, kCIInputAspectRatioKey: 1.0])
             }
         }
-        frames.setEngine(usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : "原始＋锐化"))
+        frames.setEngine(usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : "原始＋锐化")))
         frames.setEnhancedSize(workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil)
-        // Native-size and MetalFX previews match the recording; Lanczos scaling compensates more.
-        let enhancementSharpening = usedMetalFX || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
+        // Native-size, MetalFX and AI previews match the recording; Lanczos scaling compensates more.
+        let enhancementSharpening = usedMetalFX || usedAI || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent

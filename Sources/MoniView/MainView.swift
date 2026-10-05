@@ -450,7 +450,7 @@ struct MainView: View {
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
                 labeledPicker("放大方式", selection: $capture.picture.upscaleMethod,
-                    choices: UpscaleMethod.allCases.map { PickerChoice(value: $0, title: $0.rawValue) })
+                    choices: UpscaleMethod.allCases.filter { $0 != .ai || AIUpscalerSupport.isSupported }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                     .disabled(!capture.picture.enhancementEnabled)
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
