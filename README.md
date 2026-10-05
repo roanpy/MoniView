@@ -56,7 +56,13 @@ The brief status line shows the device name, the actual buffer resolution, and t
 
 **画面比例** (Aspect) sets how the image fills the window: **适应画面** (fit) shows the whole image, **填满窗口** (fill) keeps the ratio and crops the overflow, and **拉伸填满** (stretch) fills the window and may distort the ratio.
 
-Shortcuts: `⌘R` record/stop, `⌘⇧M` mute monitoring, `⌘I` show or hide the info card, `⌘,` open settings, `⌃⌘F` or a double-click on the image to toggle native full screen, and `Esc` to close a panel or leave full screen. In full screen, the buttons and cursor hide after three seconds of inactivity and reappear on movement.
+Shortcuts: `⌘S` save the current frame, `⌘R` record/stop, `⌘⇧M` mute monitoring, `⌘I` show or hide the info card, `⌘,` open settings, `⌃⌘F` or a double-click on the image to toggle native full screen, and `Esc` to close a panel or leave full screen. In full screen, the buttons and cursor hide after three seconds of inactivity and reappear on movement.
+
+## Save the current frame
+
+Choose **File > Save Current Frame…** (`⌘S`) to save a PNG named `MoniView-YYYYMMDD-HHmmss.png` by default. The frame and picture settings are captured when you invoke the command, not when you finish choosing the destination. PNG processing and writing run off the capture/render queues; only one save operation is allowed at a time.
+
+The PNG contains the whole source-resolution frame with the current color adjustments and source-resolution sharpening, using the same `VideoImageProcessor.recordedImage` path as processed recording. It does not include AI/MetalFX scaling, fit/fill/stretch presentation, or on-screen controls. The recording-only **Record color and sharpening** switch does not disable picture processing for snapshots. Cancelling the save panel writes nothing; replacement writes are atomic. No signal disables the command.
 
 ## Preview and frame rate
 
