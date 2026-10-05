@@ -4,7 +4,7 @@
 
 **原生、轻量的 macOS UVC / HDMI 采集卡监看器。**
 
-实时预览、音频监听、录制、色彩工具与 MetalFX 空间放大，基于 SwiftUI、AVFoundation、Metal 与 Core Image，不依赖第三方运行库。
+实时预览、音频监听、录制、色彩工具与 MetalFX 空间放大，基于 SwiftUI、AVFoundation、Metal、Core Image 与 VideoToolbox，不依赖第三方运行库。
 
 **[English](README.md) · 简体中文**
 
@@ -21,7 +21,7 @@ MoniView 把 USB（UVC）采集卡变成 HDMI 信号源的低延迟监看窗口�
 ## 功能
 
 - 按设备实际上报的格式枚举分辨率与帧率，支持离散档位和 29.97 / 59.94 等非整数帧率。
-- 预览只保留最新帧；采集、GPU 渲染、音频与视频编码使用独立队列，GPU 最多一帧处理中。
+- 预览只保留最新帧；采集、GPU 渲染、音频与视频编码使用独立队列，预览 GPU 最多一帧处理中。
 - 实时监听采集卡音频输入，并显示电平。
 - 录制 H.264 + AAC 的 `.mov` 文件。
 - 色彩与锐化调节：亮度、对比度、饱和度、鲜艳度、高光恢复。
@@ -46,9 +46,11 @@ open build/MoniView.app
 
 只需要 Swift 工具链，Xcode Command Line Tools 即可，不需要 Xcode 工程或完整 IDE。`Scripts/build-app.sh` 把 SwiftPM release 产物打包成 `build/MoniView.app`，包含 `Resources/MoniView.icns` 和打包的 `PrivacyInfo.xcprivacy`，并做 ad-hoc 签名。
 
-脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
+可选 AI 路径需要 Apple Swift 6.2+ / macOS SDK 26+ 构建，并在支持该功能的 macOS 26+ 硬件上运行。较旧 Apple 编译器构建空间放大回退版，最低部署版本仍为 macOS 14。自定义新编译器搭配旧 SDK 时，可用 `MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh` 显式打包回退版，详见 [AI 超分工程说明](docs/AI_UPSCALING.md)。
 
-首次启动需授权摄像头和麦克风（采集卡音频也使用麦克风权限）。MoniView 自动选择 USB 视频设备和匹配的音频输入；其他输入可在设置中选择。
+脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`、`MONIVIEW_DISABLE_AI=1`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
+
+首次启动需要摄像头权限来读取视频。只有监听或录制声音时才需要麦克风权限，采集卡音频也属于该权限；仅监看视频不要求授权麦克风。MoniView 自动选择 USB 视频设备和匹配的音频输入；其他输入可在设置中选择。
 
 底部按钮：录制、画面信息、画质增强、色彩、设置。点击画面关闭已打开的面板。
 
@@ -62,7 +64,7 @@ open build/MoniView.app
 
 MoniView 同时设置设备和视频连接的帧间隔，避免设备设为 60 但连接仍输出 20。切换分辨率时若原帧率不支持，会自动使用新格式最高档。
 
-右上信息卡显示实际缓冲尺寸、采集/渲染帧率、音频电平和软件处理耗时。该耗时从视频回调到 GPU 完成，不包含 HDMI 设备、采集卡与屏幕扫描延迟。
+右上信息卡显示实际缓冲尺寸和像素格式、采集/渲染帧率、音频电平和软件处理耗时。该耗时从视频回调到 GPU 完成回调，在最后一次主线程跳转之前计时，不包含 HDMI 设备、采集卡与屏幕扫描延迟。同一采集帧因调参而重绘，不重复计为新视频帧；采集丢帧与录制丢弃分别统计。
 
 窗口最小化或被其他窗口完全遮挡时暂停预览渲染，采集、录制和音频监听继续进行。
 
@@ -72,14 +74,12 @@ MoniView 同时设置设备和视频连接的帧间隔，避免设备设为 60 �
 
 MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有的真实细节。可选的 AI 方式使用 Apple 设备端低延迟超分模型（macOS 26+），逐帧重建合理的细节，但仍不等同于采集信号的真实分辨率。此版不含插帧。
 
-- **AI 超分**：macOS 26 及以上使用 Apple VTLowLatencySuperResolutionScaler；模型加载中或设备不支持时自动回退 MetalFX。
+- **AI 超分**：macOS 26 及以上使用 Apple VTLowLatencySuperResolutionScaler；模型加载中、设备不支持或没有符合处理尺寸上限的倍率时，回退 MetalFX/Lanczos。实际引擎以信息卡为准。
 - **MetalFX**：支持的 GPU 使用系统空间放大器。
 - **Lanczos**：兼容路径；设备不支持 MetalFX 或放大比例超过其当前限制时自动回退。
-- 目标：原始、2K（长边 2560）、4K（长边 3840）。尺寸按 16:9 举例，其他比例按长边计算并保持原比例。
+- 目标：原始、2K（长边 2560）、4K（长边 3840）、匹配屏幕。其他比例按长边计算并保持原比例；匹配屏幕使用显示器的绘制缓冲尺寸，桌面缩放模式下不保证与面板物理像素一一对应。
 
-低延迟模式下目标是处理尺寸的上限：实际按当前显示尺寸处理，因此 2K 与 4K 可能得到同一个处理尺寸。信息卡会显示本帧实际处理到的像素尺寸。
-
-低延迟模式下放大的目标是上限：按实际显示尺寸处理，而不是始终按完整目标尺寸。关闭垂直同步时可能出现画面撕裂；关闭低延迟模式即可始终按完整目标尺寸处理。
+低延迟模式下目标是处理尺寸的上限，并进一步受可见画面尺寸限制，因此 2K 与 4K 可能得到同一个处理尺寸；信息卡显示实际处理到的尺寸。关闭垂直同步时可能撕裂；关闭低延迟模式会恢复显示同步和完整目标尺寸处理。两种模式都不改变采集输入分辨率。
 
 这些功能只影响实时预览。
 
@@ -95,11 +95,13 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 
 ## 隐私
 
-必须授权摄像头和麦克风：摄像头权限用于读取 UVC 采集卡，麦克风权限用于读取采集卡音频输入以进行监听和录制。MoniView 完全在本机运行，不收集数据，也不向外部服务发送数据。app 打包了隐私清单（`PrivacyInfo.xcprivacy`），声明不跟踪、不收集数据。录制保存到你在存储面板中选择的文件，诊断快照写入 `~/Library/Logs/MoniView/diagnostics.json`，都只留在本机。采集卡序列号、设备标识和诊断日志可能包含可识别信息，请勿附到公开 issue 中。完整说明见 [docs/PRIVACY.md](docs/PRIVACY.md)。
+视频需要摄像头权限以读取 UVC 采集卡；只有监听或录制声音时才需要麦克风权限。MoniView 完全在本机运行，不收集数据，也不向外部服务发送数据。app 打包了隐私清单（`PrivacyInfo.xcprivacy`），声明不跟踪、不收集数据。导出媒体保存到你在存储面板中选择的文件，诊断快照写入 `~/Library/Logs/MoniView/diagnostics.json`，都只留在本机。采集卡序列号、设备标识和诊断日志可能包含可识别信息，请勿附到公开 issue 中。完整说明见 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 平台与路线
 
 当前仅 macOS，以 ad-hoc 签名的本机构建分发，未做公证，也不是 Mac App Store 构建，当前产物不能直接用于 Store 提交；分发清单与当前缺口见 [docs/APP_STORE.md](docs/APP_STORE.md)。iPad 版需要独立的 UIKit/触控目标、音频播放适配与单独签名；Mac 的 `.app` 不能安装到 iPad。iOS 版本不在本仓库，后续版本可能闭源；已发布版本沿用发布时的许可证。
+
+后续方向是共用媒体处理和模型、保留小型原生平台外壳，而不是增加庞杂的桌面控制面板。已有复用切入点和仍然存在的平台依赖见[平台边界](docs/PLATFORM_BOUNDARIES.md)；本轮审查没有实现 iPad target。
 
 ## 参考
 
@@ -112,6 +114,8 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 ## 参与贡献
 
 构建与隐私约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。仓库提供一个仅构建的 workflow，只能手动触发，不会在 push 或 PR 时运行。
+
+[工程审查](docs/REVIEW.md)区分已提交修复与需硬件验证的工作；[本地 AI 接手说明](docs/LOCAL_AI_HANDOFF.md)列出集成、构建、故障注入与真机验收步骤。源码审查和 Linux 测试不等于 macOS 构建或性能认证。
 
 ## 许可证
 

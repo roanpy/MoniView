@@ -4,7 +4,7 @@
 
 **A native, lightweight UVC / HDMI capture card monitor for macOS.**
 
-Live preview, audio monitoring, recording, color tools, and MetalFX spatial scaling, built on SwiftUI, AVFoundation, Metal, and Core Image with no third-party runtime dependencies.
+Live preview, audio monitoring, recording, color tools, and MetalFX spatial scaling, built on SwiftUI, AVFoundation, Metal, Core Image, and VideoToolbox with no third-party runtime dependencies.
 
 **English · [简体中文](README.zh-CN.md)**
 
@@ -21,7 +21,7 @@ MoniView turns a USB (UVC) capture card into a low-latency monitor window for an
 ## What it does
 
 - Enumerates the formats the device actually reports, including discrete steps and fractional rates such as 29.97 and 59.94 FPS.
-- Keeps the preview low-latency: only the newest frame is retained, and capture, GPU rendering, audio, and video encoding run on separate queues with at most one GPU frame in flight.
+- Keeps the preview low-latency: only the newest frame is retained, and capture, GPU rendering, audio, and video encoding run on separate queues with at most one preview GPU frame in flight.
 - Monitors the capture card's audio input in real time with a level meter.
 - Records H.264 video with AAC audio to a `.mov` file.
 - Adjusts color and sharpening: brightness, contrast, saturation, vibrance, and highlight recovery.
@@ -46,9 +46,11 @@ open build/MoniView.app
 
 Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and an ad-hoc signature.
 
-The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
+The optional AI path requires an Apple Swift 6.2+ / macOS SDK 26+ build and supported macOS 26+ hardware at runtime. Older Apple compilers build the spatial fallback; the deployment target remains macOS 14. A custom new compiler paired with an old SDK can explicitly package the fallback with `MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh`. See [AI engineering notes](docs/AI_UPSCALING.md).
 
-On first launch, grant camera and microphone access; the capture card's audio input also uses the microphone permission. MoniView auto-selects the USB video device and a matching audio input, and other inputs can be chosen in settings.
+The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
+
+On first launch, grant camera access for video. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects the USB video device and a matching audio input, and other inputs can be chosen in settings.
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
 
@@ -62,7 +64,7 @@ Shortcuts: `⌘R` record/stop, `⌘⇧M` mute monitoring, `⌘I` show or hide th
 
 MoniView sets both the device and the video connection frame duration, so a device configured for 60 FPS is not left with a connection still running at 20. When the resolution changes and the current frame rate is not supported, it uses the highest rate the new format offers.
 
-The info card reports the actual buffer size, capture and render frame rates, audio level, and software processing time. That time spans the video callback through GPU completion; it does not include HDMI device, capture card, or display scan-out latency.
+The info card reports the actual buffer size and pixel format, capture and render frame rates, audio level, and software processing time. That time spans the video callback through the GPU completion callback, before the final main-thread hop; it does not include HDMI device, capture card, or display scan-out latency. Repainting the same captured frame for a settings change is not counted as another video frame. Capture drops and recording omissions are separate counters.
 
 When the window is minimized or fully occluded by another window, preview rendering pauses while capture, recording, and audio monitoring continue.
 
@@ -72,14 +74,12 @@ See [performance notes](docs/PERFORMANCE.md) for the pipeline, observed device s
 
 MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. This version has no frame interpolation.
 
-- **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX while the model loads or when unsupported.
+- **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX/Lanczos while the model loads, when unsupported, or when no supported factor fits the processing-size cap. Check the actual engine in the info card.
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
 - **Lanczos** is the compatibility path, used automatically when the device does not support MetalFX or the requested scale exceeds its current limits.
-- Targets are original, 2K (long edge 2560), and 4K (long edge 3840). Those sizes are stated at 16:9; other aspect ratios are measured by their long edge and keep their own ratio.
+- Targets are original, 2K (long edge 2560), 4K (long edge 3840), and Match Display. Other aspect ratios keep their own ratio. Match Display uses the display's backing-store size; scaled desktop modes do not guarantee a one-to-one mapping to physical panel pixels.
 
-In low latency mode the target is an upper bound on the processing size: frames are processed at the actual display size, so 2K and 4K can resolve to the same processing size. The info card shows the pixel size this frame was actually processed at.
-
-In low latency mode the target is an upper bound: frames are processed at the actual display size, not always the full target. With vsync off this can cause tearing; turn low latency off to process at the full target size.
+In low latency mode the target is an upper bound on processing size, additionally bounded by the visible image size. Thus 2K and 4K may resolve to the same processing size. The info card shows the size actually produced. With vsync off, tearing is possible; turning low latency off restores display synchronization and full target-size processing. Neither mode changes the capture input resolution.
 
 These options affect the live preview only.
 
@@ -95,11 +95,13 @@ This is what one device reported under test, not a general performance claim.
 
 ## Privacy
 
-Camera and microphone access are required: the camera permission reads the UVC capture card, and the microphone permission reads the capture card's audio input for monitoring and recording. MoniView runs entirely on the local machine, collects nothing, and sends nothing to any external service. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Recordings are written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
+Camera access is required to read video from the UVC capture card. Microphone access is only required to monitor or record audio. MoniView runs entirely on the local machine, collects nothing, and sends nothing to any external service. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Exported media is written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
 
 ## Platform and roadmap
 
 MoniView is macOS only today. It is built as an ad-hoc signed local app, not a notarized or Mac App Store build, so the current artifact is not Store-submittable; see [docs/APP_STORE.md](docs/APP_STORE.md) for the distribution checklist and the remaining gaps. An iPad version would need a separate UIKit touch target, audio playback adaptation, and its own signing; a Mac `.app` cannot be installed on iPad. The iOS version is not part of this repository, and later versions may be closed source. Existing releases keep the license they shipped with.
+
+The planned direction is shared media/model code with small native platform shells, not a larger desktop control panel. Existing reusable seams and remaining platform dependencies are documented in [platform boundaries](docs/PLATFORM_BOUNDARIES.md); no iPad target is implemented by this review.
 
 ## References
 
@@ -112,6 +114,8 @@ Reference material for the capture and rendering approach. No third-party code w
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build and privacy ground rules, and [CHANGELOG.md](CHANGELOG.md) for release history. A build-only workflow is available for manual runs; it is not triggered on push or pull request.
+
+The [engineering review](docs/REVIEW.md) separates submitted fixes from hardware-dependent work. The [local AI handoff](docs/LOCAL_AI_HANDOFF.md) gives integration, build, failure-injection, and real-device acceptance steps. Source review and Linux tests are not a macOS build or a performance certification.
 
 ## License
 
