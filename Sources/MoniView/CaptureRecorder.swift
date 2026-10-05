@@ -11,6 +11,13 @@ private struct RetainedSample: @unchecked Sendable {
 }
 
 final class CaptureRecorder {
+    /// How this recording treats the video samples. Fixed at `start()` so a mid-recording
+    /// shortage of processing resources can never silently change the color path.
+    enum VideoMode {
+        case source
+        case processed(PictureSettings)
+    }
+
     private let queue = DispatchQueue(label: "dev.moniview.record", qos: .userInitiated)
     private let pendingVideo = DispatchSemaphore(value: 3)
     private let pendingAudio = DispatchSemaphore(value: 24)
@@ -31,6 +38,11 @@ final class CaptureRecorder {
     private var videoCount = 0
     private var finishing = false
     private var picture: PictureSettings?
+    private var mode: VideoMode = .source
+    // Recording writes to a unique temporary file and is moved onto the user's URL only after
+    // the writer finishes successfully, so an existing file is never truncated on failure.
+    private var workingURL: URL?
+    private var destinationURL: URL?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private let colorSpace = CGColorSpace(name: CGColorSpace.itur_709)!
     private let context: CIContext = {
@@ -45,8 +57,13 @@ final class CaptureRecorder {
         queue.async {
             guard self.writer == nil else { completion(CaptureFailure.message("录制仍在保存，请稍后再试。")); return }
             self.resetDroppedSamples()
+            // Write beside the destination so the final move stays on one volume, and never
+            // touch an existing file until the new recording has finished successfully.
+            let destination = url
+            let working = destination.deletingLastPathComponent()
+                .appendingPathComponent(".moniview-\(UUID().uuidString).mov")
             do {
-                let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+                let writer = try AVAssetWriter(outputURL: working, fileType: .mov)
                 self.lock.lock()
                 let appliesPictureProcessing = self.picture != nil
                 self.lock.unlock()
@@ -89,6 +106,9 @@ final class CaptureRecorder {
                 if let audioInput { writer.add(audioInput) }
                 guard writer.startWriting() else { throw writer.error ?? CaptureFailure.message("无法开始录制。") }
                 self.adaptor = adaptor
+                self.mode = appliesPictureProcessing ? .processed(self.picture!) : .source
+                self.workingURL = working
+                self.destinationURL = destination
                 self.writer = writer; self.videoInput = video; self.audioInput = audioInput
                 self.startTime = nil; self.videoCount = 0; self.completion = completion
                 self.writerGeneration = self.beginAccepting()
@@ -104,7 +124,6 @@ final class CaptureRecorder {
         lock.lock()
         guard accepting else { lock.unlock(); return }
         let sampleGeneration = generation
-        let settings = picture
         guard pending.wait(timeout: .now()) == .success else {
             if video { droppedVideoSamples += 1 } else { droppedAudioSamples += 1 }
             lock.unlock()
@@ -136,15 +155,29 @@ final class CaptureRecorder {
                 return
             }
             let appended: Bool
-            if video, let settings, let source = CMSampleBufferGetImageBuffer(sample), let adaptor = self.adaptor, let pool = adaptor.pixelBufferPool {
-                var destination: CVPixelBuffer?
-                guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess, let destination else {
-                    self.fail(CaptureFailure.message("无法分配录制画面缓冲。"), writer: writer, generation: sampleGeneration)
-                    return
+            if video {
+                switch self.mode {
+                case .processed(let settings):
+                    // The processed path must never fall back to writing an unprocessed frame.
+                    guard let source = CMSampleBufferGetImageBuffer(sample), let adaptor = self.adaptor else {
+                        self.fail(CaptureFailure.message("录制画面处理不可用。"), writer: writer, generation: sampleGeneration)
+                        return
+                    }
+                    guard let pool = adaptor.pixelBufferPool else {
+                        self.fail(CaptureFailure.message("录制画面缓冲池不可用。"), writer: writer, generation: sampleGeneration)
+                        return
+                    }
+                    var destination: CVPixelBuffer?
+                    guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess, let destination else {
+                        self.fail(CaptureFailure.message("无法分配录制画面缓冲。"), writer: writer, generation: sampleGeneration)
+                        return
+                    }
+                    let image = VideoImageProcessor.recordedImage(source, settings: settings)
+                    self.context.render(image, to: destination, bounds: image.extent, colorSpace: self.colorSpace)
+                    appended = adaptor.append(destination, withPresentationTime: time)
+                case .source:
+                    appended = input.append(sample)
                 }
-                let image = VideoImageProcessor.recordedImage(source, settings: settings)
-                self.context.render(image, to: destination, bounds: image.extent, colorSpace: self.colorSpace)
-                appended = adaptor.append(destination, withPresentationTime: time)
             } else { appended = input.append(sample) }
             if !appended { self.fail(writer.error ?? CaptureFailure.message("录制写入失败。"), writer: writer, generation: sampleGeneration) }
             else if video { self.videoCount += 1 }
@@ -262,6 +295,37 @@ final class CaptureRecorder {
         adaptor = nil
         writer = nil; videoInput = nil; audioInput = nil; completion = nil; startTime = nil
         finishing = false
-        callback?(error)
+        let working = workingURL
+        let destination = destinationURL
+        workingURL = nil; destinationURL = nil
+        guard let working, let destination else { callback?(error); return }
+        guard error == nil else {
+            // Remove the partial file and leave any existing destination untouched.
+            try? FileManager.default.removeItem(at: working)
+            callback?(error)
+            return
+        }
+        callback?(Self.commit(working: working, destination: destination))
+    }
+
+    /// Moves a finished recording onto the user's chosen URL, replacing an existing file only now.
+    private static func commit(working: URL, destination: URL) -> Error? {
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var commitError: Error?
+        coordinator.coordinate(writingItemAt: destination, options: .forReplacing, error: &coordinationError) { url in
+            do {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    _ = try FileManager.default.replaceItemAt(url, withItemAt: working)
+                } else {
+                    try FileManager.default.moveItem(at: working, to: url)
+                }
+            } catch {
+                commitError = error
+            }
+        }
+        if let coordinationError { return coordinationError }
+        if let commitError { return commitError }
+        return nil
     }
 }

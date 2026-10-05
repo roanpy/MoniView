@@ -41,6 +41,7 @@
 "GPU 增强目标 · 原始尺寸" = "Enhancement target · native size";
 "GPU 放大目标 · 2K（2560 px 宽）" = "Scaling target · 2K (2560 px wide)";
 "GPU 放大目标 · 4K（3840 px 宽）" = "Scaling target · 4K (3840 px wide)";
+"实际处理 %@ · 目标上限 %@" = "Processing %@ · target cap %@";
 "原始输入" = "Native input";
 "原始" = "Native";
 "2K · 2560 px 宽" = "2K · 2560 px wide";

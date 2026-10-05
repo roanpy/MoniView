@@ -3,6 +3,16 @@ import CoreImage
 import MetalKit
 import SwiftUI
 
+/// Everything that determines what a single draw must produce.
+/// Draws are deduplicated against the last *submitted* key rather than the last attempt,
+/// so a state change that arrives while the GPU is busy is never dropped.
+private struct RenderKey: Equatable {
+    var sequence: UInt64
+    var settings: PictureSettings
+    var size: CGSize
+    var aspect: AspectMode
+}
+
 struct PreviewLayerView: NSViewRepresentable {
     @ObservedObject var capture: CaptureManager
     func makeNSView(context: Context) -> CapturePreviewNSView {
@@ -28,11 +38,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private let inFlight = DispatchSemaphore(value: 1)
     private let drawLock = NSLock()
     private var drawScheduled = false
-    private var pendingRedraw = false
-    private var lastSequence: UInt64 = 0
-    private var lastSettings: PictureSettings?
-    private var lastSize = CGSize.zero
-    private var lastAspect: AspectMode?
+    // Render bookkeeping below is main-thread only.
+    private var lastSubmitted: RenderKey?
+    private var forceDraw = false
+    private var failedDrawRetries = 0
 
     init(frames: LatestVideoFrame) {
         self.frames = frames
@@ -72,9 +81,24 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
 
     /// Redraw when the window becomes visible again, even if no new frame has arrived.
-    @objc private func windowBecameVisible() { requestRender() }
+    @objc private func windowBecameVisible() {
+        forceDraw = true
+        requestRender()
+    }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { lastSize = .zero; requestRender() }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        forceDraw = true
+        requestRender()
+    }
+
+    /// Called on the main thread after a draw finishes: only ask for another draw when the
+    /// newest frame or the current settings actually differ from what was submitted.
+    private func requestRenderIfStateChanged() {
+        guard let (_, sequence, _) = frames.latest() else { return }
+        let key = RenderKey(sequence: sequence, settings: settings, size: drawableSize, aspect: aspectMode)
+        // A forced draw that was deferred behind an in-flight GPU command still has to happen.
+        if forceDraw || key != lastSubmitted { requestRender() }
+    }
 
     func requestRender() {
         drawLock.lock()
@@ -95,13 +119,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         var (buffer, sequence, receivedAt) = initial
         let size = drawableSize
         guard size.width > 0, size.height > 0 else { return }
-        guard sequence != lastSequence || settings != lastSettings || size != lastSize || aspectMode != lastAspect else { return }
-        // The GPU is still busy: remember that this state change still needs a draw.
-        guard inFlight.wait(timeout: .now()) == .success else {
-            drawLock.lock(); pendingRedraw = true; drawLock.unlock()
+        let forced = forceDraw
+        guard forced || RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode) != lastSubmitted else { return }
+        // The GPU is still busy. Its completion handler re-checks the current state on the main
+        // thread and schedules another draw, so this request is not lost.
+        guard inFlight.wait(timeout: .now()) == .success else { return }
+        guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else {
+            inFlight.signal()
+            forceDraw = true
             return
         }
-        guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else { inFlight.signal(); return }
+        forceDraw = false
 
         // A drawable may have waited for presentation. Always take the newest frame afterwards.
         if let fresh = frames.latest() { (buffer, sequence, receivedAt) = fresh }
@@ -129,6 +157,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             }
         }
         frames.setEngine(usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : "原始＋锐化"))
+        frames.setEnhancedSize(workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil)
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * (usedMetalFX ? 0.22 : 0.4) : 0)
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
@@ -149,17 +178,25 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let semaphore = inFlight
         let frameStore = frames
         command.addCompletedHandler { [weak self] completed in
-            if completed.status == .completed { frameStore.markRendered(receivedAt: receivedAt, gpuMS: max(0, completed.gpuEndTime - completed.gpuStartTime) * 1000) }
-            semaphore.signal()
-            guard let self else { return }
-            self.drawLock.lock()
-            let pending = self.pendingRedraw
-            self.pendingRedraw = false
-            self.drawLock.unlock()
-            // A skipped or failed draw must not strand a state change that arrived while the GPU was busy.
-            if pending || completed.status != .completed || frameStore.latest()?.1 != sequence { self.requestRender() }
+            let gpuMS = max(0, completed.gpuEndTime - completed.gpuStartTime) * 1000
+            let succeeded = completed.status == .completed
+            // Hop to the main thread so semaphore release, render bookkeeping and the next
+            // request are serialized with draw(in:) instead of racing it.
+            DispatchQueue.main.async {
+                guard let self else { semaphore.signal(); return }
+                if succeeded { frameStore.markRendered(receivedAt: receivedAt, gpuMS: gpuMS) }
+                semaphore.signal()
+                if succeeded {
+                    self.failedDrawRetries = 0
+                } else if self.failedDrawRetries < 3 {
+                    // Retry a failed command buffer a few times, then wait for the next change.
+                    self.failedDrawRetries += 1
+                    self.forceDraw = true
+                }
+                self.requestRenderIfStateChanged()
+            }
         }
         command.commit()
-        lastSequence = sequence; lastSettings = settings; lastSize = size; lastAspect = aspectMode
+        lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
     }
 }

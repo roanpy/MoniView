@@ -37,6 +37,22 @@
 
 - 构建 workflow 改为仅手动触发，不再在 push 或 PR 时运行。
 
+## Unreleased (2)
+
+- The preview redraw is now deduplicated against the last submitted draw and re-checked on the main thread when the GPU finishes, so a state change made while the GPU was busy, a restored window, or a failed command buffer all end in a correct redraw without busy retrying.
+- Video device switching and format changes carry a configuration generation; a result from a superseded switch can no longer publish stale device state or apply another device's format index. A failed switch now leaves the session and the UI in one consistent state.
+- Recording writes to a unique temporary file beside the destination and moves it into place only after the writer finishes, so choosing "Replace" in the save panel now works and an existing recording is never truncated by a failed attempt.
+- The recording color path is fixed when recording starts. A shortage of processing resources now fails the recording instead of silently writing unprocessed frames that were still tagged as BT.709.
+- The info card reports the actual processed size next to the selected target, so a 2K/4K target is no longer mistaken for that output size. In low latency mode the target is a cap bounded by the visible size, and 2K and 4K can resolve to the same processing size.
+
+### 变更（二）
+
+- 预览重绘改为按最近一次已提交的绘制去重，并在 GPU 完成时回到主线程重新判断，因此 GPU 忙时的设置变更、窗口恢复、命令缓冲失败都会最终得到一次正确重绘，且不会空转重试。
+- 视频设备切换与格式修改带有配置代次，被取代的切换结果不再发布过期设备状态，也不会把别的设备的格式索引应用过来；切换失败后 session 与界面状态保持一致。
+- 录制改为先写入目标同目录的唯一临时文件，writer 成功完成后再移动就位。保存面板选择替换现在可正常工作，录制失败也不会截断已有文件。
+- 录制开始时固定色彩处理路径。处理资源不足时录制会明确失败，不再静默写入未处理却仍标记 BT.709 的画面。
+- 信息卡在所选目标旁显示实际处理尺寸，避免把 2K/4K 目标误认为实际输出尺寸。低延迟模式下目标是受可见尺寸限制的上限，2K 与 4K 可能得到相同处理尺寸。
+
 ## v0.2.0 — English
 
 First public release. This is an ad-hoc signed local build; it is not on the Mac App Store.

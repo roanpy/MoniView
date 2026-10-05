@@ -72,7 +72,9 @@ MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot cr
 
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
 - **Lanczos** is the compatibility path, used automatically when the device does not support MetalFX or the requested scale exceeds its current limits.
-- Targets are original (matching the window), 2K (2560×1440), and 4K (3840×2160). Those sizes are stated at 16:9; other aspect ratios keep their own ratio.
+- Targets are original, 2K (long edge 2560), and 4K (long edge 3840). Those sizes are stated at 16:9; other aspect ratios are measured by their long edge and keep their own ratio.
+
+In low latency mode the target is an upper bound on the processing size: frames are processed at the actual display size, so 2K and 4K can resolve to the same processing size. The info card shows the pixel size this frame was actually processed at.
 
 In low latency mode the target is an upper bound: frames are processed at the actual display size, not always the full target. With vsync off this can cause tearing; turn low latency off to process at the full target size.
 

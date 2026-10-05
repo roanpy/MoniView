@@ -366,6 +366,11 @@ struct MainView: View {
                 Spacer(minLength: 0)
                 Text(String(format: "GPU %.1f ms", capture.gpuMilliseconds))
             }.font(.system(size: 9, design: .monospaced)).foregroundStyle(Color(hex: 0xaaa199))
+            if let enhancedSize = capture.enhancedSize {
+                Text(L10n.format("实际处理 %@ · 目标上限 %@", enhancedSize, capture.picture.upscaleTarget.rawValue))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Color(hex: 0xaaa199))
+            }
             if expandedInformation {
                 Text(L10n.format("回调→GPU %.1f ms · P95 %.1f", capture.processingMilliseconds, capture.processingP95))
                 Text(L10n.format("等待/CPU %.1f ms", max(0, capture.processingMilliseconds - capture.gpuMilliseconds)))
