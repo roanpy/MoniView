@@ -64,6 +64,8 @@ final class CaptureRecorder {
                 .appendingPathComponent(".moniview-\(UUID().uuidString).mov")
             do {
                 let writer = try AVAssetWriter(outputURL: working, fileType: .mov)
+                // Fragmented MOV keeps finished segments playable if the process dies mid-recording.
+                writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 1)
                 self.lock.lock()
                 let appliesPictureProcessing = self.picture != nil
                 self.lock.unlock()

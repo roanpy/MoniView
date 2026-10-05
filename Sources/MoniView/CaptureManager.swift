@@ -160,7 +160,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         didSet {
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
             recorder.setPicture(recordIncludesPicture ? picture : nil)
-            if let data = try? JSONEncoder().encode(picture) { UserDefaults.standard.set(data, forKey: "view.picture") }
+            // Slider drags fire dozens of times per second; persist once the value settles.
+            picturePersistWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let data = try? JSONEncoder().encode(self.picture) else { return }
+                UserDefaults.standard.set(data, forKey: "view.picture")
+            }
+            picturePersistWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
         }
     }
     @Published private(set) var selectedColorPreset: String? = "自然" {
@@ -169,6 +176,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
     @Published var showsStatusBar = true { didSet { UserDefaults.standard.set(showsStatusBar, forKey: "view.statusBar") } }
     private var applyingPreset = false
+    private var picturePersistWork: DispatchWorkItem?
     @Published private(set) var deviceName = "未连接"
     @Published private(set) var resolution = "—"
     @Published private(set) var pixelFormat = "—"
@@ -183,6 +191,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var enhancedSize: String?
     @Published private(set) var isRunning = false
     @Published private(set) var isRecording = false
+    @Published private(set) var recordingStartedAt: Date?
     private(set) var recordingError: String?
     @Published private(set) var recordingVideoDrops = 0
     @Published private(set) var recordingAudioDrops = 0
@@ -204,6 +213,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private let audioPreview = AVCaptureAudioPreviewOutput()
     private let recorder = CaptureRecorder()
     private var statsTimer: DispatchSourceTimer?
+    private var displaySleepToken: NSObjectProtocol?
+    /// Audio-callback queue only: last time the meter level was published to the UI.
+    private var lastLevelPublish = 0.0
     private var statusDismissal: DispatchWorkItem?
     private var observers: [NSObjectProtocol] = []
     // Session configuration state is accessed only on sessionQueue.
@@ -308,7 +320,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         videoOptions = videos.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
         audioOptions = audios.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
-        if let id = selectedAudioID, !audios.contains(where: { $0.uniqueID == id }) { selectAudioDevice(id: nil) }
+        if let id = selectedAudioID, !audios.contains(where: { $0.uniqueID == id }) { selectAudioDevice(id: nil, persist: false) }
         if let id = selectedVideoID, videos.contains(where: { $0.uniqueID == id }) {
             if force { selectVideoDevice(id: id) }
             return
@@ -320,7 +332,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func selectVideoDevice(id: String?) {
         guard !isRecording else { statusMessage = "停止录制后可更换设备。"; return }
-        let previouslyPaired = selectedAudioID == nil || audioOptions.first(where: { $0.id == selectedAudioID })?.name == deviceName
+        let previouslyPaired = UserDefaults.standard.string(forKey: "audio.selection") == nil || audioOptions.first(where: { $0.id == selectedAudioID })?.name == deviceName
         selectedVideoID = id
         // Invalidate the previous device's format list immediately; its indices are not valid for the new device.
         formatOptions = []
@@ -414,6 +426,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     private func autoSelectAudio(for device: AVCaptureDevice, replacePair: Bool) {
+        // An explicit user choice wins: "off" stays off, a saved device is reselected when present.
+        if let saved = UserDefaults.standard.string(forKey: "audio.selection") {
+            if saved == "off" { selectAudioDevice(id: nil, persist: false) }
+            else if Self.devices(.audio).contains(where: { $0.uniqueID == saved }) { selectAudioDevice(id: saved, persist: false) }
+            return
+        }
         guard replacePair || selectedAudioID == nil else { return }
         let audios = Self.devices(.audio)
         let matched = audios.first { $0.localizedName == device.localizedName }
@@ -422,9 +440,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         else { selectAudioDevice(id: nil); audioStatus = "未找到采集卡音频，请在设置中选择" }
     }
 
-    func selectAudioDevice(id: String?) {
+    func selectAudioDevice(id: String?, persist: Bool = true) {
         guard !isRecording else { statusMessage = "停止录制后可更换音频。"; return }
         selectedAudioID = id
+        if persist { UserDefaults.standard.set(id ?? "off", forKey: "audio.selection") }
         guard let id else { configureAudioInput(id: nil); return }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: configureAudioInput(id: id)
@@ -461,7 +480,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 if let video = self.selectedDevice { try self.configureFormat(video, index: video.formats.firstIndex(of: video.activeFormat) ?? 0, fps: self.requestedFrameRate) }
                 self.session.commitConfiguration()
                 self.configureConnectionTiming()
-                DispatchQueue.main.async { self.audioStatus = device == nil ? "未连接音频" : "实时监听中"; self.statusMessage = nil }
+                DispatchQueue.main.async {
+                    self.audioStatus = device == nil ? "未连接音频" : "实时监听中"
+                    if device == nil { self.audioLevel = 0 }
+                    self.statusMessage = nil
+                }
             } catch {
                 self.session.commitConfiguration()
                 self.configureConnectionTiming()
@@ -582,8 +605,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         guard let outputType = preferences.first(where: { supported.contains($0) }) else {
             throw CaptureFailure.message("设备没有提供可用于预览的像素格式。")
         }
-        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: outputType, kCVPixelBufferWidthKey as String: Int(dimensions.width), kCVPixelBufferHeightKey as String: Int(dimensions.height)]
+        // Request only the pixel format: explicit dimensions would force a scaling/conversion pass.
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: outputType]
         // Output negotiation may reset the device's interval. Apply timing afterwards.
         try Self.setDuration(duration, on: device)
         configuredFrameDuration = duration
@@ -635,6 +658,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     func startRecording(to url: URL) {
         guard isRunning, !isRecording else { return }
         isRecording = true
+        recordingStartedAt = Date()
         recordingError = nil
         recordingVideoDrops = 0; recordingAudioDrops = 0
         statusMessage = "正在录制…"
@@ -643,7 +667,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             guard let self else { return }
             guard let video = self.selectedDevice else {
                 DispatchQueue.main.async {
-                    self.isRecording = false; self.recordingError = L10n.text("视频设备已断开。")
+                    self.isRecording = false; self.recordingStartedAt = nil; self.recordingError = L10n.text("视频设备已断开。")
                     self.statusMessage = L10n.format("录制失败：%@", self.recordingError!)
                     self.recordingFinished?(); self.recordingFinished = nil
                 }
@@ -652,12 +676,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             let dims = CMVideoFormatDescriptionGetDimensions(video.activeFormat.formatDescription)
             let audioDesc = self.audioInput?.device.activeFormat.formatDescription
             let asbd = audioDesc.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
-            self.recorder.start(url: url, width: Int(dims.width), height: Int(dims.height), fps: 1 / video.activeVideoMinFrameDuration.seconds, audio: asbd) { [weak self] error in
+            let frameInterval = video.activeVideoMinFrameDuration.seconds
+            // Devices without a valid frame duration would otherwise trap on Int(NaN).
+            let recordingFPS = frameInterval.isFinite && frameInterval > 0 ? 1 / frameInterval : 60
+            self.recorder.start(url: url, width: Int(dims.width), height: Int(dims.height), fps: recordingFPS, audio: asbd) { [weak self] error in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     let drops = self.recorder.droppedSamples()
                     self.recordingVideoDrops = drops.video; self.recordingAudioDrops = drops.audio
                     self.isRecording = false
+                    self.recordingStartedAt = nil
                     self.refreshDevices(force: false)
                     let warning = drops.video + drops.audio > 0 ? L10n.format(" · 录制丢弃视频 %d 帧 / 音频 %d 包", drops.video, drops.audio) : ""
                     self.recordingError = error?.localizedDescription
@@ -693,7 +721,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             recorder.append(sampleBuffer, video: true)
         } else if output === audioOutput {
             let power = connection.audioChannels.map(\.averagePowerLevel).max() ?? -160
-            frames.setLevel(power <= -80 ? 0 : min(1, pow(10, power / 20)))
+            let level = power <= -80 ? 0 : min(1, pow(10, power / 20))
+            frames.setLevel(level)
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastLevelPublish >= 0.12 {
+                lastLevelPublish = now
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // Instant attack, gentle decay so the meter reads like a real level meter.
+                    self.audioLevel = max(level, self.audioLevel * 0.75)
+                }
+            }
             recorder.append(sampleBuffer, video: false)
         }
     }
@@ -740,12 +778,22 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.processingP95 = times.2
             self.upscaleEngine = self.frames.currentEngine()
             self.enhancedSize = self.frames.currentEnhancedSize()
-            self.audioLevel = stats.3
             self.isRunning = stats.0 > 0
+            self.updatePowerAssertions()
             self.diagnosticTick += 1
-            if self.diagnosticTick % 5 == 0 { self.writeDiagnostics() }
+            if self.diagnosticTick % 5 == 0, self.isRunning || self.isRecording { self.writeDiagnostics() }
         }
         timer.resume(); statsTimer = timer
+    }
+    /// Game and camera monitoring runs for long stretches without keyboard or mouse input;
+    /// keep the display awake while a signal is being previewed.
+    private func updatePowerAssertions() {
+        if isRunning && displaySleepToken == nil {
+            displaySleepToken = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated], reason: "Live capture preview")
+        } else if !isRunning, let token = displaySleepToken {
+            ProcessInfo.processInfo.endActivity(token)
+            displaySleepToken = nil
+        }
     }
     private func writeDiagnostics() {
         var payload: [String: Any] = ["date": ISO8601DateFormatter().string(from: Date()), "device": deviceName, "resolution": resolution, "captureFPS": measuredFPS, "renderFPS": renderedFPS, "droppedFrames": droppedFrames, "pixelFormat": pixelFormat, "audioDevice": audioOptions.first { $0.id == selectedAudioID }?.name ?? "none", "audioLevel": audioLevel, "audioStatus": audioStatus, "muted": isMuted, "volume": audioVolume]

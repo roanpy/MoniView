@@ -36,7 +36,7 @@
 "关闭画面信息" = "Close Info";
 "低延迟 · 按显示尺寸处理" = "Low latency · process at display size";
 "按完整目标尺寸处理" = "Process at full target size";
-"静音监听 · ⌘M" = "Mute monitoring · ⌘M";
+"静音监听 · ⌘⇧M" = "Mute monitoring · ⇧⌘M";
 "实际处理 %@ · 目标上限 %@" = "Processing %@ · target cap %@";
 "原始输入" = "Native input";
 "原始" = "Native";
@@ -153,3 +153,9 @@
 
 "请在系统权限弹窗中允许访问摄像头。" = "Allow camera access in the system permission dialog.";
 "增强" = "Enhanced";
+"隐私政策" = "Privacy Policy";
+"等待视频信号" = "Waiting for Signal";
+"采集卡已连接，请确认信号源已开机并输出画面。" = "The capture card is connected. Make sure the source is on and outputting video.";
+"本次录制使用开始时的设置" = "This recording keeps the settings from when it started";
+"录制画面处理不可用。" = "Recording image processing is unavailable.";
+"录制画面缓冲池不可用。" = "Recording pixel buffer pool is unavailable.";

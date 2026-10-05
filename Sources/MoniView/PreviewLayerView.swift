@@ -160,7 +160,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
         frames.setEngine(usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : "原始＋锐化"))
         frames.setEnhancedSize(workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil)
-        let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * (usedMetalFX ? 0.22 : 0.4) : 0)
+        // Native-size and MetalFX previews match the recording; Lanczos scaling compensates more.
+        let enhancementSharpening = usedMetalFX || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
+        let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
         let scale = aspectMode == .fit ? min(size.width / output.width, size.height / output.height) : max(size.width / output.width, size.height / output.height)

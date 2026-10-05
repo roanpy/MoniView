@@ -23,6 +23,11 @@ struct MoniViewApp: App {
                 }
                 .keyboardShortcut("f", modifiers: [.control, .command])
             }
+            CommandGroup(after: .help) {
+                Button(L10n.text("隐私政策")) {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/roanpy/MoniView/blob/main/docs/PRIVACY.md")!)
+                }
+            }
         }
     }
 }

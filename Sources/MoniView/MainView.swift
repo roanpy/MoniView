@@ -95,7 +95,7 @@ struct MainView: View {
         }
         .overlay {
             VStack {
-                Button("静音") { capture.setMuted(!capture.isMuted) }.keyboardShortcut("m", modifiers: [.command])
+                Button("静音") { capture.setMuted(!capture.isMuted) }.keyboardShortcut("m", modifiers: [.command, .shift])
                 Button("画面信息") { showInformation.toggle() }.keyboardShortcut("i", modifiers: [.command])
                 Button("设置") { activePanel = activePanel == .settings ? nil : .settings }.keyboardShortcut(",", modifiers: [.command])
             }.hidden().accessibilityHidden(true)
@@ -189,17 +189,12 @@ struct MainView: View {
                     .fill(Color(hex: 0x100f10))
             }
 
-            if capture.isRunning {
-                if isFullscreen {
-                    PreviewLayerView(capture: capture)
-                } else {
-                    PreviewLayerView(capture: capture)
-                        .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
-                        .padding(3)
-                }
-            } else {
-                waitingForInput
-            }
+            // Keep the preview alive across signal drops and fullscreen transitions so the GPU
+            // pipeline is never rebuilt; overlays communicate state instead.
+            PreviewLayerView(capture: capture)
+                .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 17, style: .continuous))
+                .padding(isFullscreen ? 0 : 3)
+            if !capture.isRunning { waitingForInput }
 
             VStack {
                 HStack(alignment: .top) {
@@ -214,6 +209,11 @@ struct MainView: View {
                                 Circle().fill(Color(hex: 0xff5c46)).frame(width: 7, height: 7)
                                 Text("REC")
                                     .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                if let started = capture.recordingStartedAt {
+                                    Text(started, style: .timer)
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .monospacedDigit()
+                                }
                             }
                             .foregroundStyle(.white)
                             .padding(.horizontal, 11)
@@ -261,12 +261,14 @@ struct MainView: View {
                     .font(.system(size: 29, weight: .light))
                     .foregroundStyle(Color(hex: 0xf1a447))
             }
-            Text(L10n.text(capture.cameraPermissionPending ? "等待摄像头权限" : (capture.permissionDenied ? "需要摄像头权限" : (capture.videoOptions.isEmpty ? "连接 HDMI 采集卡" : "选择视频输入"))))
+            Text(L10n.text(capture.cameraPermissionPending ? "等待摄像头权限" : (capture.permissionDenied ? "需要摄像头权限" : (capture.videoOptions.isEmpty ? "连接 HDMI 采集卡" : (capture.selectedVideoID != nil ? "等待视频信号" : "选择视频输入")))))
                 .font(.system(size: 19, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(hex: 0xf2eae2))
             Text(L10n.text(capture.cameraPermissionPending ? "请在系统权限弹窗中允许访问摄像头。" : capture.permissionDenied
                  ? "请在系统设置 › 隐私与安全性 › 摄像头中允许 MoniView。"
-                 : "将采集卡接入 Mac，再把 Switch 或其他 HDMI 设备连接到采集卡。"))
+                 : (capture.selectedVideoID != nil && !capture.videoOptions.isEmpty
+                    ? "采集卡已连接，请确认信号源已开机并输出画面。"
+                    : "将采集卡接入 Mac，再把 Switch 或其他 HDMI 设备连接到采集卡。")))
                 .font(.system(size: 12))
                 .foregroundStyle(Color(hex: 0x9c938b))
                 .multilineTextAlignment(.center)
@@ -293,6 +295,9 @@ struct MainView: View {
             }
         }
         .padding(30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Cover the last presented frame so a dropped signal never shows a stale image.
+        .background((isFullscreen ? Color.black : Color(hex: 0x100f10)).opacity(0.94))
     }
 
     private var quickControls: some View {
@@ -395,7 +400,7 @@ struct MainView: View {
             HStack(spacing: 6) {
                 Button { capture.setMuted(!capture.isMuted) } label: {
                     Image(systemName: capture.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill").foregroundStyle(Color(hex: 0xe9a24d))
-                }.buttonStyle(.plain).help("静音监听 · ⌘M")
+                }.buttonStyle(.plain).help("静音监听 · ⌘⇧M")
                 Text(L10n.text(capture.isMuted ? "静音" : capture.audioStatus)).lineLimit(1)
                 Spacer(minLength: 0)
                 ProgressView(value: audioLevelValue).tint(Color(hex: 0xec8718)).frame(width: 35)
@@ -460,6 +465,8 @@ struct MainView: View {
         }
     }
 
+    private var recordingFreezesColor: Bool { capture.isRecording && capture.recordIncludesPicture }
+
     private var colorPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             panelHeading("色彩调节", subtitle: L10n.format("当前：%@ · %@", L10n.text(capture.selectedColorPreset ?? "自定义"), L10n.text(capture.recordIncludesPicture ? "预览与录制" : "仅预览")), icon: "circle.lefthalf.filled")
@@ -470,6 +477,7 @@ struct MainView: View {
             }
             .padding(4)
             .background(Color.black.opacity(0.2), in: Capsule())
+            .disabled(recordingFreezesColor)
             VStack(spacing: 13) {
                 labeledSlider("高光恢复", value: $capture.picture.highlightRecovery, range: 0...0.5, format: "%.2f")
                 labeledSlider("亮度", value: $capture.picture.brightness, range: -0.5...0.5, format: "%+.2f")
@@ -479,6 +487,12 @@ struct MainView: View {
             }
             .padding(13)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+            .disabled(recordingFreezesColor)
+            if recordingFreezesColor {
+                Text("本次录制使用开始时的设置")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: 0x98908a))
+            }
         }
     }
 

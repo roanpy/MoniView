@@ -2,6 +2,11 @@ import CoreImage
 
 /// Shared color math keeps preview and recording consistent. Scaling remains preview-specific.
 enum VideoImageProcessor {
+    /// Enhancement sharpening shared by recording and native-size preview.
+    static let enhancementSharpening = 0.22
+    /// Lanczos resampling softens edges, so a scaled preview compensates slightly more.
+    static let scaledPreviewSharpening = 0.4
+
     static func color(_ image: CIImage, settings: PictureSettings) -> CIImage {
         var result = image
         if settings.brightness != 0 || settings.contrast != 1 || settings.saturation != 1 {
@@ -16,7 +21,7 @@ enum VideoImageProcessor {
     static func recordedImage(_ buffer: CVPixelBuffer, settings: PictureSettings) -> CIImage {
         let source = CIImage(cvPixelBuffer: buffer)
         var result = color(source, settings: settings)
-        let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * 0.22 : 0)
+        let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
         if sharpness > 0.001 { result = result.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         return result.cropped(to: source.extent)
     }
