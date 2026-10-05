@@ -12,9 +12,9 @@ This is a per-frame ML enhancement, not native capture resolution or frame inter
 
 ## Lifecycle / 生命周期
 
-Controller state is confined to the main-thread draw path. A serial worker prepares at most one session at a time. Publication checks the requested dimensions/factor and generation, so disabling enhancement, selecting native size or switching inputs cannot resurrect an obsolete warmup. Failed attempts use a monotonic retry deadline; an incoming frame does not postpone it.
+Controller state is confined to the main-thread draw path. A serial worker prepares at most one session at a time. Publication checks the requested dimensions/factor and generation, so disabling enhancement, selecting native size or changing the requested configuration cannot resurrect an obsolete warmup. Failed attempts use a monotonic retry deadline; an incoming frame does not postpone it.
 
-控制状态限定在主线程绘制路径，串行后台队列同时最多准备一个会话。发布时核对尺寸、倍率及代次，关闭增强、选择原始尺寸或切换输入后，过期初始化不会重新生效；失败重试使用单调时间期限，不因每帧到来而不断延后。
+控制状态限定在主线程绘制路径，串行后台队列同时最多准备一个会话。发布时核对尺寸、倍率及代次，关闭增强、选择原始尺寸或更改请求配置后，过期初始化不会重新生效；失败重试使用单调时间期限，不因每帧到来而不断延后。相同尺寸和倍率的输入可复用同一配置，不把切换设备等同于强制重建模型。
 
 Each configuration owns its own processor and pools. Submitted GPU work retains the session, pixel buffers, parameters and CVMetalTexture wrapper until completion. Retired processor sessions are ended on the worker, not synchronously on capture/render/UI queues. Attribute resolution and pool creation failures fall back rather than discarding the framework's required attributes.
 
@@ -22,17 +22,21 @@ Each configuration owns its own processor and pools. Submitted GPU work retains 
 
 ## Toolchains / 构建工具链
 
-The standard Apple Swift 6.2+ / macOS SDK 26+ toolchain builds the optional AI path, runtime-gated to macOS 26+. Older Apple compilers build the non-AI fallback and retain the macOS 14 deployment target. Compiler version alone is not an SDK probe: a custom new compiler paired with an old SDK must build with `-Xswiftc -DMONIVIEW_DISABLE_AI` or select SDK 26+. The build-only command for the explicit fallback is:
+The standard Apple Swift 6.2+ / macOS SDK 26+ toolchain builds the optional AI path, runtime-gated to macOS 26+. Older Apple compilers build the non-AI fallback and retain the macOS 14 deployment target. Compiler version alone is not an SDK probe: a custom new compiler paired with an old SDK must explicitly disable AI or select SDK 26+.
 
-标准 Apple Swift 6.2+ / macOS SDK 26+ 工具链编译可选 AI 路径，运行时仍要求 macOS 26+。较旧 Apple 编译器使用非 AI 回退，保持最低 macOS 14。编译器版本不等于 SDK 检测：自定义新编译器配旧 SDK 时，需要 `-Xswiftc -DMONIVIEW_DISABLE_AI` 或选择 SDK 26+。显式回退的仅构建检查命令：
+标准 Apple Swift 6.2+ / macOS SDK 26+ 工具链编译可选 AI 路径，运行时仍要求 macOS 26+。较旧 Apple 编译器使用非 AI 回退，保持最低 macOS 14。编译器版本不等于 SDK 检测：自定义新编译器配旧 SDK 时，需要显式禁用 AI 或选择 SDK 26+。
 
 ```sh
+# Build-only fallback check / 仅构建回退检查
 swift build -Xswiftc -DMONIVIEW_DISABLE_AI
+# Package the same fallback / 打包时也显式使用回退
+MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh
+open build/MoniView.app
 ```
 
-This flag does not persist into a later invocation of `Scripts/build-app.sh`; select the intended Apple toolchain when testing a packaged app. Workflow triggers remain manual-only.
+A SwiftPM command-line flag does not persist into later commands. The packaging environment variable explicitly forwards it to both the build and binary-path lookup. Run the script again without that variable for a normal build. Workflow triggers remain manual-only.
 
-该参数不会自动传递给随后运行的 `Scripts/build-app.sh`，测试 app 包时请选择目标 Apple 工具链。workflow 仍仅手动触发。
+SwiftPM 命令行标志不会自动保留到后续命令；打包环境变量会明确把它传给构建和产物路径查询。需要恢复普通构建时，不带该环境变量重新运行打包脚本。workflow 仍仅手动触发。
 
 ## Local validation / 本地验证
 
