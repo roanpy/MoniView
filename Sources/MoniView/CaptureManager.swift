@@ -216,7 +216,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if self.session.canAddOutput(self.audioPreview) { self.session.addOutput(self.audioPreview) }
             self.session.commitConfiguration()
         }
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+        // The Swift constant names changed in newer SDKs; the notification names are stable.
+        for name in [Notification.Name("AVCaptureDeviceWasConnectedNotification"), Notification.Name("AVCaptureDeviceWasDisconnectedNotification")] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.refreshDevices(force: false) })
         }
         observers.append(NotificationCenter.default.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: .main) { [weak self] note in

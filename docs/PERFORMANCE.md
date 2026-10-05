@@ -17,6 +17,8 @@ One windowed 720p60 sample with MetalFX enabled reported 60 capture FPS, 60 rend
 
 ## Practical defaults
 
+A roughly one-minute recording at 1080p60 was checked with `ffprobe`: H.264 at 60 FPS, AAC stereo at 48 kHz and BT.709 color metadata. Setting saturation to zero also produced neutral chroma in decoded frames, confirming that the color setting reached the recording. This checks the recording path on one capture card, not audio playback quality or long-duration reliability.
+
 Use the capture card's native 1080p60 format when available, fit aspect, low latency enabled and mild enhancement. A 2K/4K enhancement target does not turn a 1080p input into native 4K. Try disabling enhancement if rendering falls below capture FPS; change capture resolution only when the device/USB link is the limiting factor.
 
 ## 中文
@@ -26,6 +28,8 @@ Use the capture card's native 1080p60 format when available, fit aspect, low lat
 在 Jemdo Video + Apple M5 Max 上手动确认过 720p/1080p 实际缓冲切换、30/60 FPS 间隔生效。一段 720p60、MetalFX 开启的窗口模式快照显示采集/渲染均为 60 FPS、采集丢帧 0、回调至 GPU 完成约 4.1 ms、GPU 执行约 1.7 ms。它只是单秒快照，不代表完整输入延迟，也不保证其他设备取得同样结果。
 
 建议默认使用采集卡支持的原生 1080p60、适应画面、低延迟和温和增强。2K/4K 是 GPU 放大目标，低延迟模式按显示尺寸限制处理，不改变真实输入分辨率。渲染帧率不足时优先关闭增强；设备或 USB 带宽受限时再降低采集分辨率。
+
+约一分钟的 1080p60 录制经 `ffprobe` 检查为 H.264 60 FPS、AAC 48 kHz 双声道、BT.709 色彩元数据。将饱和度设为零后，解码帧的色度也呈中性，确认色彩设置写入录制。这只验证一张采集卡的录制路径，不代表已验证听感或长时间稳定性。
 
 ## References
 

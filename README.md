@@ -31,9 +31,11 @@ MoniView turns a USB (UVC) capture card into a low-latency monitor window for an
 
 ## Screenshots
 
-![MoniView window awaiting camera permission](docs/images/moniview-window.png)
+![MoniView live preview window](docs/images/moniview-window.png)
 
-This screenshot shows the actual app awaiting macOS camera permission. It illustrates the current window and controls, not a live capture or a performance benchmark. Live preview and settings screenshots will be added after hardware authorization and verification.
+![MoniView capture settings](docs/images/moniview-controls.png)
+
+These screenshots show the actual app connected to a Jemdo Video capture card. On-screen values depend on the connected device and are not performance benchmarks.
 
 ## Build and run
 

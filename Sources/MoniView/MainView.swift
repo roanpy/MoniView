@@ -547,11 +547,12 @@ struct MainView: View {
             .padding(12)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
 
-            Toggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
-                .toggleStyle(.switch).font(.system(size: 11)).disabled(capture.isRecording)
-            Toggle("显示设备状态", isOn: $capture.showsStatusBar)
-                .toggleStyle(.switch)
-                .font(.system(size: 11))
+            VStack(spacing: 14) {
+                settingsToggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
+                    .disabled(capture.isRecording)
+                settingsToggle("显示设备状态", isOn: $capture.showsStatusBar)
+            }
+            .padding(.horizontal, 12)
             HStack(spacing: 8) {
                 Image(systemName: "info.circle")
                 Text("分辨率和帧率受采集卡硬件限制。")
@@ -643,6 +644,18 @@ struct MainView: View {
                 .frame(width: 42, alignment: .trailing)
             Slider(value: value, in: range)
                 .tint(Color(hex: 0xec8718))
+        }
+    }
+
+    private func settingsToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            Text(L10n.text(title))
+                .font(.system(size: 11))
+            Spacer(minLength: 8)
+            Toggle(L10n.text(title), isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .fixedSize()
         }
     }
 
