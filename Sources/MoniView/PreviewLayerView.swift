@@ -22,7 +22,7 @@ struct PreviewLayerView: NSViewRepresentable {
         view.settings = capture.picture
         view.aspectMode = capture.aspectMode
         (view.layer as? CAMetalLayer)?.displaySyncEnabled = !capture.picture.lowLatency
-        if capture.picture.upscaleMethod != .ai { view.stopAIUpscaler() }
+        if capture.picture.upscaleMethod != .ai || !capture.picture.enhancementEnabled || capture.picture.upscaleTarget == .native { view.stopAIUpscaler() }
         view.requestRender()
     }
 }
@@ -172,8 +172,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     image = scaled
                     usedAI = true
                 }
-            }
-        }
+            } else { stopAIUpscaler() }
+        } else { stopAIUpscaler() }
         if settings.enhancementEnabled, workingScale > 1.01, !usedAI {
             if settings.upscaleMethod != .lanczos, let scaled = upscaler?.upscale(image, width: workingWidth, height: workingHeight, context: ciContext, command: command, colorSpace: colorSpace) {
                 image = scaled; usedMetalFX = true
