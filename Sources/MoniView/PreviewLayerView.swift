@@ -44,6 +44,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var drawScheduled = false
     // Render bookkeeping below is main-thread only.
     private var lastSubmitted: RenderKey?
+    private var lastMeasuredSequence: UInt64?
     private var forceDraw = false
     private var failedDrawRetries = 0
 
@@ -77,12 +78,16 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // Redraw once the window becomes visible again, even when no new frame arrives.
+        // A screen/backing change can alter Match Display even when drawable size is unchanged.
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
         guard let window else { return }
         NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didChangeOcclusionStateNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didDeminiaturizeNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didChangeScreenNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameVisible), name: NSWindow.didChangeBackingPropertiesNotification, object: window)
     }
 
     /// Redraw when the window becomes visible again, even if no new frame has arrived.
@@ -152,7 +157,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let displayScale = max(1, screenScale)
         let sourceLongEdge = max(source.width, source.height)
         let visibleLongEdge = sourceLongEdge * displayScale
-        // "Match display" resolves against the native pixel size of the screen showing the window.
+        // This is backing-store size; scaled display modes can differ from native panel pixels.
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
         let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
         let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
@@ -181,11 +186,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: workingScale, kCIInputAspectRatioKey: 1.0])
             }
         }
-        frames.setEngine(usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : "原始＋锐化")))
         frames.setEnhancedSize(workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil)
         // Native-size, MetalFX and AI previews match the recording; Lanczos scaling compensates more.
         let enhancementSharpening = usedMetalFX || usedAI || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
+        frames.setEngine(usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始"))))
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
         let scale = aspectMode == .fit ? min(size.width / output.width, size.height / output.height) : max(size.width / output.width, size.height / output.height)
@@ -204,14 +209,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         command.present(drawable)
         let semaphore = inFlight
         let frameStore = frames
+        let frameSequence = sequence
+        let frameReceivedAt = receivedAt
+        let shouldMeasure = frameSequence != lastMeasuredSequence
         command.addCompletedHandler { [weak self] completed in
             let gpuMS = max(0, completed.gpuEndTime - completed.gpuStartTime) * 1000
             let succeeded = completed.status == .completed
-            // Hop to the main thread so semaphore release, render bookkeeping and the next
-            // request are serialized with draw(in:) instead of racing it.
+            // Measure at the GPU completion callback, before waiting for the main thread.
+            // LatestVideoFrame is lock-protected; parameter/resize redraws are not new video frames.
+            if succeeded && shouldMeasure { frameStore.markRendered(receivedAt: frameReceivedAt, gpuMS: gpuMS) }
+            // Semaphore release and render bookkeeping remain serialized with draw(in:).
             DispatchQueue.main.async {
                 guard let self else { semaphore.signal(); return }
-                if succeeded { frameStore.markRendered(receivedAt: receivedAt, gpuMS: gpuMS) }
+                if succeeded && shouldMeasure { self.lastMeasuredSequence = frameSequence }
                 semaphore.signal()
                 if succeeded {
                     self.failedDrawRetries = 0
