@@ -17,6 +17,7 @@ struct MoniViewApp: App {
         .defaultSize(width: 1180, height: 790)
         .windowResizability(.contentMinSize)
         .commands {
+            SaveFrameCommands(capture: captureManager)
             CommandGroup(after: .windowSize) {
                 Button("切换全屏") {
                     NSApp.keyWindow?.toggleFullScreen(nil)

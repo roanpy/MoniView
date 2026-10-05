@@ -15,6 +15,9 @@
 "停止录制" = "Stop Recording";
 "画质增强" = "Enhance";
 "色彩调节" = "Color";
+"保存当前画面…" = "Save Current Frame…";
+"保存画面失败" = "Could Not Save Frame";
+"无法生成 PNG 图像。" = "Could not generate the PNG image.";
 
 /* Empty state and permission prompts */
 "需要摄像头权限" = "Camera Access Needed";
