@@ -52,6 +52,8 @@ On first launch, grant camera and microphone access; the capture card's audio in
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
 
+**Window > Always on Top** keeps the preview above normal windows and remembers the choice across launches. Native full screen temporarily uses the normal window level; leaving full screen restores the saved preference. It does not change Spaces behavior or raise save panels and other app windows.
+
 The brief status line shows the device name, the actual buffer resolution, and the measured FPS. In window mode it sits centered along the top; in full screen it moves to the top left. The detailed info card opens at the top right, and while it is open the brief line is hidden and restored when the card closes. Turn the brief line off with **显示设备状态** (Show device status) in settings.
 
 **画面比例** (Aspect) sets how the image fills the window: **适应画面** (fit) shows the whole image, **填满窗口** (fill) keeps the ratio and crops the overflow, and **拉伸填满** (stretch) fills the window and may distort the ratio.

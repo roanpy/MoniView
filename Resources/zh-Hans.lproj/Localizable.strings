@@ -1,6 +1,7 @@
 /* MoniView — Simplified Chinese localization (identity map). */
 /* Keys are the Simplified Chinese source strings; values repeat them so a Chinese system selects this table instead of falling back to English. */
 
+"窗口置顶" = "窗口置顶";
 "静音" = "静音";
 "画面信息" = "画面信息";
 "设置" = "设置";
