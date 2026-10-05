@@ -53,6 +53,24 @@
 - 录制开始时固定色彩处理路径。处理资源不足时录制会明确失败，不再静默写入未处理却仍标记 BT.709 的画面。
 - 信息卡在所选目标旁显示实际处理尺寸，避免把 2K/4K 目标误认为实际输出尺寸。低延迟模式下目标是受可见尺寸限制的上限，2K 与 4K 可能得到相同处理尺寸。
 
+### Added
+
+- Color sliders, the monitoring volume slider, and the audio level meter expose accessibility labels and values.
+- `Scripts/build-app.sh` accepts version, build, architecture, signing identity, and entitlement overrides, verifies the signed bundle, checks bundled resources, and reports the produced architecture and version.
+
+### Changed
+
+- The privacy statement no longer claims both permissions are mandatory: camera access is required for video, and microphone access is only needed to monitor or record audio.
+
+### 新增
+
+- 色彩滑块、监听音量滑块与电平条补充了辅助功能标签和取值。
+- `Scripts/build-app.sh` 支持版本、构建号、架构、签名身份与 entitlements 覆盖参数，并校验签名产物、检查打包资源、输出实际架构与版本。
+
+### 变更（三）
+
+- 隐私说明不再声称两项权限都是必需：视频需要摄像头权限，只有监听或录制声音时才需要麦克风权限。
+
 ## v0.2.0 — English
 
 First public release. This is an ad-hoc signed local build; it is not on the Mac App Store.

@@ -579,6 +579,8 @@ struct MainView: View {
                 set: { capture.setAudioVolume(Float($0)) }
             ), in: 0...1)
             .tint(Color(hex: 0xec8718))
+            .accessibilityLabel(L10n.text("声音监听"))
+            .accessibilityValue("\(Int(capture.audioVolume * 100))%")
 
             HStack(spacing: 8) {
                 Toggle(isOn: Binding(
@@ -600,6 +602,8 @@ struct MainView: View {
                     .progressViewStyle(.linear)
                     .tint(Color(hex: 0xec8718))
                     .frame(width: 54)
+                    .accessibilityLabel(L10n.text("电平"))
+                    .accessibilityValue("\(Int(audioLevelValue * 100))%")
                 Text("\(Int(audioLevelValue * 100))%")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
@@ -635,6 +639,8 @@ struct MainView: View {
                 .frame(width: 42, alignment: .trailing)
             Slider(value: value, in: range)
                 .tint(Color(hex: 0xec8718))
+                .accessibilityLabel(L10n.text(title))
+                .accessibilityValue(String(format: format, value.wrappedValue))
         }
     }
 

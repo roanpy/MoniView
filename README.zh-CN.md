@@ -46,6 +46,8 @@ open build/MoniView.app
 
 只需要 Swift 工具链，Xcode Command Line Tools 即可，不需要 Xcode 工程或完整 IDE。`Scripts/build-app.sh` 把 SwiftPM release 产物打包成 `build/MoniView.app`，包含 `Resources/MoniView.icns` 和打包的 `PrivacyInfo.xcprivacy`，并做 ad-hoc 签名。
 
+脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
+
 首次启动需授权摄像头和麦克风（采集卡音频也使用麦克风权限）。MoniView 自动选择 USB 视频设备和匹配的音频输入；其他输入可在设置中选择。
 
 底部按钮：录制、画面信息、画质增强、色彩、设置。点击画面关闭已打开的面板。

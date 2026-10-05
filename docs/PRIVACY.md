@@ -5,9 +5,9 @@ MoniView is a local macOS app. It has no account system, no analytics, no teleme
 ## Permissions required
 
 - **Camera**: reads the USB (UVC) capture card video.
-- **Microphone**: reads the capture card's audio input for live monitoring and recording.
+- **Microphone**: reads the capture card's audio input for live monitoring and recording. This permission is optional: set the audio input to off and video preview and silent recording still work.
 
-Both permissions are required; MoniView does not work without them.
+Camera access is required for the video preview. Microphone access is only needed when you monitor or record the capture card's audio.
 
 ## Data handled locally
 
@@ -27,12 +27,12 @@ Do not attach capture card serial numbers, device identifiers, private file path
 
 MoniView 是本机运行的 macOS app，没有账号系统、没有统计分析、没有遥测，也不进行任何网络传输。app 打包了隐私清单（`PrivacyInfo.xcprivacy`），声明不跟踪、不收集数据。
 
-## 必需的权限
+## 权限
 
 - **摄像头**：读取 USB（UVC）采集卡的视频。
-- **麦克风**：读取采集卡的音频输入，用于实时监听和录制。
+- **麦克风**：读取采集卡的音频输入，用于实时监听和录制。该权限可选：将音频输入设为关闭后，视频预览与无声录制仍可正常使用。
 
-这两项权限都是必需的，缺少权限时 MoniView 无法工作。
+视频预览需要摄像头权限；只有在监听或录制采集卡声音时才需要麦克风权限。
 
 ## 仅在本机处理的数据
 

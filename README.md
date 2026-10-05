@@ -46,6 +46,8 @@ open build/MoniView.app
 
 Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and an ad-hoc signature.
 
+The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
+
 On first launch, grant camera and microphone access; the capture card's audio input also uses the microphone permission. MoniView auto-selects the USB video device and a matching audio input, and other inputs can be chosen in settings.
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.

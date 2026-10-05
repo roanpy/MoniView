@@ -11,6 +11,14 @@ MoniView is built locally with `./Scripts/build-app.sh` as an ad-hoc signed app.
 
 The normal developer build does not sign with those entitlements and does not enable the sandbox; it stays ad-hoc. Sandboxed capture-card behavior has not been tested on Store hardware.
 
+`Scripts/build-app.sh` accepts overrides so the same script produces both kinds of artifact. The default invocation is unchanged. To verify the sandbox path, sign with the bundled entitlements and hardened runtime:
+
+```sh
+MONIVIEW_ENTITLEMENTS=1 ./Scripts/build-app.sh
+```
+
+The script also accepts `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, and `MONIVIEW_SIGN_IDENTITY`, verifies the signed bundle, checks the bundled resources, and prints the architecture and version. A Store or notarized artifact still needs a real signing identity and, for the Store, a provisioning profile; the sandbox flag alone does not make a submittable build.
+
 ## Checklist for a future Store submission
 
 This is not complete today. Each item needs to be finished and verified on real hardware before a submission is claimed to be ready.
@@ -44,6 +52,14 @@ MoniView 通过 `./Scripts/build-app.sh` 在本机构建，是 ad-hoc 签名的 
 - `Resources/MoniView.entitlements` 是 sandbox 权限模板（app sandbox 加摄像头、音频输入、用户选择文件读写）。
 
 普通开发构建不使用这些 entitlements 签名，也不启用 sandbox，保持 ad-hoc。沙盒下的采集卡行为尚未在 Store 硬件上实测。
+
+`Scripts/build-app.sh` 支持覆盖参数，同一个脚本既能产出开发构建，也能产出用于沙盒验证的构建。默认调用方式保持不变。要验证沙盒路径，用打包内的 entitlements 与 hardened runtime 签名：
+
+```sh
+MONIVIEW_ENTITLEMENTS=1 ./Scripts/build-app.sh
+```
+
+脚本还接受 `MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`，会校验签名结果、检查打包资源，并输出架构与版本。真正上架或公证仍需要正式的签名身份，上架还需要 provisioning profile；只加沙盒标志并不等于可提交产物。
 
 ## 未来上架 Store 的清单
 
