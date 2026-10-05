@@ -46,7 +46,7 @@ open build/MoniView.app
 
 只需要 Swift 工具链，Xcode Command Line Tools 即可，不需要 Xcode 工程或完整 IDE。`Scripts/build-app.sh` 把 SwiftPM release 产物打包成 `build/MoniView.app`，包含 `Resources/MoniView.icns` 和打包的 `PrivacyInfo.xcprivacy`，并做 ad-hoc 签名。
 
-脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
+脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源、输出实际架构与版本。
 
 首次启动需授权摄像头和麦克风（采集卡音频也使用麦克风权限）。MoniView 自动选择 USB 视频设备和匹配的音频输入；其他输入可在设置中选择。
 
@@ -86,6 +86,8 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 ## 录制
 
 录制默认包含所选色彩调节和原始分辨率的锐化，不包含 GPU 放大或界面叠层。锐化按原始分辨率应用，而预览可能在 MetalFX/Lanczos 放大后再锐化，因此录制文件不会与放大后的预览逐像素一致。在设置中关闭「录制预览色彩和锐化」即可保存未经处理的原始画面。H.264 编码通过 AVFoundation 使用系统编码器，可能是硬件或软件编码器，不保证使用硬件编码器。有音频时使用 AAC，封装为 `.mov`。
+
+录制音频使用单个 FIFO，以约两秒媒体时长及时间戳跨度为上限，另有包数安全上限。编码器暂时繁忙时按顺序保留音频，超预算时丢弃最旧样本并计数，保留源时间戳。停止时最多等待两秒排空尾音，未能排空的部分计入丢弃提示，之后另行完成 MOV 封装。这是录制缓冲，不是额外的声音监听延迟。队列独立测试可运行 `./Scripts/test-audio-buffer.sh`；真实声音连续性与编码背压仍需接采集卡验证。
 
 ## 实测设备上限
 

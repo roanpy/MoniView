@@ -20,10 +20,13 @@ final class CaptureRecorder {
 
     private let queue = DispatchQueue(label: "dev.moniview.record", qos: .userInitiated)
     private let pendingVideo = DispatchSemaphore(value: 3)
-    private let pendingAudio = DispatchSemaphore(value: 24)
     private let lock = NSLock()
     private var accepting = false
     private var stopRequested = false
+    // Audio ingress and writer backpressure share ONE bounded FIFO, protected by lock.
+    // Retained media is capped at two seconds; this is not added monitoring latency.
+    private var audioBacklog = DurationBoundedFIFO<RetainedSample>(maximumDuration: 2)
+    private var audioDrainScheduled = false
     // `generation` is protected by lock and tags samples accepted for a writer.
     private var generation: UInt64 = 0
     private var droppedVideoSamples = 0
@@ -37,6 +40,10 @@ final class CaptureRecorder {
     private var completion: ((Error?) -> Void)?
     private var videoCount = 0
     private var finishing = false
+    private var finishWritingStarted = false
+    private var audioDrainDeadline: TimeInterval?
+    private var audioRetry: DispatchWorkItem?
+    private var lastAudioTime: CMTime?
     private var picture: PictureSettings?
     private var mode: VideoMode = .source
     // Recording writes to a unique temporary file and is moved onto the user's URL only after
@@ -57,6 +64,10 @@ final class CaptureRecorder {
         queue.async {
             guard self.writer == nil else { completion(CaptureFailure.message("录制仍在保存，请稍后再试。")); return }
             self.resetDroppedSamples()
+            self.clearAudioBacklog()
+            self.lastAudioTime = nil
+            self.audioDrainDeadline = nil
+            self.finishWritingStarted = false
             // Write beside the destination so the final move stays on one volume, and never
             // touch an existing file until the new recording has finished successfully.
             let destination = url
@@ -117,25 +128,27 @@ final class CaptureRecorder {
                 self.writerGeneration = self.beginAccepting()
             } catch {
                 self.clearAcceptingAfterStartFailure()
+                self.clearAudioBacklog()
+                try? FileManager.default.removeItem(at: working)
                 completion(error)
             }
         }
     }
 
     func append(_ sample: CMSampleBuffer, video: Bool) {
-        let pending = video ? pendingVideo : pendingAudio
+        if !video { appendAudio(sample); return }
         lock.lock()
         guard accepting else { lock.unlock(); return }
         let sampleGeneration = generation
-        guard pending.wait(timeout: .now()) == .success else {
-            if video { droppedVideoSamples += 1 } else { droppedAudioSamples += 1 }
+        guard pendingVideo.wait(timeout: .now()) == .success else {
+            droppedVideoSamples += 1
             lock.unlock()
             return
         }
         let retained = RetainedSample(buffer: sample)
         queue.async {
             let sample = retained.buffer
-            defer { pending.signal() }
+            defer { self.pendingVideo.signal() }
             guard self.writerGeneration == sampleGeneration, let writer = self.writer else { return }
             guard writer.status == .writing else {
                 if writer.status == .completed {
@@ -145,46 +158,134 @@ final class CaptureRecorder {
                 }
                 return
             }
+            defer { self.drainAudio(writer: writer, generation: sampleGeneration) }
             let time = CMSampleBufferGetPresentationTimeStamp(sample)
+            guard time.isValid, time.seconds.isFinite else { self.recordDroppedSample(video: true); return }
             if self.startTime == nil {
-                guard video else { return }
                 writer.startSession(atSourceTime: time)
                 self.startTime = time
             }
             guard let start = self.startTime, time >= start else { return }
-            let input = video ? self.videoInput : self.audioInput
-            guard let input, input.isReadyForMoreMediaData else {
-                self.recordDroppedSample(video: video)
+            guard let input = self.videoInput, input.isReadyForMoreMediaData else {
+                self.recordDroppedSample(video: true)
                 return
             }
             let appended: Bool
-            if video {
-                switch self.mode {
-                case .processed(let settings):
-                    // The processed path must never fall back to writing an unprocessed frame.
-                    guard let source = CMSampleBufferGetImageBuffer(sample), let adaptor = self.adaptor else {
-                        self.fail(CaptureFailure.message("录制画面处理不可用。"), writer: writer, generation: sampleGeneration)
-                        return
-                    }
-                    guard let pool = adaptor.pixelBufferPool else {
-                        self.fail(CaptureFailure.message("录制画面缓冲池不可用。"), writer: writer, generation: sampleGeneration)
-                        return
-                    }
-                    var destination: CVPixelBuffer?
-                    guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess, let destination else {
-                        self.fail(CaptureFailure.message("无法分配录制画面缓冲。"), writer: writer, generation: sampleGeneration)
-                        return
-                    }
-                    let image = VideoImageProcessor.recordedImage(source, settings: settings)
-                    self.context.render(image, to: destination, bounds: image.extent, colorSpace: self.colorSpace)
-                    appended = adaptor.append(destination, withPresentationTime: time)
-                case .source:
-                    appended = input.append(sample)
+            switch self.mode {
+            case .processed(let settings):
+                // The processed path must never fall back to writing an unprocessed frame.
+                guard let source = CMSampleBufferGetImageBuffer(sample), let adaptor = self.adaptor else {
+                    self.fail(CaptureFailure.message("录制画面处理不可用。"), writer: writer, generation: sampleGeneration)
+                    return
                 }
-            } else { appended = input.append(sample) }
+                guard let pool = adaptor.pixelBufferPool else {
+                    self.fail(CaptureFailure.message("录制画面缓冲池不可用。"), writer: writer, generation: sampleGeneration)
+                    return
+                }
+                var destination: CVPixelBuffer?
+                guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess, let destination else {
+                    self.fail(CaptureFailure.message("无法分配录制画面缓冲。"), writer: writer, generation: sampleGeneration)
+                    return
+                }
+                let image = VideoImageProcessor.recordedImage(source, settings: settings)
+                self.context.render(image, to: destination, bounds: image.extent, colorSpace: self.colorSpace)
+                appended = adaptor.append(destination, withPresentationTime: time)
+            case .source:
+                appended = input.append(sample)
+            }
             if !appended { self.fail(writer.error ?? CaptureFailure.message("录制写入失败。"), writer: writer, generation: sampleGeneration) }
-            else if video { self.videoCount += 1 }
+            else { self.videoCount += 1 }
         }
+        lock.unlock()
+    }
+
+    private func appendAudio(_ sample: CMSampleBuffer) {
+        let time = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+        var duration = CMSampleBufferGetDuration(sample).seconds
+        if !duration.isFinite || duration <= 0,
+           let description = CMSampleBufferGetFormatDescription(sample),
+           let format = CMAudioFormatDescriptionGetStreamBasicDescription(description) {
+            duration = Double(CMSampleBufferGetNumSamples(sample)) / format.pointee.mSampleRate
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard accepting else { return }
+        droppedAudioSamples += audioBacklog.append(RetainedSample(buffer: sample), duration: duration, timestamp: time)
+        guard !audioBacklog.isEmpty, !audioDrainScheduled else { return }
+        let sampleGeneration = generation
+        audioDrainScheduled = true
+        // Coalesce ingress: at most one drain request waits behind video encoding.
+        queue.async {
+            self.lock.lock()
+            guard self.generation == sampleGeneration else { self.lock.unlock(); return }
+            self.audioDrainScheduled = false
+            self.lock.unlock()
+            guard self.writerGeneration == sampleGeneration, let writer = self.writer else { return }
+            self.drainAudio(writer: writer, generation: sampleGeneration)
+        }
+    }
+
+    /// Queue-only. Preserve source PTS; never let a new packet overtake buffered audio.
+    private func drainAudio(writer: AVAssetWriter, generation: UInt64) {
+        guard isCurrentWriter(writer, generation: generation), !finishWritingStarted else { return }
+        guard writer.status == .writing else {
+            fail(writer.error ?? CaptureFailure.message("录制写入状态已失效。"), writer: writer, generation: generation)
+            return
+        }
+        guard let start = startTime else { return } // The first video establishes the common timebase.
+        if let input = audioInput {
+            var handled = 0
+            // Yield to video work even if audio keeps arriving during the drain.
+            while handled < 64 && input.isReadyForMoreMediaData {
+                lock.lock()
+                let retained = audioBacklog.popFirst()
+                lock.unlock()
+                guard let retained else { break }
+                handled += 1
+                let sample = retained.buffer
+                let time = CMSampleBufferGetPresentationTimeStamp(sample)
+                // Leading audio before the first video is preroll, not recording overload.
+                guard time >= start else { continue }
+                if let lastAudioTime, time <= lastAudioTime { recordDroppedSample(video: false); continue }
+                guard input.append(sample) else {
+                    fail(writer.error ?? CaptureFailure.message("录制写入失败。"), writer: writer, generation: generation)
+                    return
+                }
+                lastAudioTime = time
+            }
+        } else { clearAudioBacklog() }
+        lock.lock()
+        if finishing, let deadline = audioDrainDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
+            // A stalled audio input must not keep tail draining indefinitely. Report the loss.
+            droppedAudioSamples += audioBacklog.count
+            audioBacklog.removeAll()
+        }
+        let hasAudio = !audioBacklog.isEmpty
+        lock.unlock()
+        if hasAudio { scheduleAudioRetry(writer: writer, generation: generation) }
+        else {
+            audioRetry?.cancel(); audioRetry = nil
+            if finishing { finishWriting(writer: writer, generation: generation) }
+        }
+    }
+
+    /// A retry exists only while buffered audio is waiting; no busy loop or capture/UI wait.
+    private func scheduleAudioRetry(writer: AVAssetWriter, generation: UInt64) {
+        guard audioRetry == nil else { return }
+        let work = DispatchWorkItem { [weak self, weak writer] in
+            guard let self, let writer, self.isCurrentWriter(writer, generation: generation) else { return }
+            self.audioRetry = nil
+            self.drainAudio(writer: writer, generation: generation)
+        }
+        audioRetry = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(10), execute: work)
+    }
+
+    private func clearAudioBacklog() {
+        audioRetry?.cancel(); audioRetry = nil
+        lock.lock()
+        audioBacklog.removeAll()
+        audioDrainScheduled = false
         lock.unlock()
     }
 
@@ -233,16 +334,25 @@ final class CaptureRecorder {
                 self.fail(CaptureFailure.message("没有收到视频帧。"), writer: writer, generation: generation)
                 return
             }
-            self.videoInput?.markAsFinished(); self.audioInput?.markAsFinished()
-            writer.finishWriting { [weak self] in
-                guard let self else { return }
-                self.queue.async { [weak self] in
-                    guard let self,
-                          self.writerGeneration == generation,
-                          let currentWriter = self.writer else { return }
-                    let error = currentWriter.status == .completed ? nil : currentWriter.error ?? CaptureFailure.message("录制保存失败。")
-                    self.complete(error, writer: currentWriter, generation: generation)
-                }
+            self.videoInput?.markAsFinished()
+            // This wall-clock deadline bounds tail draining, independently of the media budget.
+            self.audioDrainDeadline = ProcessInfo.processInfo.systemUptime + 2
+            self.drainAudio(writer: writer, generation: generation)
+        }
+    }
+
+    private func finishWriting(writer: AVAssetWriter, generation: UInt64) {
+        guard isCurrentWriter(writer, generation: generation), !finishWritingStarted else { return }
+        finishWritingStarted = true
+        audioInput?.markAsFinished()
+        writer.finishWriting { [weak self] in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self,
+                      self.writerGeneration == generation,
+                      let currentWriter = self.writer else { return }
+                let error = currentWriter.status == .completed ? nil : currentWriter.error ?? CaptureFailure.message("录制保存失败。")
+                self.complete(error, writer: currentWriter, generation: generation)
             }
         }
     }
@@ -293,6 +403,8 @@ final class CaptureRecorder {
     private func complete(_ error: Error?, writer expectedWriter: AVAssetWriter, generation expectedGeneration: UInt64) {
         guard isCurrentWriter(expectedWriter, generation: expectedGeneration) else { return }
         stopAccepting(generation: expectedGeneration)
+        clearAudioBacklog()
+        lastAudioTime = nil; audioDrainDeadline = nil; finishWritingStarted = false
         lock.lock(); stopRequested = false; lock.unlock()
         let callback = completion
         adaptor = nil

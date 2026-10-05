@@ -87,6 +87,8 @@ These options affect the live preview only.
 
 By default a recording includes the selected color adjustments and sharpening at the original resolution. It does not include GPU scaling or the on-screen UI. Because sharpening is applied at the source resolution while the preview may sharpen after MetalFX or Lanczos scaling, a recording is not a pixel-for-pixel copy of the scaled preview. Turn off **录制预览色彩和锐化** (Record color and sharpening) in settings to save the untouched source instead. H.264 encoding uses the system encoder through AVFoundation, which may be a hardware or software encoder; a hardware encoder is not guaranteed. Audio (when present) is AAC, and the container is `.mov`.
 
+Recording audio uses one FIFO capped at approximately two seconds of media (and timestamp span), with a secondary packet-count safety limit. Temporary encoder backpressure retains audio in order; over-budget audio is discarded oldest-first and counted. Source timestamps are preserved. Stopping allows up to two seconds for the audio tail to drain before reporting any remaining drops; MOV finalization follows separately. This is a recording buffer, not an added audio-monitoring delay. The queue's standalone checks run with `./Scripts/test-audio-buffer.sh`; live audio continuity and encoder backpressure still require a capture-card test.
+
 ## Measured device limits
 
 On the development machine, a Jemdo Video USB capture device exposed a highest capture format of 1920×1080 at about 60 FPS, and no 4K capture entry was present. HDMI input or passthrough capability and the USB capture output capability can differ; follow the formats the device actually reports. Other capture cards still need to be verified on their own hardware.
