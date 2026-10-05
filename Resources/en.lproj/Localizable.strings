@@ -5,6 +5,7 @@
 */
 
 /* Window, menu, and dock controls */
+"窗口置顶" = "Always on Top";
 "静音" = "Mute";
 "画面信息" = "Info";
 "设置" = "Settings";

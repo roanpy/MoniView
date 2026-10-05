@@ -5,6 +5,7 @@ import SwiftUI
 struct MoniViewApp: App {
     @NSApplicationDelegateAdaptor(MoniViewAppDelegate.self) private var appDelegate
     @StateObject private var captureManager = CaptureManager()
+    @AppStorage("view.alwaysOnTop") private var alwaysOnTop = false
 
     var body: some Scene {
         Window("MoniView", id: "main") {
@@ -13,6 +14,11 @@ struct MoniViewApp: App {
                 .preferredColorScheme(.dark)
                 .frame(minWidth: 880, minHeight: 590)
                 .onAppear { appDelegate.capture = captureManager }
+                .background {
+                    WindowLevelObserver(alwaysOnTop: alwaysOnTop)
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                }
         }
         .defaultSize(width: 1180, height: 790)
         .windowResizability(.contentMinSize)
@@ -23,6 +29,7 @@ struct MoniViewApp: App {
                     NSApp.keyWindow?.toggleFullScreen(nil)
                 }
                 .keyboardShortcut("f", modifiers: [.control, .command])
+                Toggle("窗口置顶", isOn: $alwaysOnTop)
             }
             CommandGroup(after: .help) {
                 Button(L10n.text("隐私政策")) {
