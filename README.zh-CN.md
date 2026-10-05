@@ -31,11 +31,9 @@ MoniView 把 USB（UVC）采集卡变成 HDMI 信号源的低延迟监看窗口�
 
 ## 截图
 
-![MoniView 预览窗口与信息卡](docs/images/moniview-window.png)
+![MoniView 等待摄像头授权的窗口](docs/images/moniview-window.png)
 
-![MoniView 操作面板](docs/images/moniview-controls.png)
-
-两张截图均来自实际运行的 app（连接真实采集卡）。界面文字与布局对应当前版本；画面中的数值取决于所连设备，不是性能基准。
+此图来自实际运行的 app，显示等待 macOS 摄像头授权时的窗口和按钮样式，不代表实时采集画面或性能基准。完成硬件授权与验证后再补充实时预览及设置页截图。
 
 ## 构建与运行
 
