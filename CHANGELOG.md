@@ -2,6 +2,16 @@
 
 ## Unreleased / 未发布
 
+- Add a media-duration-bounded recording audio FIFO with oldest-first eviction, drop accounting and bounded tail draining. / 录制音频增加按媒体时长限制的 FIFO、丢最旧计数与有界尾音排空。
+- Add File > Save Current Frame and Command-S for source-resolution PNG export with current color and sharpening. / 新增文件菜单与 ⌘S 保存当前画面为源分辨率 PNG，包含当前色彩与锐化。
+- Add a persistent Always on Top preference for the main preview window. / 新增主预览窗口置顶偏好并持久化。
+- Correct AI setup retry scheduling, configuration invalidation and GPU resource ownership; keep unsupported configurations on the spatial fallback. / 修复 AI 初始化重试、配置失效与 GPU 资源生命周期，不支持时保持空间放大回退。
+- Make the optional AI path buildable separately from older-toolchain fallback; packaging accepts MONIVIEW_DISABLE_AI=1. / 区分可选 AI 与旧工具链回退构建，打包支持 MONIVIEW_DISABLE_AI=1。
+- Measure completion before the final main-thread hop, deduplicate frame statistics, and redraw when display/backing properties change. / 在最后一次主线程跳转前计时、按采集帧去重统计，换屏或绘制缩放变化时重绘。
+- Correct fractional-rate selection, actual buffer-format labels, localized engine names and long-edge/display wording. / 修正分数帧率选中状态、实际缓冲格式、引擎本地化和长边/屏幕说明。
+- Synchronize capture configuration revisions and reject superseded format-error callbacks. / 同步采集配置代次并拦截过期格式错误回调。
+- Add executable pure Swift regression tests and a hardware-validation/local-AI handoff guide; no new hardware benchmark is claimed. / 增加可执行纯 Swift 回归测试与真机验收/本地 AI 接手说明，不声称新增硬件基准结果。
+
 - Optional AI super-resolution upscaling via Apple's low-latency ML scaler on macOS 26+, with MetalFX fallback while the model loads. / macOS 26+ 可选 AI 超分放大（Apple 低延迟机器学习超分），模型加载期间自动回退 MetalFX。
 - Align enhancement switches with the panel's right edge; simplify their labels. / 画质面板开关统一右对齐，简化说明。
 - Dismiss a successful recording notification after five seconds. Errors and dropped-sample warnings stay visible. / 录制成功提示五秒后消失，错误和丢样本警告保留。
