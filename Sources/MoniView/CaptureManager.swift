@@ -228,9 +228,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var discoveryRetryScheduled = false
     private var isSwitchingVideoDevice = false
     private var pendingAudioDeviceID: String?
-    // Bumped whenever the video input or its format changes, so late callbacks from a superseded
-    // configuration cannot publish stale state or apply an index that belongs to another device.
-    private var videoConfigurationGeneration: UInt64 = 0
+    // Requests originate on main; queued work and its result both check this synchronized token.
+    // Never hold its lock while configuring a device, starting a session or publishing UI state.
+    private let videoConfiguration = ConfigurationRevision()
 
     override init() {
         super.init()
@@ -339,14 +339,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         selectedFrameRate = 0
         selectedFPS = 0
         isSwitchingVideoDevice = true
-        videoConfigurationGeneration &+= 1
-        let generation = videoConfigurationGeneration
+        let generation = videoConfiguration.advance()
         if let id { UserDefaults.standard.set(id, forKey: "device.lastVideo") }
         frames.clear()
         let device = Self.devices(.video).first { $0.uniqueID == id }
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            guard self.videoConfigurationGeneration == generation else { return }
+            guard self.videoConfiguration.isCurrent(generation) else { return }
             self.session.beginConfiguration()
             do {
                 if let device {
@@ -375,7 +374,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     let dim = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
                     DispatchQueue.main.async {
                         // A newer switch superseded this one; do not publish stale state.
-                        guard self.videoConfigurationGeneration == generation else { return }
+                        guard self.videoConfiguration.isCurrent(generation) else { return }
                         self.deviceName = device.localizedName
                         self.resolution = "\(dim.width) × \(dim.height)"
                         self.pixelFormat = Self.fourCC(CMFormatDescriptionGetMediaSubType(device.activeFormat.formatDescription))
@@ -395,7 +394,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.session.commitConfiguration()
                     self.session.stopRunning()
                     DispatchQueue.main.async {
-                        guard self.videoConfigurationGeneration == generation else { return }
+                        guard self.videoConfiguration.isCurrent(generation) else { return }
                         self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
                         self.formatOptions = []; self.selectedFormatID = nil
                         self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
@@ -411,7 +410,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 self.configuredFrameDuration = .invalid
                 self.session.commitConfiguration()
                 DispatchQueue.main.async {
-                    guard self.videoConfigurationGeneration == generation else { return }
+                    guard self.videoConfiguration.isCurrent(generation) else { return }
                     self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
                     self.formatOptions = []; self.selectedFormatID = nil
                     self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
@@ -523,11 +522,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         applyFormat(index: selectedFormatID, fps: fps)
     }
     private func applyFormat(index: Int, fps: Double) {
-        videoConfigurationGeneration &+= 1
-        let generation = videoConfigurationGeneration
+        let generation = videoConfiguration.advance()
         sessionQueue.async { [weak self] in
             guard let self, let device = self.selectedDevice else { return }
-            guard self.videoConfigurationGeneration == generation else { return }
+            guard self.videoConfiguration.isCurrent(generation) else { return }
             self.session.beginConfiguration()
             do {
                 try self.configureFormat(device, index: index, fps: fps)
@@ -537,7 +535,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 self.publishFormat(device: device, index: index, fps: fps, generation: generation)
             } catch {
                 self.session.commitConfiguration()
-                DispatchQueue.main.async { self.statusMessage = error.localizedDescription }
+                DispatchQueue.main.async {
+                    guard self.videoConfiguration.isCurrent(generation) else { return }
+                    self.statusMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -550,7 +551,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         UserDefaults.standard.set(["width": Int(dim.width), "height": Int(dim.height), "fps": fps], forKey: "device.format.\(device.uniqueID)")
         DispatchQueue.main.async {
             // Ignore a result that a newer switch already superseded.
-            guard self.videoConfigurationGeneration == generation else { return }
+            guard self.videoConfiguration.isCurrent(generation) else { return }
             self.selectedFormatID = self.formatOptions.first { $0.width == Int(dim.width) && $0.height == Int(dim.height) }?.id ?? index
             self.selectedFPS = Int(fps.rounded()); self.selectedFrameRate = fps
             self.frameRateOptions = options
