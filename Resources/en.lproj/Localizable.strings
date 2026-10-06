@@ -240,3 +240,4 @@
 "实际内容约 %d FPS · 2× 输出 %d" = "Detected content %d FPS · 2x output %d";
 "内容约 %d FPS · 采集可设为 %d" = "Content ≈ %d FPS · capture can be %d";
 "内容帧率持续低于采集帧率；设为一致可避免重复帧并降低带宽，切换会短暂断流。" = "Content runs below the capture rate; matching them avoids duplicate frames and lowers bandwidth. Switching briefly interrupts the stream.";
+"实测内容约 %d FPS" = "Measured content ~ %d FPS";

@@ -685,6 +685,12 @@ struct MainView: View {
                     .background(Color.black.opacity(0.28), in: Capsule())
                     .frame(width: 195, alignment: .trailing)
                 }
+                if let contentFPS = capture.detectedContentFPS {
+                    Text(L10n.format("实测内容约 %d FPS", contentFPS))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
 
                 labeledPicker("帧率档位", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
