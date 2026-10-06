@@ -45,8 +45,10 @@ input.setEventHandler {
     var buffer: CVPixelBuffer?
     let attrs: [String:Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:], kCVPixelBufferMetalCompatibilityKey as String:true]
     guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &buffer) == kCVReturnSuccess, let buffer else { fatalError("allocation") }
-    for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2), (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2), (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)] {
-        CVBufferSetAttachment(buffer, key, value, .shouldPropagate)
+    if environment["MONIVIEW_TEST_METADATA"] != "missing" {
+        for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2), (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2), (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)] {
+            CVBufferSetAttachment(buffer, key, value, .shouldPropagate)
+        }
     }
     CVPixelBufferLockBaseAddress(buffer, [])
     for plane in 0..<2 {

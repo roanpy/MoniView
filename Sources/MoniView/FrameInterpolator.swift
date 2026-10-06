@@ -233,7 +233,8 @@ final class FrameInterpolator {
     /// after interpolation.
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
                      context: CIContext, command: MTLCommandBuffer,
-                     previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil) -> CIImage? {
+                     previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
+                     fastInputResampling: Bool = false) -> CIImage? {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let session, session.key == requested, previousTime.isNumeric, currentTime.isNumeric, currentTime > previousTime else { return nil }
         let width = session.key.width, height = session.key.height
@@ -293,7 +294,11 @@ final class FrameInterpolator {
                 var normalized = image.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
                 if extent.width != Double(width) || extent.height != Double(height) {
                     let verticalScale = Double(height) / extent.height
-                    normalized = normalized.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: verticalScale, kCIInputAspectRatioKey: (Double(width) / extent.width) / verticalScale])
+                    if fastInputResampling {
+                        normalized = normalized.transformed(by: CGAffineTransform(scaleX: Double(width) / extent.width, y: verticalScale), highQualityDownsample: false)
+                    } else {
+                        normalized = normalized.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: verticalScale, kCIInputAspectRatioKey: (Double(width) / extent.width) / verticalScale])
+                    }
                 }
                 let destination = CIRenderDestination(mtlTexture: session.bgra, commandBuffer: command)
                 destination.colorSpace = videoSpace; destination.isFlipped = true
@@ -331,6 +336,7 @@ final class FrameInterpolator {
     func stop() {}
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
                      context: CIContext, command: MTLCommandBuffer,
-                     previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil) -> CIImage? { nil }
+                     previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
+                     fastInputResampling: Bool = false) -> CIImage? { nil }
 }
 #endif

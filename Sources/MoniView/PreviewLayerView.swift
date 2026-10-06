@@ -406,7 +406,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     if midCost == nil || (budgetFits && sourceFits && pairFits && deadlineFits) {
                         if let midpoint = interpolator.interpolate(previous: CIImage(cvPixelBuffer: pair.0), current: sourceImage,
                             previousTime: pair.2, currentTime: pair.3, context: ciContext, command: command,
-                            previousBuffer: pair.0, currentBuffer: buffer) {
+                            previousBuffer: pair.0, currentBuffer: buffer,
+                            fastInputResampling: settings.frameInterpolation == .efficient) {
                             if midCost == nil { calibratedMidpoint = true }
                             else {
                                 generatedMidpoint = true; sourceImage = midpoint
@@ -441,7 +442,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
         let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
         let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
-        let workingScale = settings.enhancementEnabled ? max(1, targetLongEdge / sourceLongEdge) : 1
+        // Smooth midpoints use their measured working size and one final resize.
+        // Otherwise adaptive 640px input can fall through the >3x spatial wrapper
+        // guard into expensive Lanczos, undoing the purpose of the lighter tier.
+        let smoothMidpoint = generatedMidpoint && settings.frameInterpolation == .efficient
+        let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
         var usedMetalFX = false
@@ -470,15 +475,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // Native-size, MetalFX and AI previews match the recording; Lanczos scaling compensates more.
         let enhancementSharpening = usedMetalFX || usedAI || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
-        let engine = usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始")))
+        let engine = smoothMidpoint ? "流畅插帧" : (usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始"))))
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
         let scale = aspectMode == .fit ? min(size.width / output.width, size.height / output.height) : max(size.width / output.width, size.height / output.height)
         if aspectMode == .stretch {
-            image = image.transformed(by: CGAffineTransform(scaleX: size.width / output.width, y: size.height / output.height))
+            let resize = CGAffineTransform(scaleX: size.width / output.width, y: size.height / output.height)
+            image = smoothMidpoint ? image.transformed(by: resize, highQualityDownsample: false) : image.transformed(by: resize)
         } else if usedMetalFX || image.extent.width > originalExtent.width ||
                     (generatedMidpoint && settings.frameInterpolation == .efficient) {
-            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let resize = CGAffineTransform(scaleX: scale, y: scale)
+            image = smoothMidpoint ? image.transformed(by: resize, highQualityDownsample: false) : image.transformed(by: resize)
         } else if abs(scale - 1) > 0.001 {
             image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
         }
@@ -560,8 +567,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // Measure at the GPU completion callback, before waiting for the main thread.
             // LatestVideoFrame is lock-protected; parameter/resize redraws are not new video frames.
             if succeeded {
-                frameStore.setEngine(engine)
-                frameStore.setEnhancedSize(enhancedSize)
+                // Report the source-frame spatial pipeline consistently; temporal
+                // work has its own size/status. M/B alternation must not flicker HUD.
+                if !wasMidpoint {
+                    frameStore.setEngine(engine)
+                    frameStore.setEnhancedSize(enhancedSize)
+                }
                 if shouldMeasure { frameStore.markRendered(receivedAt: frameReceivedAt, gpuMS: gpuMS) }
             }
             let cost = encodedCPUSeconds + gpuMS / 1000

@@ -22,6 +22,7 @@ private func skip(_ message: String) -> Never {
 private final class FrameInterpolatorGPUSuite {
     private enum InputMode {
         case ciFallback
+        case ciFallbackFast
         case direct420v
         case fullRangeFallback
         case otherColorFallback
@@ -52,6 +53,7 @@ private final class FrameInterpolatorGPUSuite {
     private let cases = [
         Case(name: "CI fallback resize warmup 1920x1080→1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
         Case(name: "CI fallback resize warmed 1920x1080→1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
+        Case(name: "CI fast fallback nonzero-origin 1920x1080→640x360", targetWidth: 640, targetHeight: 360, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallbackFast, stopWhileInFlight: false),
         Case(name: "direct 420v resize 1920x1080→1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1920, inputHeight: 1080, inputMode: .direct420v, stopWhileInFlight: false),
         Case(name: "full-range input falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .fullRangeFallback, stopWhileInFlight: false),
         Case(name: "non-709 input falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .otherColorFallback, stopWhileInFlight: false),
@@ -173,7 +175,8 @@ private final class FrameInterpolatorGPUSuite {
             context: context,
             command: command,
             previousBuffer: inputBuffers?.0,
-            currentBuffer: inputBuffers?.1
+            currentBuffer: inputBuffers?.1,
+            fastInputResampling: testCase.inputMode == .ciFallbackFast
         ) else { fail("interpolation encoding returned nil for \(testCase.name)") }
         let encodeMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - encodeStarted) / 1_000_000
 
@@ -271,7 +274,7 @@ private final class FrameInterpolatorGPUSuite {
 
     private func makeInputBuffers(for testCase: Case, previous: CIImage, current: CIImage) -> (CVPixelBuffer, CVPixelBuffer)? {
         switch testCase.inputMode {
-        case .ciFallback:
+        case .ciFallback, .ciFallbackFast:
             return nil
         case .direct420v:
             return (
