@@ -3,6 +3,10 @@ import CoreImage
 import CoreVideo
 import CoreMedia
 import Foundation
+import Darwin
+
+// Preserve the final acceptance measurements even when a precondition fails.
+setbuf(stdout, nil)
 
 // A native window and GPU with synthetic SDR input. This is not a capture-card,
 // picture-quality, HDMI-latency or long-running throughput certification.
@@ -25,7 +29,7 @@ preview.settings.enhancementEnabled = true
 preview.settings.enhancementStrength = 0
 preview.settings.upscaleTarget = UpscaleTarget(rawValue: environment["MONIVIEW_TEST_TARGET"] ?? "") ?? .native
 preview.settings.lowLatency = environment["MONIVIEW_TEST_UNCAPPED"] != "1"
-preview.settings.interpolationMode = .efficient
+preview.settings.interpolationMode = environment["MONIVIEW_TEST_QUALITY"] == "1" ? .quality : .efficient
 var events: [(sequence: UInt64, generated: Bool, time: Double)] = []
 preview.onPresentation = { events.append(($0, $1, $2)) }
 var recovered = false
@@ -75,20 +79,29 @@ if fault {
 }
 var tick = 0, total = 0, steady = 0, eventOffset = 0, strictWindows = 0
 var stableEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
+var countedSources = Set<UInt64>()
 let stats = DispatchSource.makeTimerSource(queue: .main)
 stats.schedule(deadline:.now()+1, repeating:1)
 stats.setEventHandler {
     tick += 1
-    let counts = frames.statistics(), gen = frames.generatedStatistics(), cost = frames.interpolationCost()
+    let counts = frames.statistics(), presented = frames.presentationStatistics(), cost = frames.interpolationCost()
+    let gen = presented.generated
+    if environment["MONIVIEW_TEST_QUALITY"] == "1", let work = frames.currentInterpolationWorkingSize() {
+        let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!
+        precondition(work == "\(expected.width)×\(expected.height)", "Clear silently reduced its working resolution")
+    }
     let newEvents = events.dropFirst(eventOffset); eventOffset = events.count
-    let sourcePresentations = Set(newEvents.filter { !$0.generated }.map(\.sequence)).count
+    let sourcePresentations = newEvents.filter { !$0.generated && countedSources.insert($0.sequence).inserted }.count
     if require120, tick >= 6, tick < stopAt {
         stableEvents.append(contentsOf: newEvents)
         if gen >= 57 && sourcePresentations >= 57 { strictWindows += 1 }
     }
     total += gen
     if gen >= Int(Double(fps) * 0.85) { steady += 1 }
-    print("tick=\(tick) capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) work=\(frames.currentInterpolationWorkingSize() ?? "—") costP95=\(String(format: "%.2f",cost.0))ms slot=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
+    // Count source presentations independently from renderer statistics. The pair
+    // shares the same sampling boundary, including native fallback and redraws.
+    precondition(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
+    print("tick=\(tick) capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
     if fault && tick == 2 {
         precondition(recovered && preview.peakOutstandingPresentations <= presentationLimit, "lost callbacks did not retire old preview")
         print("PASS injected presentation-callback loss: old layer retired without recycling outstanding tokens")
@@ -106,8 +119,9 @@ stats.setEventHandler {
             precondition(b.sequence >= a.sequence, "presentation went backwards")
         }
         let eligible = fps * 2 <= (window.screen?.maximumFramesPerSecond ?? 0)
-        if eligible { precondition(total > 0, "no generated frame actually presented") }
-        else { precondition(total == 0, "interpolation despite insufficient refresh") }
+        if eligible {
+            if environment["MONIVIEW_ALLOW_BUDGET_FALLBACK"] != "1" { precondition(total > 0, "no generated frame actually presented") }
+        } else { precondition(total == 0, "interpolation despite insufficient refresh") }
         let waits = preview.drawableWaitMS.sorted()
         if !waits.isEmpty { print("Drawable wait P95=\(waits[min(waits.count-1, Int(Double(waits.count)*0.95))])ms, max=\(waits.last!)ms") }
         if require120 {

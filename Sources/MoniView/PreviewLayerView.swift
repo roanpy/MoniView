@@ -281,6 +281,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     func draw(in view: MTKView) {
         guard let ciContext, let commands else { return }
         guard !retiringForPresentationFailure else { return }
+        // Occluded/minimized windows may defer presentation callbacks. Evaluate
+        // lost-presentation deadlines only when this window can actually display.
+        guard let window, window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible) else { return }
         // A completed GPU command can lose its presentation callback during a display
         // failure. Retire the entire old layer rather than recycling tokens whose old
         // drawables might still present later. SwiftUI constructs a fresh preview layer.
@@ -292,8 +295,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             onPresentationRecovery?()
             return
         }
-        guard let window, window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
-              let initial = frames.latestSnapshot() else { return }
+        guard let initial = frames.latestSnapshot() else { return }
         var (buffer, sequence, receivedAt) = (initial.buffer, initial.sequence, initial.receivedAt)
         let streamEpoch = initial.streamEpoch
         if streamEpoch != sourceStreamEpoch {
@@ -398,7 +400,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         if interpolationRequested {
             if !FrameInterpolatorSupport.isSupported { frames.setInterpolationState("插帧不可用") }
             else if !admitted { frames.setInterpolationState(sourceFPS >= 20 && sourceFPS <= 60 ? "显示器刷新率不足，使用原始帧率" : "等待稳定输入帧率") }
-            else if CACurrentMediaTime() < cooldownUntil { frames.setInterpolationState("处理超预算，暂用原始帧率") }
+            else if CACurrentMediaTime() < cooldownUntil { frames.setInterpolationState(settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率") }
             else if endpointPresentation == nil, !skipInterpolation,
                     let pair = frames.interpolationPair(sequence: sequence), lastSourceSequence == pair.1,
                     let dimensions = FrameInterpolationPolicy.targetDimensions(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mode: settings.frameInterpolation, inputFPS: sourceFPS, maximumLongEdge: adaptiveLongEdge),
@@ -415,7 +417,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 if interpolator.isReady {
                     let midCost = p95(midpointCosts), sourceCost = p95(nativeCosts)
                     let slot = 0.5 / sourceFPS
-                    let budgetFits = midCost.map { $0 <= slot * FrameInterpolationPolicy.budgetFraction } ?? false
+                    let budgetFits = midCost.map { $0 <= slot * FrameInterpolationPolicy.midpointBudgetFraction } ?? false
                     let sourceFits = sourceCost.map { $0 <= slot * FrameInterpolationPolicy.budgetFraction } ?? false
                     let pairFits = midCost.flatMap { mid in sourceCost.map { FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: slot) } } ?? false
                     let earliest = CACurrentMediaTime() + (midCost ?? 0.002) + slot * 0.1
@@ -442,7 +444,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                     } else if !budgetFits || !sourceFits || !pairFits {
                         cooldownUntil = CACurrentMediaTime() + FrameInterpolationPolicy.overloadCooldownSeconds
-                        midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; frames.setInterpolationState("处理超预算，暂用原始帧率")
+                        midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
+                        frames.setInterpolationState(settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")
                     }
                 }
             }
@@ -537,11 +540,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             guard !suppressPresentation else { return }
             #endif
             let time = presented.presentedTime
-            if wasGenerated && time > 0 { presentedFrameStore.markGenerated() }
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.outstandingPresentations.removeValue(forKey: token) != nil else { return }
                 guard time > 0 else { self.forceDraw = true; self.requestRenderIfStateChanged(); return }
+                // Presentation counts exclude failed/retired-stream drawables and
+                // settings/resize redraws of the same captured frame.
+                if wasGenerated { presentedFrameStore.markGenerated(streamEpoch: streamEpoch) }
+                else { presentedFrameStore.markPresentedSource(sequence: presentedSequence, streamEpoch: streamEpoch) }
                 #if MONIVIEW_PREVIEW_TESTING
                 self.onPresentation?(presentedSequence, wasGenerated, time)
                 if wasGenerated || wasEndpoint { self.trace("PRESENT seq=\(presentedSequence) mid=\(wasGenerated) deadlineError=\((time - (presentationTime ?? time))*1000)ms") }
@@ -620,27 +626,30 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationCost(seconds: cost, budget: measuredSlot)
+                            frameStore.setInterpolationCost(seconds: cost + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             frameStore.setInterpolationState("插帧准备中")
                         } else if wasMidpoint || wasCalibration {
                             self.midpointCosts.append(cost); self.midpointCosts = Array(self.midpointCosts.suffix(32))
-                            frameStore.setInterpolationCost(seconds: self.p95(self.midpointCosts) ?? cost, budget: measuredSlot)
+                            frameStore.setInterpolationCost(seconds: (self.p95(self.midpointCosts) ?? cost) + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
                         } else {
                             self.nativeCosts.append(cost); self.nativeCosts = Array(self.nativeCosts.suffix(32))
+                            if let mid = self.p95(self.midpointCosts) {
+                                frameStore.setInterpolationCost(seconds: mid + (self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            }
                         }
                     }
                     let measuredCost = (wasMidpoint || wasCalibration) ? self.p95(self.midpointCosts) : self.p95(self.nativeCosts)
                     let pairOverBudget = self.p95(self.midpointCosts).flatMap { mid in self.p95(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredSlot) } } ?? false
-                    if !succeeded || (!warming && (wasMidpoint || wasCalibration || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > measuredSlot * FrameInterpolationPolicy.budgetFraction || pairOverBudget)) {
+                    let individualLimit = measuredSlot * ((wasMidpoint || wasCalibration) ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
+                    if !succeeded || (!warming && (wasMidpoint || wasCalibration || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
                         // A successful midpoint already owns a fixed endpoint. Complete
                         // that pair even when its measured cost disables the NEXT pair.
                         // GPU errors invalidate the pair; age/epoch guards still apply.
                         if !succeeded { self.pendingSource = nil }
                         let lower = measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
-                        // Both tiers step down under overload. Quality keeps a 960 long-edge
-                        // floor; below it the honest fallback reads better than secret 640p.
-                        if succeeded, expectedSettings.frameInterpolation != .off, let lower,
-                           (expectedSettings.frameInterpolation == .efficient || lower >= 960) {
+                        // Only Smooth changes inference resolution. Quality retains its
+                        // advertised 1080p cap and retries after a bounded cooldown.
+                        if succeeded, expectedSettings.frameInterpolation == .efficient, let lower {
                             self.adaptiveLongEdge = lower
                             self.cooldownUntil = CACurrentMediaTime() + 0.1
                         } else {
@@ -658,7 +667,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         #if MONIVIEW_PREVIEW_TESTING
                         self.trace("COST fail seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) endpoint=\(wasEndpoint) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
                         #endif
-                        frameStore.setInterpolationState("处理超预算，暂用原始帧率")
+                        frameStore.setInterpolationState(expectedSettings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")
                     } else if succeeded, wasMidpoint, measuredSlot > 0, let mid = self.p95(self.midpointCosts) {
                         // Sustained headroom after a step-down: climb one rung back and
                         // re-measure. ~90 presented midpoints is about 1.5 s at 60 FPS.

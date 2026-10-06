@@ -7,7 +7,13 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
     // Preserve the persisted raw value from early development builds.
-    var title: String { self == .efficient ? "流畅 · 自适应" : rawValue }
+    var title: String {
+        switch self {
+        case .off: return rawValue
+        case .efficient: return "流畅 · 自适应"
+        case .quality: return "清晰 · 最高1080p"
+        }
+    }
     var longEdgeCap: Int? {
         switch self {
         case .off: return nil
@@ -23,15 +29,17 @@ enum FrameInterpolationPolicy {
     static let defaultEnabled = false
     static let phase = 0.5
     static let budgetFraction = 0.9
-    static let pairBudgetFraction = 0.8
+    static let pairBudgetFraction = 0.9
+    static let midpointBudgetFraction = 1.5
     static let overloadCooldownSeconds = 2.0
 
-    /// Endpoints are usually much cheaper than inference. Keep a 10% per-slot
-    /// deadline margin and 20% for the complete midpoint + source cycle.
+    /// Inference may span more than one display slot when encoded ahead of its
+    /// presentation. Bound that lead AND the whole pair; the cheap endpoint still
+    /// needs to fit its own slot. Deadline checks in the renderer remain mandatory.
     static func costsFit(midpoint: Double, source: Double, slot: Double) -> Bool {
         guard midpoint.isFinite, source.isFinite, slot.isFinite,
               midpoint >= 0, source >= 0, slot > 0 else { return false }
-        return midpoint <= slot * budgetFraction && source <= slot * budgetFraction &&
+        return midpoint <= slot * midpointBudgetFraction && source <= slot * budgetFraction &&
             midpoint + source <= 2 * slot * pairBudgetFraction
     }
 
@@ -56,7 +64,8 @@ enum FrameInterpolationPolicy {
     }
 
     static func reducedLongEdge(after current: Int) -> Int? {
-        [1280, 960, 854, 640].first { $0 < current }
+        // Below 854px, enlarged midpoints visibly pulse between soft and sharp.
+        [1280, 960, 854].first { $0 < current }
     }
 
     /// Next higher working-size rung after a step-down; nil means the mode ceiling.

@@ -215,6 +215,27 @@ struct CaptureCompatibilityTests {
         testInterpolationHistory()
         testStableSourceFrameRatesAndResets()
 
+        let presentationFrames = LatestVideoFrame()
+        presentationFrames.put(pixelBuffer())
+        let first = presentationFrames.latestSnapshot()!
+        presentationFrames.markPresentedSource(sequence: first.sequence, streamEpoch: first.streamEpoch)
+        presentationFrames.markPresentedSource(sequence: first.sequence, streamEpoch: first.streamEpoch)
+        var presentations = presentationFrames.presentationStatistics()
+        precondition(presentations.presentedSource == 1 && presentations.generated == 0, "Native fallback counts once even without generated frames")
+        presentationFrames.markPresentedSource(sequence: first.sequence, streamEpoch: first.streamEpoch)
+        precondition(presentationFrames.presentationStatistics().presentedSource == 0, "Redraw across sample windows must remain deduplicated")
+        presentationFrames.clear()
+        presentationFrames.markPresentedSource(sequence: first.sequence + 10, streamEpoch: first.streamEpoch)
+        presentationFrames.markGenerated(streamEpoch: first.streamEpoch)
+        precondition(presentationFrames.presentationStatistics() == (0, 0), "Retired stream callbacks must not pollute output FPS")
+        presentationFrames.put(pixelBuffer())
+        let second = presentationFrames.latestSnapshot()!
+        presentationFrames.markPresentedSource(sequence: second.sequence, streamEpoch: second.streamEpoch)
+        presentationFrames.markGenerated(streamEpoch: second.streamEpoch)
+        presentations = presentationFrames.presentationStatistics()
+        precondition(presentations.presentedSource == 1 && presentations.generated == 1, "Source and midpoint counts share one sampling window")
+        print("PASS presentation deduplication, native fallback, retired stream callbacks and atomic output sampling")
+
         precondition(UpscaleMethod.ai.availableMethod(aiSupported: false) == .metalFX)
         precondition(UpscaleMethod.ai.availableMethod(aiSupported: true) == .ai)
         precondition(UpscaleMethod.lanczos.availableMethod(aiSupported: false) == .lanczos)

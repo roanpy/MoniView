@@ -18,10 +18,12 @@ struct FrameInterpolationPolicyTests {
 
     static func main() throws {
         check(!P.defaultEnabled && P.phase == 0.5, "Default off, one midpoint")
-        check(P.budgetFraction == 0.9 && P.pairBudgetFraction == 0.8 && P.overloadCooldownSeconds == 2, "Renderer budget constants")
+        check(P.budgetFraction == 0.9 && P.pairBudgetFraction == 0.9 && P.overloadCooldownSeconds == 2, "Renderer budget constants")
         check(P.costsFit(midpoint: 0.007, source: 0.001, slot: 1/120), "Unequal work fits whole pair and both deadlines")
-        check(!P.costsFit(midpoint: 0.008, source: 0.001, slot: 1/120), "Inference deadline remains bounded")
-        check(!P.costsFit(midpoint: 0.007, source: 0.007, slot: 1/120), "Whole-pair overload rejected")
+        check(P.costsFit(midpoint: 0.0095, source: 0.0023, slot: 1/120), "Longer inference fits 60-to-120 pair encoded ahead of presentation")
+        check(!P.costsFit(midpoint: 0.0145, source: 0.0023, slot: 1/120), "Inference lead and pair overload remain bounded")
+        check(!P.costsFit(midpoint: 0.011, source: 0.005, slot: 1/120), "Whole-pair overload rejected")
+        check(P.costsFit(midpoint: 0.0145, source: 0.0023, slot: 1/60), "Same 1080p work fits 30-to-60 cadence")
         for invalid in [-1.0, .nan, .infinity] {
             check(!P.costsFit(midpoint: invalid, source: 0.001, slot: 1/120), "Invalid inference cost")
             check(!P.costsFit(midpoint: 0.001, source: invalid, slot: 1/120), "Invalid endpoint cost")
@@ -29,14 +31,14 @@ struct FrameInterpolationPolicyTests {
         }
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, inputFPS: 60, maximumLongEdge: 854) == P.Dimensions(width: 854, height: 480), "Adaptive size respects aspect and even rounding")
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, maximumLongEdge: 1) == nil, "Invalid adaptive cap")
-        check(P.reducedLongEdge(after: 960) == 854 && P.reducedLongEdge(after: 640) == nil, "Bounded adaptive ladder")
+        check(P.reducedLongEdge(after: 960) == 854 && P.reducedLongEdge(after: 854) == nil, "No excessive soft-midpoint downscaling")
         check(FrameInterpolationMode.allCases.count == 3, "Off plus two cost tiers")
         for mode in FrameInterpolationMode.allCases {
             let data = try JSONEncoder().encode(mode)
             let decoded = try JSONDecoder().decode(FrameInterpolationMode.self, from: data)
             check(decoded == mode && mode.id == mode.rawValue, "Persisted mode roundtrip")
         }
-        for fps in [20.0, 23.976, 24, 25, 29.97, 30, 50, 59.94, 60] {
+        for fps in [20.0, 23.976, 24, 25, 29.97, 30, 45, 50, 59.94, 60] {
             check(P.nominalInputFPS(fps) == fps, "Preserve exact/fractional cadence")
             check(admitted(fps, fps * 2), "Full 2x capacity")
         }

@@ -164,12 +164,12 @@ struct MainView: View {
                 Text(enhancementSummary)
                     .fixedSize()
                     .foregroundStyle(Color(hex: 0xec8718))
-                if capture.generatedFPS > 0 {
-                    Text("·")
-                    Text(L10n.format("插帧 %d FPS", capture.outputFPS))
-                        .fixedSize()
-                        .foregroundStyle(Color(hex: 0xec8718))
-                }
+            }
+            if capture.showsEngineStatus && capture.picture.frameInterpolation != .off {
+                Text("·")
+                Text(L10n.format("输出 %d FPS", capture.outputFPS))
+                    .fixedSize()
+                    .foregroundStyle(Color(hex: 0xec8718))
             }
         }
         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -503,17 +503,22 @@ struct MainView: View {
                     }
                 }
                 if capture.picture.frameInterpolation != .off, capture.interpolationBudgetMS > 0 {
-                    Text(L10n.format("处理 %.1f ms / 时隙 %.1f ms · 预算 %.0f%%", capture.interpolationCostMS, capture.interpolationBudgetMS, capture.interpolationCostMS / capture.interpolationBudgetMS * 100))
+                    Text(L10n.format("处理 %.1f ms / 周期预算 %.1f ms · 预算 %.0f%%", capture.interpolationCostMS, capture.interpolationBudgetMS, capture.interpolationCostMS / capture.interpolationBudgetMS * 100))
                         .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS * FrameInterpolationPolicy.budgetFraction ? Color.orange : Color(hex: 0x98908a))
+                        .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS ? Color.orange : Color(hex: 0x98908a))
                 }
-                if capture.picture.frameInterpolation != .off, let size = capture.interpolationWorkingSize {
-                    Text(L10n.format("插帧处理 %@ · 输出 %d FPS（生成 %d）", size, capture.outputFPS, capture.generatedFPS))
-                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                if capture.picture.frameInterpolation != .off {
+                    if let size = capture.interpolationWorkingSize {
+                        Text(L10n.format("插帧处理 %@ · 输出 %d FPS（生成 %d）", size, capture.outputFPS, capture.generatedFPS))
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                    } else {
+                        Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                    }
                 }
                 Text(L10n.text(FrameInterpolatorSupport.isSupported ? capture.interpolationStatus : "插帧不可用"))
                     .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                Text("预览目标 2×（实验性）；按当前显示器刷新率和处理预算启用。可能增加延迟和运动瑕疵，插帧时使用空间放大，不改变采集或录制帧率。")
+                Text("流畅档降低中间帧分辨率；清晰档保留最高1080p，超预算恢复原帧并自动重试。输出帧率按实际呈现统计，2×是目标。")
                     .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                     .fixedSize(horizontal: false, vertical: true)
                 if recordingFreezesColor {
@@ -600,6 +605,9 @@ struct MainView: View {
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
                         fpsButton(30, title: "30")
+                        if capture.frameRateOptions.contains(45) {
+                            fpsButton(45, title: "45")
+                        }
                         fpsButton(60, title: "60")
                     }
                     .padding(3)
@@ -773,8 +781,9 @@ struct MainView: View {
 
     private func fpsButton(_ fps: Int, title: String) -> some View {
         let selected = abs(capture.selectedFrameRate - Double(fps)) < 0.01
-        let option = capture.formatOptions.first(where: { $0.id == capture.selectedFormatID })
-        let isSupported = fps == 0 || (option?.supportsFPS(fps) ?? false)
+        // Same-resolution pixel formats can advertise different frame rates;
+        // configureFormat selects the compatible variant when needed.
+        let isSupported = capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
 
         return Button {
             capture.selectFrameRate(fps)

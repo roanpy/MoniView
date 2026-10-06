@@ -107,6 +107,8 @@ final class LatestVideoFrame {
     private var historyEnabled = false
     private var previous: (CVPixelBuffer, UInt64, CMTime)?
     private var generated = 0
+    private var presentedSource = 0
+    private var lastPresentedSource: (sequence: UInt64, streamEpoch: UInt64)?
     private var interpolationState = "关闭"
     private var interpolationCostMS = 0.0
     private var interpolationBudgetMS = 0.0
@@ -192,8 +194,27 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }; return displayRates
     }
     func currentInterpolationState() -> String { lock.lock(); defer { lock.unlock() }; return interpolationState }
-    func markGenerated() { lock.lock(); generated += 1; lock.unlock() }
-    func generatedStatistics() -> Int { lock.lock(); defer { lock.unlock() }; let n = generated; generated = 0; return n }
+    func markGenerated(streamEpoch: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        guard streamEpoch == self.streamEpoch else { return }
+        generated += 1
+    }
+    func markPresentedSource(sequence: UInt64, streamEpoch: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        guard streamEpoch == self.streamEpoch else { return }
+        if let lastPresentedSource {
+            guard streamEpoch > lastPresentedSource.streamEpoch ||
+                    (streamEpoch == lastPresentedSource.streamEpoch && sequence > lastPresentedSource.sequence) else { return }
+        }
+        lastPresentedSource = (sequence, streamEpoch)
+        presentedSource += 1
+    }
+    func presentationStatistics() -> (generated: Int, presentedSource: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let value = (generated, presentedSource)
+        generated = 0; presentedSource = 0
+        return value
+    }
     func clear() {
         lock.lock(); defer { lock.unlock() }
         buffer = nil
@@ -260,8 +281,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var applyingPreset = false
     private var picturePersistWork: DispatchWorkItem?
     @Published private(set) var generatedFPS = 0
-    /// Total presented output while interpolating: captured sources plus generated midpoints.
-    var outputFPS: Int { generatedFPS > 0 ? generatedFPS + renderedFPS : 0 }
+    @Published private(set) var presentedSourceFPS = 0
+    @Published private(set) var presentedOutputFPS = 0
+    /// Total presented output: source frames plus generated midpoints.
+    var outputFPS: Int { presentedOutputFPS }
     @Published private(set) var interpolationStatus = "关闭"
     @Published private(set) var interpolationCostMS = 0.0
     @Published private(set) var interpolationBudgetMS = 0.0
@@ -708,7 +731,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if abs(range.minFrameRate - range.maxFrameRate) < 0.01 {
                 values.insert((range.maxFrameRate * 100).rounded() / 100)
             } else {
-                for value in [24.0, 25, 29.97, 30, 50, 59.94, 60, 90, 120, range.minFrameRate, range.maxFrameRate] where value >= range.minFrameRate && value <= range.maxFrameRate {
+                for value in [24.0, 25, 29.97, 30, 45, 50, 59.94, 60, 90, 120, range.minFrameRate, range.maxFrameRate] where value >= range.minFrameRate && value <= range.maxFrameRate {
                     values.insert((value * 100).rounded() / 100)
                 }
             }
@@ -957,7 +980,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             let stats = self.frames.statistics()
             self.measuredFPS = Int((Double(stats.0) / elapsed).rounded())
             self.renderedFPS = Int((Double(stats.1) / elapsed).rounded())
-            self.generatedFPS = Int((Double(self.frames.generatedStatistics()) / elapsed).rounded())
+            let presentationStats = self.frames.presentationStatistics()
+            self.generatedFPS = Int((Double(presentationStats.generated) / elapsed).rounded())
+            self.presentedSourceFPS = Int((Double(presentationStats.presentedSource) / elapsed).rounded())
+            self.presentedOutputFPS = Int((Double(presentationStats.presentedSource + presentationStats.generated) / elapsed).rounded())
             self.interpolationStatus = self.frames.currentInterpolationState()
             let interpolationCost = self.frames.interpolationCost()
             self.interpolationCostMS = interpolationCost.0; self.interpolationBudgetMS = interpolationCost.1
@@ -1022,6 +1048,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["interpolationMode"] = picture.frameInterpolation.rawValue
         payload["interpolationStatus"] = interpolationStatus
         payload["generatedFPS"] = generatedFPS
+        payload["presentedSourceFPS"] = presentedSourceFPS
+        payload["presentedOutputFPS"] = presentedOutputFPS
         payload["interpolationCostMS"] = interpolationCostMS
         payload["interpolationBudgetMS"] = interpolationBudgetMS
         if let interpolationWorkingSize { payload["interpolationWorkingSize"] = interpolationWorkingSize }
