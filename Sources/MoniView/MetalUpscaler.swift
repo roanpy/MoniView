@@ -71,6 +71,7 @@ final class MetalUpscaler {
     private let device: MTLDevice
     private let resources = MetalUpscalerResourceLRU<Key, Entry>(capacity: 2)
     private var retryAfterByKey: [Key: TimeInterval] = [:]
+    private var nextRetryPrune = 0.0
 
     init?(device: MTLDevice) {
         guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return nil }
@@ -88,7 +89,12 @@ final class MetalUpscaler {
         let key = Key(sourceWidth: sourceWidth, sourceHeight: sourceHeight,
                       outputWidth: width, outputHeight: height)
         let now = ProcessInfo.processInfo.systemUptime
-        retryAfterByKey = retryAfterByKey.filter { $0.value > now }
+        // Failed size keys are checked exactly on access below. Prune other expired
+        // failures periodically instead of rebuilding this dictionary on every frame.
+        if now >= nextRetryPrune {
+            retryAfterByKey = retryAfterByKey.filter { $0.value > now }
+            nextRetryPrune = now + 1
+        }
         if let retryAfter = retryAfterByKey[key], now < retryAfter { return nil }
 
         guard let entry = resources.value(for: key, create: { [device] in
