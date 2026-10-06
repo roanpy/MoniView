@@ -632,6 +632,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch)
             lastSourceSequence = sequence
             lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
+            frames.setPreviewState("dedup")
             inFlight.signal()
             return
         }
@@ -823,14 +824,20 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 if wasGenerated { self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time) }
                 else {
                     if wasEndpoint, let midpoint = self.presentedMidpoint,
-                       midpoint.sequence == presentedSequence,
-                       ContentCadencePolicy.presentedPairIsTimely(
-                        midpointTime: midpoint.time, midpointDeadline: midpoint.deadline,
-                        endpointTime: time,
-                        endpointDeadline: presentationTime ?? time, slot: period,
-                        presentationIntervalP95: presentedFrameStore.presentationP95() / 1000) {
+                       midpoint.sequence == presentedSequence {
+                        // Steadily presented pairs prove interpolation is running; the label
+                        // must not depend on sub-vsync phase. The stricter deadline check
+                        // remains the quality gate for adaptive step-ups.
                         presentedFrameStore.setInterpolationState(self.settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中")
-                        self.recordComfortablePresentedPair(slot: period)
+                        if ContentCadencePolicy.presentedPairIsTimely(
+                            midpointTime: midpoint.time, midpointDeadline: midpoint.deadline,
+                            endpointTime: time,
+                            endpointDeadline: presentationTime ?? time, slot: period,
+                            presentationIntervalP95: presentedFrameStore.presentationP95() / 1000) {
+                            self.recordComfortablePresentedPair(slot: period)
+                        } else {
+                            self.comfortableMidpoints = 0
+                        }
                     } else if wasEndpoint {
                         self.comfortableMidpoints = 0
                     }

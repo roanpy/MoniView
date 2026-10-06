@@ -8,6 +8,7 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_TARGET=native|2k|4k|screen   (default: native)
   MONIVIEW_TEST_LOW_LATENCY=0|1              (default: 1; 0 permits full target size)
   MONIVIEW_TEST_STRENGTH=0..1                (default: 0)
+  MONIVIEW_TEST_FLOWBLEND=1                  (use the optical-flow Beta tier; overrides MONIVIEW_TEST_QUALITY / MONIVIEW_TEST_BALANCED)
   MONIVIEW_TEST_QUALITY=1                    (use the Clear interpolation tier)
   MONIVIEW_TEST_REQUIRE_METALFX=1            (strict run must observe MetalFX)
   MONIVIEW_TEST_FULLSCREEN=1                 (fixture enters native fullscreen after launch; no persistent app setting)

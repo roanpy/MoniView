@@ -42,11 +42,20 @@ let enhancementStrength = Double(environment["MONIVIEW_TEST_STRENGTH"] ?? "0") ?
 precondition(enhancementStrength.isFinite && (0...1).contains(enhancementStrength), "MONIVIEW_TEST_STRENGTH must be between 0 and 1")
 let requireMetalFX = environment["MONIVIEW_TEST_REQUIRE_METALFX"] == "1"
 let testFullscreen = environment["MONIVIEW_TEST_FULLSCREEN"] == "1"
-let testInterpolationMode: FrameInterpolationMode = environment["MONIVIEW_TEST_QUALITY"] == "1" ? .quality : (environment["MONIVIEW_TEST_BALANCED"] == "1" ? .balanced : .efficient)
+let testInterpolationMode: FrameInterpolationMode
+if environment["MONIVIEW_TEST_FLOWBLEND"] == "1" {
+    testInterpolationMode = .flowBlend
+} else if environment["MONIVIEW_TEST_QUALITY"] == "1" {
+    testInterpolationMode = .quality
+} else if environment["MONIVIEW_TEST_BALANCED"] == "1" {
+    testInterpolationMode = .balanced
+} else {
+    testInterpolationMode = .efficient
+}
 precondition(fps > 0 && width >= 640 && height >= 480)
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-guard FrameInterpolatorSupport.isSupported else { print("SKIP runtime interpolation unavailable (not a pass)"); exit(2) }
+guard testInterpolationMode == .flowBlend || FrameInterpolatorSupport.isSupported else { print("SKIP runtime interpolation unavailable (not a pass)"); exit(2) }
 let frames = LatestVideoFrame()
 let preview = CapturePreviewNSView(frames: frames)
 preview.settings.enhancementEnabled = true
@@ -54,7 +63,7 @@ preview.settings.enhancementStrength = enhancementStrength
 preview.settings.upscaleMethod = .metalFX
 preview.settings.upscaleTarget = testTarget
 preview.settings.lowLatency = lowLatency
-preview.settings.interpolationMode = testInterpolationMode
+preview.settings.frameInterpolation = testInterpolationMode
 preview.settings.forceFrameInterpolation = environment["MONIVIEW_TEST_FORCE"] == "1"
 preview.settings.skipsExactDuplicateInterpolation = environment["MONIVIEW_TEST_DUPLICATES"] == "1"
 var events: [(sequence: UInt64, generated: Bool, time: Double)] = []
@@ -218,11 +227,11 @@ stats.setEventHandler {
     let counts = frames.statistics(), presented = frames.presentationStatistics(), cost = frames.interpolationCost()
     let gen = presented.generated
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
-    if environment["MONIVIEW_TEST_QUALITY"] == "1", let work = frames.currentInterpolationWorkingSize() {
+    if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!
         precondition(work == "\(expected.width)×\(expected.height)", "Clear silently reduced its working resolution")
     }
-    if environment["MONIVIEW_TEST_BALANCED"] == "1", let work = frames.currentInterpolationWorkingSize() {
+    if testInterpolationMode == .balanced, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .balanced)!
         precondition(work == "\(expected.width)×\(expected.height)", "Medium silently reduced its working resolution")
     }
@@ -250,7 +259,7 @@ stats.setEventHandler {
         print("PASS injected presentation-callback loss: old layer retired without recycling outstanding tokens")
         input.cancel(); stats.cancel(); app.terminate(nil); return
     }
-    if tick == 8 && !require120 && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
+    if tick == 8 && !require120 && testInterpolationMode != .flowBlend && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
     if tick == 13 && !require120 { window.miniaturize(nil) }
     if tick == 14 && !require120 { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil) }
     if tick == stopAt { preview.settings.frameInterpolation = .off; preview.configureInterpolation(); preview.requestRender() }
@@ -258,6 +267,9 @@ stats.setEventHandler {
         if environment["MONIVIEW_TEST_DUPLICATES"] == "1" { precondition(totalDuplicateSkips > 0, "identical pairs were not skipped") }
         precondition(gen == 0 && !recovered, "disable/recovery failure")
         precondition(preview.peakOutstandingPresentations <= presentationLimit, "unpresented drawable bound")
+        if testInterpolationMode == .flowBlend {
+            precondition(total > 0, "FlowBlend produced no generated frame actually presented")
+        }
         let sorted = events.sorted { $0.time < $1.time }
         for (a,b) in zip(sorted, sorted.dropFirst()) {
             precondition(b.sequence >= a.sequence, "presentation went backwards")
