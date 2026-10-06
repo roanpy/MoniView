@@ -47,7 +47,7 @@ private final class FlowBlendSuite {
     // Match PreviewLayerView. References render the original CIImage through the
     // same destination space; raw CV rows are not a display-path reference.
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-    private let interpolator: FlowBlendInterpolator
+    private var interpolator: FlowBlendInterpolator
     private var checks = 0
     private var failures: [String] = []
 
@@ -80,6 +80,7 @@ private final class FlowBlendSuite {
             benchmark(sourceWidth: 1920, sourceHeight: 1080, width: 1280, height: 720, matrix: matrix, present: true)
         }
         benchmark(sourceWidth: 1920, sourceHeight: 1080, width: 1920, height: 1080, matrix: .rec709, present: true)
+        workingSizeSweep()
         print("Image checks: \(checks - failures.count)/\(checks) passed; \(failures.count) failed.")
         print("Performance is reported separately; no universal 4 ms pass/fail gate.")
         if !failures.isEmpty { fail(failures.joined(separator: "; ")) }
@@ -281,6 +282,33 @@ private final class FlowBlendSuite {
     }
 
     private func benchmark(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, matrix: VideoMatrix?, present: Bool) {
+        measure(sourceWidth: sourceWidth, sourceHeight: sourceHeight, width: width, height: height, matrix: matrix, present: present, label: "BENCH")
+    }
+
+    /// Total cost by working size for one 1080p 420v source. The flow search runs at
+    /// quarter resolution, so a smaller working size saves kernel work but adds Core
+    /// Image normalization work; this sweep shows where the balance actually falls.
+    private func workingSizeSweep() {
+        for (sourceWidth, sourceHeight, sizes) in [
+            (1920, 1080, [(1920, 1080), (1440, 810), (1280, 720), (960, 540), (854, 480)]),
+            (2560, 1440, [(2560, 1440), (1920, 1080), (1280, 720)]),
+            (3840, 2160, [(3840, 2160), (1920, 1080), (1280, 720)])
+        ] {
+            print("WORKING SIZE SWEEP (\(sourceWidth)x\(sourceHeight) 420v input, normalize+flow+final CI render)")
+            for (width, height) in sizes {
+                // A fresh engine per size: one shared pool would mix allocation costs of the
+                // previous size into the next, which is not the steady-state product path.
+                guard let fresh = FlowBlendInterpolator(device: device) else { fail("sweep engine creation") }
+                let saved = interpolator
+                interpolator = fresh
+                measure(sourceWidth: sourceWidth, sourceHeight: sourceHeight, width: width, height: height,
+                        matrix: .rec709, present: true, label: "SWEEP")
+                interpolator = saved
+            }
+        }
+    }
+
+    private func measure(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, matrix: VideoMatrix?, present: Bool, label: String) {
         let bytesA = Self.movingChart(width: sourceWidth, height: sourceHeight, blockX: 272, blockY: 192, blockSize: 192)
         let bytesB = Self.movingChart(width: sourceWidth, height: sourceHeight, blockX: 320, blockY: 192, blockSize: 192)
         let a = matrix.map { Self.make420v(width: sourceWidth, height: sourceHeight, bytes: bytesA, matrix: $0) }
@@ -318,7 +346,7 @@ private final class FlowBlendSuite {
         }
         let format = matrix == nil ? "BGRA" : "420v"
         let scope = present ? "normalize+flow+final CI render" : "normalize+flow"
-        print("BENCH input \(sourceWidth)x\(sourceHeight), requested \(width)x\(height), actual \(Int(actualExtent.width))x\(Int(actualExtent.height)) \(format) \(scope); \(warmups) warmups + \(measured) samples")
+        print("\(label) input \(sourceWidth)x\(sourceHeight), requested \(width)x\(height), actual \(Int(actualExtent.width))x\(Int(actualExtent.height)) \(format) \(scope); \(warmups) warmups + \(measured) samples")
         print("  GPU ms: \(Self.timing(gpu))")
         print("  CPU encode ms: \(Self.timing(encoding)); commit-to-completion ms: \(Self.timing(completion))")
         check(actualExtent == CGRect(x: 0, y: 0, width: width, height: height), "benchmark \(format) working dimensions", "actual \(actualExtent)")
