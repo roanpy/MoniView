@@ -16,8 +16,12 @@ let width = Int(environment["MONIVIEW_TEST_WIDTH"] ?? "1920") ?? 1920
 let height = Int(environment["MONIVIEW_TEST_HEIGHT"] ?? "1080") ?? 1080
 let presentationLimit = 3
 let require120 = environment["MONIVIEW_REQUIRE_120"] == "1"
+let requireCadence = environment["MONIVIEW_REQUIRE_2X"] == "1"
+let expectedContentFPS = Double(fps) / (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? 2 : 1)
 let stopAt = require120 ? 36 : 16
-let finishAt = stopAt + 3
+let testRestart = environment["MONIVIEW_TEST_RESTART"] == "1"
+precondition(!testRestart || !require120, "Restart test uses the non-strict fixture")
+let finishAt = testRestart ? 29 : stopAt + 3
 let fault = environment["MONIVIEW_TEST_PRESENTATION_FAILURE"] == "1"
 let targetName = (environment["MONIVIEW_TEST_TARGET"] ?? "native").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 let testTarget: UpscaleTarget
@@ -147,6 +151,10 @@ var strictSampleWindows = 0, strictSourceFrames = 0, strictGeneratedFrames = 0
 var strictElapsed = 0.0, previousStatsTime: Double?, strictMetalFXObserved = false
 var cadWindowCounts: [Int] = [], strictCADWindowCounts: [Int] = [], cadElapsed = 0.0
 var strictEnvironmentFailure: String?
+var cadenceWindows = 0, cadencePassWindows = 0
+var cadenceSources = 0, cadenceGenerated = 0
+var cadenceElapsed = 0.0
+var restartGenerated = 0
 var stableEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
 var countedSources = Set<UInt64>()
 let strictOcclusionObserver = NotificationCenter.default.addObserver(
@@ -188,6 +196,12 @@ stats.schedule(deadline:.now()+1, repeating:1)
 stats.setEventHandler {
     let sampleTime = CACurrentMediaTime()
     tick += 1
+    if requireCadence, (6...12).contains(tick) || (testRestart && (21...25).contains(tick)) {
+        guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible) else {
+            print("SKIP 2x/restart acceptance: fixture is not visible; exit 2, not a pass")
+            input.cancel(); stats.cancel(); exit(2)
+        }
+    }
     // Tick 5 samples eligibility for the tick 5→6 interval counted by strict stats.
     // The smoke test's own minimize/restore at ticks 13/14 runs only when require120 is false.
     if require120, tick >= 5, tick < stopAt {
@@ -237,6 +251,15 @@ stats.setEventHandler {
     }
     let newEvents = events.dropFirst(eventOffset); eventOffset = events.count
     let sourcePresentations = newEvents.filter { !$0.generated && countedSources.insert($0.sequence).inserted }.count
+    if requireCadence, tick >= 6, tick <= 12 {
+        cadenceWindows += 1
+        cadenceSources += sourcePresentations; cadenceGenerated += gen
+        cadenceElapsed += cadWindowDuration
+        if Double(gen) / cadWindowDuration >= expectedContentFPS * 0.9 &&
+           Double(sourcePresentations) / cadWindowDuration >= expectedContentFPS * 0.9 {
+            cadencePassWindows += 1
+        }
+    }
     if require120, tick >= 6, tick < stopAt {
         stableEvents.append(contentsOf: newEvents)
         strictSampleWindows += 1
@@ -249,7 +272,8 @@ stats.setEventHandler {
     }
     previousStatsTime = sampleTime
     total += gen
-    if gen >= Int(Double(fps) * 0.85) { steady += 1 }
+    if testRestart, tick >= 21, tick <= 25 { restartGenerated += gen }
+    if Double(gen) >= expectedContentFPS * 0.85 { steady += 1 }
     // Count source presentations independently from renderer statistics. The pair
     // shares the same sampling boundary, including native fallback and redraws.
     precondition(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
@@ -259,11 +283,29 @@ stats.setEventHandler {
         print("PASS injected presentation-callback loss: old layer retired without recycling outstanding tokens")
         input.cancel(); stats.cancel(); app.terminate(nil); return
     }
-    if tick == 8 && !require120 && testInterpolationMode != .flowBlend && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
+    if tick == 8 && !require120 && !requireCadence && testInterpolationMode != .flowBlend && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
     if tick == 13 && !require120 { window.miniaturize(nil) }
     if tick == 14 && !require120 { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil) }
     if tick == stopAt { preview.settings.frameInterpolation = .off; preview.configureInterpolation(); preview.requestRender() }
+    if testRestart && tick == 20 {
+        preview.settings.frameInterpolation = testInterpolationMode
+        preview.configureInterpolation(); preview.requestRender()
+    }
+    if testRestart && tick == 26 {
+        preview.settings.frameInterpolation = .off
+        preview.configureInterpolation(); preview.requestRender()
+    }
     if tick == finishAt {
+        if testRestart {
+            precondition(restartGenerated >= Int(expectedContentFPS * 4),
+                         "Interpolation did not resume after stop/start")
+            print("PASS stop/start: \(restartGenerated) generated presentations after re-enabling")
+        }
+        if requireCadence {
+            print("2x acceptance: windows \(cadencePassWindows)/\(cadenceWindows), source \(Double(cadenceSources) / cadenceElapsed) FPS, generated \(Double(cadenceGenerated) / cadenceElapsed) FPS, expected content \(expectedContentFPS) FPS")
+            precondition(cadenceWindows == 7 && cadencePassWindows >= 6,
+                         "2x content-cadence throughput failed; smoke success is not throughput acceptance")
+        }
         if environment["MONIVIEW_TEST_DUPLICATES"] == "1" { precondition(totalDuplicateSkips > 0, "identical pairs were not skipped") }
         precondition(gen == 0 && !recovered, "disable/recovery failure")
         precondition(preview.peakOutstandingPresentations <= presentationLimit, "unpresented drawable bound")
@@ -274,7 +316,7 @@ stats.setEventHandler {
         for (a,b) in zip(sorted, sorted.dropFirst()) {
             precondition(b.sequence >= a.sequence, "presentation went backwards")
         }
-        let eligible = fps * 2 <= (window.screen?.maximumFramesPerSecond ?? 0)
+        let eligible = expectedContentFPS * 2 <= Double(window.screen?.maximumFramesPerSecond ?? 0)
         if eligible {
             if environment["MONIVIEW_ALLOW_BUDGET_FALLBACK"] != "1" { precondition(total > 0, "no generated frame actually presented") }
         } else { precondition(total == 0, "interpolation despite insufficient refresh") }

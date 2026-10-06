@@ -13,6 +13,8 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_REQUIRE_METALFX=1            (strict run must observe MetalFX)
   MONIVIEW_TEST_FULLSCREEN=1                 (fixture enters native fullscreen after launch; no persistent app setting)
   MONIVIEW_REQUIRE_120=1                     (run the unchanged strict 60→120 gate)
+  MONIVIEW_REQUIRE_2X=1                      (require 2x throughput in 6/7 steady windows; duplicates use content FPS)
+  MONIVIEW_TEST_RESTART=1                    (stop, re-enable the same engine, and verify generated presentations resume)
   MONIVIEW_TEST_COMPILE_ONLY=1               (compile fixture, do not launch its window)
 
 Strict mode requires the bound display to report at least 120 Hz and checks the
