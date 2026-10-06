@@ -72,7 +72,10 @@ struct MainView: View {
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
                     .frame(width: activePanel == .settings ? 365 : 330)
-                    .frame(height: min(panelContentHeight, min(activePanel == .clarity ? 560 : 700, max(120, geometry.size.height - bottom - 12))))
+                    // Let a panel use whatever vertical room the window actually has. The
+                    // previous fixed 560pt cap for the enhancement panel forced a scrollbar
+                    // on a normal-size window even with every section collapsed.
+                    .frame(height: min(panelContentHeight, max(120, geometry.size.height - bottom - 12)))
                     .background(Color(hex: 0x24201c).opacity(0.92), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.7))
                     .shadow(color: .black.opacity(0.35), radius: 24, y: 8)
@@ -649,24 +652,14 @@ struct MainView: View {
             .padding(4)
             .background(Color.black.opacity(0.2), in: Capsule())
             .disabled(recordingFreezesColor)
-            // The presets cover everyday use; the individual sliders stay available
-            // together behind one disclosure so the panel opens short.
-            DisclosureGroup {
-                VStack(spacing: 13) {
-                    labeledSlider("高光恢复", value: $capture.picture.highlightRecovery, range: 0...0.5, format: "%.2f")
-                    labeledSlider("亮度", value: $capture.picture.brightness, range: -0.5...0.5, format: "%+.2f")
-                    labeledSlider("对比度", value: $capture.picture.contrast, range: 0.5...1.5, format: "%.2f")
-                    labeledSlider("饱和度", value: $capture.picture.saturation, range: 0...2, format: "%.2f")
-                    labeledSlider("鲜艳度", value: $capture.picture.vibrance, range: -1...1, format: "%+.2f")
-                }
-                .padding(.top, 8)
-            } label: {
-                Text(L10n.text("色彩微调"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0xd9cfc6))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .padding(.vertical, 5)
+            // This panel exists to adjust colour, so its sliders stay on the surface
+            // under the presets; hiding them here would hide the point of the panel.
+            VStack(spacing: 13) {
+                labeledSlider("高光恢复", value: $capture.picture.highlightRecovery, range: 0...0.5, format: "%.2f")
+                labeledSlider("亮度", value: $capture.picture.brightness, range: -0.5...0.5, format: "%+.2f")
+                labeledSlider("对比度", value: $capture.picture.contrast, range: 0.5...1.5, format: "%.2f")
+                labeledSlider("饱和度", value: $capture.picture.saturation, range: 0...2, format: "%.2f")
+                labeledSlider("鲜艳度", value: $capture.picture.vibrance, range: -1...1, format: "%+.2f")
             }
             .padding(13)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
@@ -738,7 +731,6 @@ struct MainView: View {
                         choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
                         .disabled(capture.isRecording)
                 }
-                audioSettings
 
                 if capture.sourceKind == .device {
                 labeledPicker("分辨率", fieldWidth: 195,
@@ -802,19 +794,29 @@ struct MainView: View {
             .padding(12)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
 
-            // Recording and status display are set once; they stay reachable but out of
-            // the way of the source and format choices people actually change.
+            // Audio stays on the surface: it is adjusted while using the app, not during
+            // first-time setup. Recording and status display are set once, so they stay
+            // reachable behind one disclosure.
+            VStack(alignment: .leading, spacing: 14) {
+                labeledPicker("音频输入", fieldWidth: 195,
+                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
+                    choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
+                    .disabled(capture.isRecording)
+                audioMonitoringControls
+            }
+            .padding(12)
+            .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+
             DisclosureGroup {
                 VStack(spacing: 14) {
                     settingsToggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
                         .disabled(capture.isRecording)
                     settingsToggle("显示设备状态", isOn: $capture.showsStatusBar)
                     settingsToggle("显示增强状态", isOn: $capture.showsEngineStatus)
-                    audioMonitoringControls
                 }
                 .padding(.top, 8)
             } label: {
-                Text(L10n.text("声音、录制与状态"))
+                Text(L10n.text("录制与状态"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color(hex: 0xd9cfc6))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -831,73 +833,52 @@ struct MainView: View {
         }
     }
 
-    /// Audio input plus monitoring. Both are configuration rather than per-session
-    /// controls, so they share one disclosure.
-    private var audioSettings: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 11) {
-                labeledPicker("音频输入", fieldWidth: 195,
-                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
-                    choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
-                    .disabled(capture.isRecording)
-                audioMonitoringControls
-            }
-            .padding(.top, 8)
-        } label: {
-            Text(L10n.text("声音"))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(hex: 0xd9cfc6))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .padding(.vertical, 5)
-        }
-    }
-
     private var audioMonitoringControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider().overlay(Color.white.opacity(0.06))
 
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("声音监听")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color(hex: 0xe6ddd4))
-                    Text(L10n.text(capture.audioStatus))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x98908a))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+            // Status, volume and mute read as one row: the title and level meter share
+            // the line, and the slider sits under a compact mute switch.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("声音监听")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color(hex: 0xe6ddd4))
+                Text(L10n.text(capture.audioStatus))
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: 0x98908a))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Spacer(minLength: 8)
                 Text("\(Int(capture.audioVolume * 100))%")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xc8bfb7))
             }
 
-            Slider(value: Binding(
-                get: { Double(capture.audioVolume) },
-                set: { capture.setAudioVolume(Float($0)) }
-            ), in: 0...1)
-            .tint(Color(hex: 0xec8718))
-            .accessibilityLabel(L10n.text("声音监听"))
-            .accessibilityValue("\(Int(capture.audioVolume * 100))%")
-
             HStack(spacing: 8) {
                 Toggle(isOn: Binding(
                     get: { capture.isMuted },
                     set: { capture.setMuted($0) }
                 )) {
-                    Text("静音监听")
+                    Text("静音")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Color(hex: 0xc8bfb7))
                 }
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .fixedSize()
 
-                Spacer(minLength: 4)
+                Slider(value: Binding(
+                    get: { Double(capture.audioVolume) },
+                    set: { capture.setAudioVolume(Float($0)) }
+                ), in: 0...1)
+                .tint(Color(hex: 0xec8718))
+                .accessibilityLabel(L10n.text("声音监听"))
+                .accessibilityValue("\(Int(capture.audioVolume * 100))%")
+
                 Text("电平")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Color(hex: 0x98908a))
+                    .fixedSize()
                 ProgressView(value: audioLevelValue)
                     .progressViewStyle(.linear)
                     .tint(Color(hex: 0xec8718))
