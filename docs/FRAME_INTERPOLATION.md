@@ -10,7 +10,11 @@ This feature is off by default and requires the public VideoToolbox low-latency 
 
 The multiplier selector offers Off / 2×. Quality is separate: Low (adaptive), Medium (up to 720p), High (up to 1080p). Existing persisted Smooth/Clear values still decode; Medium is the default when first enabling the new selector. Higher multipliers are not implemented and are not offered as working options.
 
+Flow Beta is a fourth quality tier using the app's own Metal optical-flow blend engine instead of the VideoToolbox processor: sparse bidirectional block matching over a three-level luma pyramid with a confidence gate, where ambiguous pixels fall back to cross-dissolve. On this M5 Max the 1280×720 fixture measures about 0.7 ms GPU median with an idle GPU and roughly 1–7 ms while the preview itself loads the GPU, versus 15–22 ms for the VT processor at the same size; the same admission, budget and deadline machinery still applies, so a busy GPU backs off to source frames exactly as with other tiers. Above 40 FPS input the working size starts at a 1280 long edge. The tier currently shares the macOS 26+ interpolation-section gate even though the engine itself is plain Metal. Expect softer motion boundaries and dissolve fallbacks on flat, repeated, occluded or cut content; it is a beta for real-motion acceptance, not a quality promise.
+
 倍率提供关闭／2×，质量单独提供低（自适应）、中（最高720p）、高（最高1080p）。旧流畅／清晰设置仍可读取；新倍率首次启用默认中档。未实现的更高倍率不作为可用选项展示。
+
+光流 Beta 是第四个质量档，使用应用自研 Metal 光流混合引擎而非 VideoToolbox 处理器：三级亮度金字塔上的稀疏双向块匹配加置信度门控，不确定像素回退为交叉淡化。本台 M5 Max 的 1280×720 夹具实测：GPU 空闲时中位约 0.7 ms，预览自身占用 GPU 时约 1–7 ms；同尺寸 VT 处理器为 15–22 ms。准入、预算和呈现期限机制不变，GPU 繁忙时与其他档一样回退原帧。输入超过 40 FPS 时工作尺寸从长边 1280 开始。该档目前仍随插帧区共享 macOS 26+ 门槛，引擎本身只依赖 Metal。平坦、重复纹理、遮挡或切场景处可能出现运动边缘变软与淡化回退；本档为实机运动画质验收的 Beta，不是画质承诺。
 
 Force interpolation attempts is off by default. It ignores measured performance admission and budget-driven quality reductions/cooldowns, but retains increasing stable PTS, runtime/size support, the screen's refresh limit, source freshness, presentation deadlines, single GPU command concurrency, bounded drawable ownership and GPU-error recovery. It is an attempt, not guaranteed FPS. Cost and actual generated/output counts remain visible. The override is stored as an optional field so older saved settings decode unchanged.
 
@@ -119,7 +123,9 @@ Apple's public API permits resolution and frame-rate enhancement together; they 
 
 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) separates frame-rate multiplier from optical-flow processing scale and offers lower-cost lite models. [RIFE](https://github.com/hzwer/ECCV2022-RIFE) documents arbitrary-time interpolation. These are useful design references, not Apple throughput measurements. A Core ML/Metal prototype could test 2× and variable phases at 720p/1080p using identical input sequences, display size, actual presentation counts, P95 total cost, artifacts and added latency. Do not ship a model or third-party runtime until its license, conversion and measured benefit are verified; no such backend was added by this change. Flowframes and Stellaria code were not copied.
 
-可参考倍率与光流工作尺寸分离、lite模型和任意时间插值，但开源说明不等于苹果端实测。后续 Core ML/Metal 原型应在同一输入、显示尺寸下比较2×／可变相位、真实上屏计数、P95总处理、瑕疵和新增延迟。模型许可、转换及收益确认前不随产品分发；本批没有新增第三方后端，也未复制 Flowframes 或 Stellaria 的代码。
+RIFE code and weights are both MIT, so commercial or closed-source use is permitted; the blocker here is measured throughput, not licensing. A local MLX evaluation of a RIFE-style model on this M5 Max measured roughly 168 ms at 854×480 and 260 ms at 720p per pair — far above the 33 ms slot of 30→60, let alone 8.3 ms at 60→120 — so the Core ML/MLX route stays shelved until a converted model demonstrably fits the slot on the target machine. The shipped Flow Beta tier instead follows the Lossless-Scaling-style design: a small fixed-cost Metal flow pipeline with no model weights and no third-party runtime. Flowframes and Stellaria code were not copied.
+
+可参考倍率与光流工作尺寸分离、lite模型和任意时间插值，但开源说明不等于苹果端实测。RIFE 代码与权重均为 MIT，商用与闭源使用均允许；此处搁置原因是实测性能而非许可。本机 MLX 评估在 M5 Max 上测得 854×480 约 168 ms、720p 约 260 ms 每对，远高于 30→60 的 33 ms 时隙，更远于 60→120 的 8.3 ms，因此 Core ML/MLX 路线在转换模型实测进入时隙前继续搁置。随附的光流 Beta 档采用小黄鸭式固定成本 Metal 光流设计：无模型权重、无第三方运行时。模型许可、转换及收益确认前不随产品分发；未复制 Flowframes 或 Stellaria 的代码。
 
 ## Capture versus content cadence / 采集与内容节奏
 

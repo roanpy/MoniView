@@ -41,7 +41,7 @@ struct FrameInterpolationPolicyTests {
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, inputFPS: 60, maximumLongEdge: 854) == P.Dimensions(width: 854, height: 480), "Adaptive size respects aspect and even rounding")
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, maximumLongEdge: 1) == nil, "Invalid adaptive cap")
         check(P.reducedLongEdge(after: 960) == 854 && P.reducedLongEdge(after: 854) == nil, "No excessive soft-midpoint downscaling")
-        check(FrameInterpolationMode.allCases.count == 4, "Off plus three cost tiers")
+        check(FrameInterpolationMode.allCases.count == 5, "Off plus four cost tiers")
         for mode in FrameInterpolationMode.allCases {
             let data = try JSONEncoder().encode(mode)
             let decoded = try JSONDecoder().decode(FrameInterpolationMode.self, from: data)
@@ -78,6 +78,9 @@ struct FrameInterpolationPolicyTests {
         check(!admitted(30, 60, valid: false), "Unstable/invalid PTS cadence stays native")
 
         check(P.targetDimensions(width: 3840, height: 2160, mode: .efficient, inputFPS: 60) == P.Dimensions(width: 960, height: 540), "High-rate efficient budget")
+        check(P.targetDimensions(width: 3840, height: 2160, mode: .flowBlend, inputFPS: 60) == P.Dimensions(width: 1280, height: 720), "High-rate flow-blend holds the measured 720p rung")
+        check(P.targetDimensions(width: 3840, height: 2160, mode: .flowBlend, inputFPS: 30) == P.Dimensions(width: 1920, height: 1080), "Flow-blend keeps 1080p at 30 FPS")
+        check(P.targetDimensions(width: 640, height: 480, mode: .flowBlend, inputFPS: 60) == P.Dimensions(width: 640, height: 480), "Flow-blend no enlargement")
         check(P.targetDimensions(width: 640, height: 480, mode: .efficient, inputFPS: 60) == P.Dimensions(width: 640, height: 480), "High-rate no enlargement")
         check(P.targetDimensions(width: 3840, height: 2160, mode: .quality, inputFPS: 60) == P.Dimensions(width: 1920, height: 1080), "Quality cap unchanged")
         check(P.targetDimensions(width: 3840, height: 2160, mode: .efficient) == P.Dimensions(width: 1280, height: 720), "4K to efficient")
@@ -92,7 +95,7 @@ struct FrameInterpolationPolicyTests {
         }
         check(P.targetDimensions(width: Int.max, height: 2, mode: .quality) == nil, "Extreme aspect safely rejected")
         for (width, height) in [(2, 2), (640, 480), (641, 481), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (4096, 2160), (2160, 3840), (3440, 1440)] {
-            for mode in [FrameInterpolationMode.efficient, .balanced, .quality] {
+            for mode in [FrameInterpolationMode.efficient, .balanced, .quality, .flowBlend] {
                 let result = P.targetDimensions(width: width, height: height, mode: mode)!
                 check(result.width % 2 == 0 && result.height % 2 == 0, "Both planes even")
                 check(result.width <= width && result.height <= height, "No upscaling")

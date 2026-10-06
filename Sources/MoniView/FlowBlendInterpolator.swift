@@ -327,6 +327,24 @@ final class FlowBlendInterpolator {
         self.warpPipeline = warpPipeline
     }
 
+    // Pipelines are built synchronously in init, so the engine is ready immediately.
+    // prepare/stop match the renderer's engine protocol; resource pools release with ARC.
+    var isReady: Bool { true }
+    var onStateChange: (() -> Void)?
+    func prepare(width: Int, height: Int) {}
+    func stop() {}
+
+    /// Engine-protocol entry point: 2x interpolation always blends at the temporal midpoint.
+    func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
+                     context: CIContext, command: MTLCommandBuffer,
+                     previousBuffer: CVPixelBuffer?, currentBuffer: CVPixelBuffer?,
+                     fastInputResampling: Bool) -> CIImage? {
+        interpolate(previous: previous, current: current, previousTime: previousTime,
+                    currentTime: currentTime, context: context, command: command,
+                    previousBuffer: previousBuffer, currentBuffer: currentBuffer,
+                    fastInputResampling: fastInputResampling, blendFactor: 0.5)
+    }
+
     /// Encodes one interpolated image on `command`; the caller owns command submission.
     /// `blendFactor` is 0 for previous and 1 for current. Pixel buffers may be 420v or BGRA.
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,

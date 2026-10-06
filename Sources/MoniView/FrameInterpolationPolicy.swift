@@ -5,6 +5,7 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
     case efficient = "流畅 · 720p"
     case balanced = "均衡 · 720p"
     case quality = "清晰 · 1080p"
+    case flowBlend = "光流 · Beta"
 
     var id: String { rawValue }
     // Preserve the persisted raw value from early development builds.
@@ -14,6 +15,7 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
         case .efficient: return "低 · 自适应"
         case .balanced: return "中 · 最高720p"
         case .quality: return "高 · 最高1080p"
+        case .flowBlend: return "光流 Beta · 最高1080p"
         }
     }
     var longEdgeCap: Int? {
@@ -21,6 +23,7 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
         case .off: return nil
         case .efficient, .balanced: return 1280
         case .quality: return 1920
+        case .flowBlend: return 1920
         }
     }
 }
@@ -82,6 +85,9 @@ enum FrameInterpolationPolicy {
         // Higher input cadence halves the useful inference budget. A smaller working
         // frame keeps Smooth inexpensive; runtime measurements still gate admission.
         if mode == .efficient, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 960) }
+        // Flow-blend analysis is far cheaper per pixel than the ML processor; above 40 FPS
+        // it still halves the slot, so hold the working frame at the measured 720p rung.
+        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 1280) }
         if let maximumLongEdge { guard maximumLongEdge >= 2 else { return nil }; cap = min(cap, maximumLongEdge) }
         let scale = min(1, Double(cap) / Double(max(width, height)))
         let targetWidth = Int((Double(width) * scale / 2).rounded(.down)) * 2
@@ -105,6 +111,7 @@ enum FrameInterpolationPolicy {
     static func ceilingLongEdge(mode: FrameInterpolationMode, inputFPS: Double?) -> Int? {
         guard var cap = mode.longEdgeCap else { return nil }
         if mode == .efficient, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 960) }
+        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 1280) }
         return cap
     }
 

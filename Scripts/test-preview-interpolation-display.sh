@@ -42,6 +42,7 @@ cp "$ROOT/Tests/PreviewInterpolationDisplayTests.swift" "$WORK/main.swift"
 swiftc -swift-version 5 -O -D MONIVIEW_PREVIEW_TESTING \
  "$ROOT/Sources/MoniView/AIUpscaler.swift" "$ROOT/Sources/MoniView/FrameInterpolator.swift" \
  "$ROOT/Sources/MoniView/VideoFrameDuplicateDetector.swift" "$ROOT/Sources/MoniView/FrameInterpolationPolicy.swift" "$ROOT/Sources/MoniView/ContentCadencePolicy.swift" "$ROOT/Sources/MoniView/PreviewLayerView.swift" \
+ "$ROOT/Sources/MoniView/FlowBlendInterpolator.swift" \
  "$ROOT/Sources/MoniView/MetalUpscaler.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" \
  "$ROOT/Sources/MoniView/CaptureRecorder.swift" "$ROOT/Sources/MoniView/VideoImageProcessor.swift" \
  "$ROOT/Sources/MoniView/DurationBoundedFIFO.swift" "$ROOT/Sources/MoniView/ConfigurationRevision.swift" \

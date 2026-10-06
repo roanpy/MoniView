@@ -16,6 +16,23 @@ private struct RenderKey: Equatable {
     var midpoint = false
 }
 
+/// One midpoint engine shared by the VT processor tiers and the Metal flow-blend beta.
+/// State and encoding stay main-thread confined; work encodes on the caller's command buffer.
+private protocol MidpointInterpolating: AnyObject {
+    var isReady: Bool { get }
+    var onStateChange: (() -> Void)? { get set }
+    func prepare(width: Int, height: Int)
+    func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
+                     context: CIContext, command: MTLCommandBuffer,
+                     previousBuffer: CVPixelBuffer?, currentBuffer: CVPixelBuffer?,
+                     fastInputResampling: Bool) -> CIImage?
+    func stop()
+}
+
+@available(macOS 26.0, *)
+extension FrameInterpolator: MidpointInterpolating {}
+extension FlowBlendInterpolator: MidpointInterpolating {}
+
 struct PreviewLayerView: NSViewRepresentable {
     @ObservedObject var capture: CaptureManager
     func makeNSView(context: Context) -> CapturePreviewNSView {
@@ -47,6 +64,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     @available(macOS 26.0, *) private var aiUpscaler: AIUpscaler? { _aiUpscaler as? AIUpscaler }
     private var _interpolator: AnyObject?
     @available(macOS 26.0, *) private var interpolator: FrameInterpolator? { _interpolator as? FrameInterpolator }
+    /// Beta Metal flow-blend engine; pure Metal, so it needs no macOS 26 gate of its own.
+    private var flowInterpolator: FlowBlendInterpolator?
+    private var interpolationEngine: (any MidpointInterpolating)? {
+        if settings.frameInterpolation == .flowBlend { return flowInterpolator }
+        if #available(macOS 26.0, *) { return interpolator }
+        return nil
+    }
     private var interpolationLink: CADisplayLink?
     private var linkProxy: InterpolationDisplayLinkProxy?
     private var displayTargetTime = 0.0
@@ -204,9 +228,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             previousInterpolationForce = settings.forceFrameInterpolation
             duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
             if #available(macOS 26.0, *) { interpolator?.stop() }
+            if mode != .flowBlend { flowInterpolator = nil }
         }
         if enabled {
             stopAIUpscaler() // Avoid two temporal/ML pipelines competing for the slot budget.
+            if mode == .flowBlend, flowInterpolator == nil {
+                flowInterpolator = device.flatMap { FlowBlendInterpolator(device: $0) }
+            }
             if interpolationLink == nil {
                 let proxy = InterpolationDisplayLinkProxy(view: self)
                 linkProxy = proxy
@@ -224,6 +252,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             pendingSource = nil; interpolationLink?.invalidate(); interpolationLink = nil; linkProxy = nil
             observedDisplayFPS = 0; displayTargetTime = 0; configuredDisplayCap = 0
             if #available(macOS 26.0, *) { interpolator?.stop() }
+            flowInterpolator = nil
             frames.setInterpolationState(mode == .off || !settings.enhancementEnabled ? "关闭" : "插帧不可用")
         }
     }
@@ -619,7 +648,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     let dimensions = FrameInterpolationPolicy.targetDimensions(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mode: settings.frameInterpolation, inputFPS: contentFPS, maximumLongEdge: adaptiveLongEdge),
                     !isDuplicatePair(previous: pair.previousBuffer, current: buffer, sequence: sequence,
                         previousSequence: pair.previousSequence, streamEpoch: streamEpoch),
-                    #available(macOS 26.0, *), let interpolator {
+                    let interpolator = interpolationEngine {
                 if interpolationDimensions != dimensions {
                     interpolationDimensions = dimensions
                     midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
