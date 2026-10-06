@@ -439,6 +439,7 @@ struct MainView: View {
     private func upscaleTargetTitle(_ target: UpscaleTarget) -> String {
         switch target {
         case .native: return "原始输入"
+        case .fullHD: return "1080p · 长边 1920 px"
         case .qhd: return "2K · 长边 2560 px"
         case .uhd: return "4K · 长边 3840 px"
         case .screen: return "匹配屏幕"
@@ -455,7 +456,9 @@ struct MainView: View {
                 settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
-                labeledPicker("放大方式", selection: $capture.picture.upscaleMethod,
+                labeledPicker("放大方式", selection: Binding(
+                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported) },
+                    set: { capture.picture.upscaleMethod = $0 }),
                     choices: UpscaleMethod.allCases.filter { $0 != .ai || AIUpscalerSupport.isSupported }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                     .disabled(!capture.picture.enhancementEnabled)
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,

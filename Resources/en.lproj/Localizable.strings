@@ -168,3 +168,5 @@
 "录制画面处理不可用。" = "Recording image processing is unavailable.";
 "录制画面缓冲池不可用。" = "Recording pixel buffer pool is unavailable.";
 "AI 超分" = "AI Upscale";
+
+"1080p · 长边 1920 px" = "1080p · long edge 1920 px";

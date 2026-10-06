@@ -40,6 +40,7 @@ enum AspectMode: String, CaseIterable, Identifiable, Codable {
 
 enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
     case native = "原始"
+    case fullHD = "1080p"
     case qhd = "2K"
     case uhd = "4K"
     case screen = "屏幕"
@@ -48,6 +49,7 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
     var longEdge: Double? {
         switch self {
         case .native, .screen: return nil
+        case .fullHD: return 1920
         case .qhd: return 2560
         case .uhd: return 3840
         }
@@ -56,7 +58,7 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
     func resolvedLongEdge(screenLongEdge: Double?, sourceLongEdge: Double) -> Double {
         switch self {
         case .native: return sourceLongEdge
-        case .qhd, .uhd: return longEdge ?? sourceLongEdge
+        case .fullHD, .qhd, .uhd: return longEdge ?? sourceLongEdge
         case .screen: return screenLongEdge ?? sourceLongEdge
         }
     }
@@ -67,6 +69,9 @@ enum UpscaleMethod: String, CaseIterable, Identifiable, Codable {
     case lanczos = "Lanczos"
     case ai = "AI 超分"
     var id: String { rawValue }
+    func availableMethod(aiSupported: Bool) -> UpscaleMethod {
+        self == .ai && !aiSupported ? .metalFX : self
+    }
 }
 
 struct PictureSettings: Equatable, Codable {
