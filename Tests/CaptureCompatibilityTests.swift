@@ -241,6 +241,21 @@ struct CaptureCompatibilityTests {
     }
 
     static func main() {
+        for mode in FrameInterpolationMode.allCases where mode != .off {
+            var settings = PictureSettings()
+            settings.frameInterpolation = mode
+            settings.setInterpolationEnabled(false)
+            settings.setInterpolationEnabled(false)
+            precondition(settings.preferredInterpolationQuality == mode)
+            settings.setInterpolationEnabled(true)
+            precondition(settings.frameInterpolation == mode, "Repeated off must preserve \(mode)")
+        }
+        for saved in [FrameInterpolationMode?.none, .some(.off)] {
+            var settings = PictureSettings()
+            settings.preferredInterpolationQuality = saved
+            settings.setInterpolationEnabled(true)
+            precondition(settings.frameInterpolation == .balanced, "Invalid saved quality must recover")
+        }
         testPresentationIntervalsAndDuplicateSkips()
         testOldPictureSettingsJSON()
         testInterpolationHistory()

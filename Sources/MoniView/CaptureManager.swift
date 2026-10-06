@@ -103,6 +103,16 @@ struct PictureSettings: Equatable, Codable {
         get { interpolationMode ?? .off }
         set { interpolationMode = newValue == .off ? nil : newValue }
     }
+    mutating func setInterpolationEnabled(_ enabled: Bool) {
+        if enabled {
+            let preferred = preferredInterpolationQuality ?? .balanced
+            frameInterpolation = preferred == .off ? .balanced : preferred
+        } else {
+            // A repeated off action must not destroy the last enabled quality.
+            if frameInterpolation != .off { preferredInterpolationQuality = frameInterpolation }
+            frameInterpolation = .off
+        }
+    }
     var highlightRecovery = 0.0
     var colorParameters: [Double] { [brightness, contrast, saturation, vibrance, highlightRecovery] }
 }
@@ -254,6 +264,9 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }; return displayRates
     }
     func currentInterpolationState() -> String { lock.lock(); defer { lock.unlock() }; return interpolationState }
+    private var aiUpscaleStatus = ""
+    func setAIUpscaleStatus(_ value: String) { lock.lock(); aiUpscaleStatus = value; lock.unlock() }
+    func currentAIUpscaleStatus() -> String { lock.lock(); defer { lock.unlock() }; return aiUpscaleStatus }
     func markGenerated(streamEpoch: UInt64, presentedTime: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard streamEpoch == self.streamEpoch else { return }
@@ -358,6 +371,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// Total presented output: source frames plus generated midpoints.
     var outputFPS: Int { presentedOutputFPS }
     @Published private(set) var interpolationStatus = "关闭"
+    @Published private(set) var aiUpscaleStatus = ""
     @Published private(set) var interpolationCostMS = 0.0
     @Published private(set) var interpolationBudgetMS = 0.0
     @Published private(set) var interpolationWorkingSize: String?
@@ -1132,6 +1146,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.gpuMilliseconds = times.1
             self.processingP95 = times.2
             self.upscaleEngine = self.frames.currentEngine()
+            self.aiUpscaleStatus = self.frames.currentAIUpscaleStatus()
             self.enhancedSize = self.frames.currentEnhancedSize()
             self.isRunning = stats.0 > 0
             self.updatePowerAssertions()
@@ -1199,6 +1214,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["stableContentFPS"] = stableContentFPS as Any? ?? NSNull()
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
+        payload["aiUpscaleStatus"] = aiUpscaleStatus
         payload["generatedFPS"] = generatedFPS
         payload["presentedSourceFPS"] = presentedSourceFPS
         payload["presentedOutputFPS"] = presentedOutputFPS

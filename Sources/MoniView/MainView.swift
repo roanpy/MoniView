@@ -523,17 +523,15 @@ struct MainView: View {
                 if capture.picture.frameInterpolation != .off, capture.picture.upscaleMethod == .ai {
                     Text("AI 超分暂停，关闭插帧后恢复")
                         .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                } else if capture.picture.upscaleMethod == .ai, !capture.aiUpscaleStatus.isEmpty {
+                    Text(L10n.text(capture.aiUpscaleStatus))
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                 }
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledPicker("插帧倍率", selection: Binding(
                     get: { capture.picture.frameInterpolation != .off },
-                    set: { enabled in
-                        if enabled { capture.picture.frameInterpolation = capture.picture.preferredInterpolationQuality ?? .balanced }
-                        else {
-                            capture.picture.preferredInterpolationQuality = capture.picture.frameInterpolation
-                            capture.picture.frameInterpolation = .off
-                        }
-                    }), choices: [PickerChoice(value: false, title: L10n.text("关闭")), PickerChoice(value: true, title: "2×")])
+                    set: { capture.picture.setInterpolationEnabled($0) }),
+                    choices: [PickerChoice(value: false, title: L10n.text("关闭")), PickerChoice(value: true, title: "2×")])
                     .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported)
                     .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。"))
                 if capture.picture.frameInterpolation != .off {
