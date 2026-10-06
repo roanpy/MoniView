@@ -70,12 +70,25 @@ preview.settings.lowLatency = lowLatency
 preview.settings.frameInterpolation = testInterpolationMode
 preview.settings.forceFrameInterpolation = environment["MONIVIEW_TEST_FORCE"] == "1"
 preview.settings.skipsExactDuplicateInterpolation = environment["MONIVIEW_TEST_DUPLICATES"] == "1"
+// The color path runs before enhancing and is part of the real per-frame cost. The
+// default fixture settings skip it entirely (all neutral), so a preset can be applied
+// to measure the chain the shipped app actually runs.
+if environment["MONIVIEW_TEST_VIVID"] == "1" {
+    preview.settings.contrast = 1.025
+    preview.settings.saturation = 1.07
+    preview.settings.vibrance = 0.08
+    preview.settings.highlightRecovery = 0.08
+}
 var events: [(sequence: UInt64, generated: Bool, time: Double)] = []
 preview.onPresentation = { events.append(($0, $1, $2)) }
 var recovered = false
 preview.onPresentationRecovery = { recovered = true }
 preview.suppressPresentedCallbacks = fault
-let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 540), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+// The drawable cost is dominated by the visible output size, so the window size is
+// configurable: a 960x540 window is not representative of a near-fullscreen preview.
+let testWindowWidth = Int(environment["MONIVIEW_TEST_WINDOW_WIDTH"] ?? "960") ?? 960
+let testWindowHeight = Int(environment["MONIVIEW_TEST_WINDOW_HEIGHT"] ?? "540") ?? 540
+let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: testWindowWidth, height: testWindowHeight), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 window.title = "MoniView — synthetic interpolation validation"
 if testFullscreen {
     // This helper window must be the primary window in its own fullscreen Space.
@@ -86,6 +99,11 @@ if testFullscreen {
     // fullscreen Space; otherwise occlusion zeros are not throughput evidence.
     window.level = .floating
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    if environment["MONIVIEW_TEST_WINDOW_ABOVE_ALL"] == "1" {
+        // Another app holding a large window over the whole screen otherwise makes the
+        // run inconclusive. This only raises the short-lived measurement window.
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)))
+    }
 }
 window.contentView = preview
 var testFullscreenEntered = false

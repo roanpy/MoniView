@@ -253,3 +253,4 @@
 "开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。" = "When on, the capture rate follows the measured content rate (nearest supported rate at or above it). A later content speedup is undetectable; raise it manually. Picking a rate exits follow mode.";
 "内容已达采集上限 · 无重复帧" = "Content fills the capture rate · no duplicates";
 "跟随已开启，暂未检测到可跟随节奏" = "Follow is on; no content cadence is currently measurable.";
+"目标取决于内容帧率 · 屏幕 %.0f Hz" = "Target follows the content rate · Display %.0f Hz";

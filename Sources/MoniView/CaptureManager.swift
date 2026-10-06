@@ -347,12 +347,34 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var picture = PictureSettings() {
         didSet {
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
+            if !applyingPreset, let current = selectedQualityPreset,
+               let preset = Self.qualityPresets.first(where: { $0.name == current }),
+               qualitySignature(lowLatency: oldValue.lowLatency, strength: oldValue.enhancementStrength,
+                                method: oldValue.upscaleMethod, target: oldValue.upscaleTarget,
+                                interpolation: oldValue.frameInterpolation) !=
+               qualitySignature(lowLatency: picture.lowLatency, strength: picture.enhancementStrength,
+                                method: picture.upscaleMethod, target: picture.upscaleTarget,
+                                interpolation: picture.frameInterpolation) {
+                // Only drop the label when the edit actually leaves the preset's values.
+                let stillMatches = qualitySignature(lowLatency: picture.lowLatency, strength: picture.enhancementStrength,
+                                                    method: picture.upscaleMethod, target: picture.upscaleTarget,
+                                                    interpolation: picture.frameInterpolation) ==
+                                   qualitySignature(lowLatency: preset.lowLatency, strength: preset.enhancementStrength,
+                                                    method: preset.upscaleMethod, target: preset.upscaleTarget,
+                                                    interpolation: preset.interpolation)
+                if !stillMatches { selectedQualityPreset = nil }
+            }
             recorder.setPicture(recordIncludesPicture ? picture : nil)
             // Slider drags fire dozens of times per second; persist once the value settles.
             schedulePicturePersistence()
         }
     }
     @Published private(set) var selectedColorPreset: String? = "自然" {
+        didSet { schedulePicturePersistence() }
+    }
+    /// Quality presets mirror the colour presets: they set a starting combination
+    /// once and never lock a control. Editing any covered value shows 自定义.
+    @Published private(set) var selectedQualityPreset: String? = "平衡" {
         didSet { schedulePicturePersistence() }
     }
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
@@ -975,16 +997,64 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func applyPreset(_ name: String) {
+        applyingPreset = true
+        defer { applyingPreset = false }
         var next = picture
         switch name {
         case "鲜艳": next.brightness = 0; next.contrast = 1.025; next.saturation = 1.07; next.vibrance = 0.08; next.highlightRecovery = 0.08
         case "电影": next.brightness = 0; next.contrast = 1.0; next.saturation = 0.96; next.vibrance = 0; next.highlightRecovery = 0.16
         default: next.brightness = 0; next.contrast = 1; next.saturation = 1; next.vibrance = 0; next.highlightRecovery = 0
         }
-        applyingPreset = true
         picture = next
         selectedColorPreset = name
-        applyingPreset = false
+    }
+
+    /// Quality presets cover the enhancement/interpolation choices a user actually
+    /// tunes. They set a starting combination; every control stays editable, and a
+    /// manual change switches the label to 自定义 exactly like the colour presets.
+    struct QualityPreset {
+        let name: String
+        let lowLatency: Bool
+        let enhancementStrength: Double
+        let upscaleMethod: UpscaleMethod
+        let upscaleTarget: UpscaleTarget
+        let interpolation: FrameInterpolationMode
+    }
+
+    static let qualityPresets: [QualityPreset] = [
+        // Lowest latency: no temporal work, screen-sized processing cap.
+        QualityPreset(name: "低延迟", lowLatency: true, enhancementStrength: 0.25,
+                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .off),
+        // The shipped default: 2× interpolation sized to keep a real 120 Hz cadence.
+        QualityPreset(name: "平衡", lowLatency: true, enhancementStrength: 0.35,
+                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .flowBlend),
+        // Highest spatial quality with 2× temporal work; needs a fast GPU.
+        QualityPreset(name: "画质优先", lowLatency: false, enhancementStrength: 0.45,
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality)
+    ]
+
+    func applyQualityPreset(_ name: String) {
+        guard let preset = Self.qualityPresets.first(where: { $0.name == name }) ?? Self.qualityPresets.first(where: { $0.name == "平衡" }) else { return }
+        applyingPreset = true
+        defer { applyingPreset = false }
+        var next = picture
+        next.lowLatency = preset.lowLatency
+        next.enhancementStrength = preset.enhancementStrength
+        next.upscaleMethod = preset.upscaleMethod
+        next.upscaleTarget = preset.upscaleTarget
+        next.frameInterpolation = preset.interpolation
+        next.preferredInterpolationQuality = preset.interpolation
+        picture = next
+        selectedQualityPreset = preset.name
+    }
+
+    /// Fields a quality preset owns; a manual edit to any of them means 自定义.
+    private func qualitySignature(lowLatency: Bool, strength: Double, method: UpscaleMethod,
+                                  target: UpscaleTarget, interpolation: FrameInterpolationMode) -> [Double] {
+        [lowLatency ? 1 : 0, strength,
+         Double(UpscaleMethod.allCases.firstIndex(of: method) ?? 0),
+         Double(UpscaleTarget.allCases.firstIndex(of: target) ?? 0),
+         Double(FrameInterpolationMode.allCases.firstIndex(of: interpolation) ?? 0)]
     }
 
     func startRecording(to url: URL) {

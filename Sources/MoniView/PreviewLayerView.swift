@@ -45,7 +45,7 @@ struct PreviewLayerView: NSViewRepresentable {
         view.aspectMode = capture.effectiveAspectMode
         view.contentCadenceMeasurementEnabled = capture.followsRealContentRate
         view.configureInterpolation()
-        (view.layer as? CAMetalLayer)?.displaySyncEnabled = (capture.picture.enhancementEnabled && capture.picture.frameInterpolation != .off && FrameInterpolatorSupport.isSupported) || !capture.picture.lowLatency
+        (view.layer as? CAMetalLayer)?.displaySyncEnabled = (capture.picture.enhancementEnabled && capture.picture.frameInterpolation != .off && FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation)) || !capture.picture.lowLatency
         if capture.picture.upscaleMethod != .ai || !capture.picture.enhancementEnabled || capture.picture.upscaleTarget == .native { view.stopAIUpscaler() }
         view.requestRender()
     }
@@ -204,7 +204,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// the actual display across window moves and stops callbacks while hidden.
     func configureInterpolation() {
         let mode = settings.frameInterpolation
-        let enabled = settings.enhancementEnabled && mode != .off && FrameInterpolatorSupport.isSupported
+        let enabled = settings.enhancementEnabled && mode != .off && FrameInterpolatorSupport.isSupported(mode)
         let measureContentCadence = contentCadenceMeasurementEnabled || settings.skipsExactDuplicateInterpolation
         if measureContentCadence != previousCadenceMeasurementEnabled {
             duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
@@ -646,7 +646,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
         let contentFPS = sourceFPS / pairBudgetMultiplier()
         frames.setMeasuredContentFPS(pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
-        let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported, inputFPS: contentFPS, displayFPS: displayFPS, inputValid: true)
+        let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported(settings.frameInterpolation), inputFPS: contentFPS, displayFPS: displayFPS, inputValid: true)
         // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
         // the display already holds the identical previous drawable. Skipping the whole
         // spatial pipeline here saves GPU for midpoint quality on the unique frames.
@@ -665,7 +665,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             return
         }
         if interpolationRequested {
-            if !FrameInterpolatorSupport.isSupported { frames.setInterpolationState("插帧不可用") }
+            if !FrameInterpolatorSupport.isSupported(settings.frameInterpolation) { frames.setInterpolationState("插帧不可用") }
             else if !admitted {
                 frames.setInterpolationState(mediaFPS == nil ? "等待稳定输入帧率" :
                     (sourceFPS == 0 ? "当前输入帧率不支持2×，使用原始帧率" : "显示器刷新率不足，使用原始帧率"))
@@ -725,7 +725,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     } else if !settings.forceFrameInterpolation && (!budgetFits || !sourceFits || !pairFits) {
                         cooldownReason = nil
                         cooldownUntil = CACurrentMediaTime() + FrameInterpolationPolicy.overloadCooldownSeconds
-                        midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
+                        // Clear both histories: a stale native P95 otherwise keeps the next
+                        // pair's target late, which rejects pairs and never refreshes it.
+                        midpointCosts.removeAll(); nativeCosts.removeAll(); calibrationWarmupsRemaining = 2
                         frames.setInterpolationState(settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")
                     } else if !deadlineFits {
                         // Force cannot make a late pair present on time. Do not leave
@@ -812,7 +814,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             let resize = CGAffineTransform(scaleX: scale, y: scale)
             image = smoothMidpoint ? image.transformed(by: resize, highQualityDownsample: false) : image.transformed(by: resize)
         } else if abs(scale - 1) > 0.001 {
-            image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+            if scale > 1.001 {
+                // Enlarging to fit the window: Lanczos buys no detail here, and this
+                // step runs for the midpoint and its endpoint on every pair, so it
+                // lands on the interpolation budget twice.
+                image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            } else {
+                // Shrinking needs the antialiasing that only the resampling filters give.
+                image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+            }
         }
         let scaled = image.extent
         let transform = CGAffineTransform(translationX: (size.width - scaled.width) / 2 - scaled.minX, y: (size.height - scaled.height) / 2 - scaled.minY)
@@ -1004,7 +1014,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             self.blockedRaiseTarget = failed
                             self.lastRaisedToLongEdge = nil
                         }
-                        self.midpointCosts.removeAll(); self.calibrationWarmupsRemaining = 2
+                        // Both histories feed the cost reading and the next pair's target.
+                        // Clearing only the midpoint side left stale native samples driving
+                        // the schedule, which kept rejecting pairs and so never produced a
+                        // fresh sample to replace them.
+                        self.midpointCosts.removeAll(); self.nativeCosts.removeAll()
+                        self.calibrationWarmupsRemaining = 2
                         self.comfortableMidpoints = 0
                         #if MONIVIEW_PREVIEW_TESTING
                         self.trace("COST fail seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) endpoint=\(wasEndpoint) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
