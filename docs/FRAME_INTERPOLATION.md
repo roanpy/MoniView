@@ -34,9 +34,9 @@ Interpolation needs the current source before computing its midpoint, and delays
 
 ## Composition and resource lifetime / 组合与资源生命周期
 
-Color and sharpening apply once after midpoint generation. MetalFX/Lanczos spatial enlargement remains available. The standalone AI super-resolution session is suspended while interpolation is selected; its preference is retained. Apple also offers joint temporal/spatial interpolation, but that API restricts the joint path to 2× spatial scaling and one generated midpoint. It has not been enabled or certified here. Independent 3×/4× temporal processing requires separate presentation/budget/quality acceptance; successful one-shot processor calls are not throughput proof.
+Color and sharpening apply once after midpoint generation. MetalFX/Lanczos spatial enlargement remains available for source endpoints and Clear midpoints. Smooth midpoints deliberately skip intermediate spatial scaling and use one inexpensive final resize to the visible area. The standalone AI super-resolution session is suspended while interpolation is selected; its preference is retained and the enhancement panel explains the pause. Apple also offers joint temporal/spatial interpolation, but that API restricts the joint path to 2× spatial scaling and one generated midpoint. It has not been enabled or certified here. Independent 3×/4× temporal processing requires separate presentation/budget/quality acceptance; successful one-shot processor calls are not throughput proof.
 
-生成中间帧后只执行一次色彩及锐化，可继续使用 MetalFX/Lanczos 空间放大。选择插帧期间暂停独立 AI 超分会话，保留原有选项。Apple 另有联合时间／空间处理接口，但联合路径仅支持 2× 空间放大及一张中间帧；当前未启用、未认证。独立 3×/4× 插帧还需分别验证呈现、负担与画质，单次处理成功不是实时性能证明。
+生成中间帧后只执行一次色彩及锐化，原帧端点和清晰档中间帧可继续使用 MetalFX/Lanczos 空间放大。流畅档中间帧跳过中间放大，只做一次较轻的最终窗口缩放。选择插帧期间暂停独立 AI 超分会话、保留原有选项，增强面板显示暂停说明。Apple 另有联合时间／空间处理接口，但联合路径仅支持 2× 空间放大及一张中间帧；当前未启用、未认证。独立 3×/4× 插帧还需分别验证呈现、负担与画质，单次处理成功不是实时性能证明。
 
 Normal preview retains only the latest source. Interpolation additionally retains one preceding reference and one fixed pending endpoint, with no accumulating capture queue. A shared semaphore limits GPU submissions to one in flight, while presentation tokens separately cap future unpresented drawables at three. Completion resources retain sessions, pixel buffers, texture references and CI tasks through GPU completion, including partial failure. Presentation deadlines cover generated/source/fallback frames across setting changes. A lost presentation callback after GPU completion retires the old layer and reconstructs the preview instead of reusing tokens whose old drawable might still appear.
 
@@ -45,6 +45,8 @@ Normal preview retains only the latest source. Interpolation additionally retain
 Matching video-range 420v Rec.709 buffers can use a Metal plane resampling path without an RGB round trip. Other formats, ranges, color metadata or orientations retain explicit Core Image conversion. No third-party runtime or proprietary Lossless Scaling/GPL implementation is included.
 
 符合视频范围 420v、Rec.709 元数据及正常方向的缓冲可使用 Metal 平面缩放，省去 RGB 往返转换；其他格式、范围、色彩及方向继续走显式 Core Image 转换。没有新增第三方运行依赖，也未复制小黄鸭或 GPL 实现。
+
+When Core Image conversion is necessary, Smooth uses fast affine input resampling instead of Lanczos; Clear retains Lanczos. This reduces work but may soften or alias fine moving details, particularly at the 640-pixel adaptive limit. Metadata is never invented to force the direct path. The general enhancement badge reports the source spatial pipeline; actual temporal dimensions and presentation counts remain separate. / 需要 Core Image 转换时，流畅档采用较轻的仿射输入缩放，清晰档保留 Lanczos。较小工作尺寸可能使运动细节模糊或产生锯齿，尤其是长边降到 640 时；不会编造元数据强制走直接路径。增强标签稳定报告原帧空间处理链路，实际插帧尺寸和呈现计数另列。
 
 The existing three-drawable layer pool can hold a prior source, midpoint and endpoint without raising GPU concurrency. A late endpoint may be rebased, but its received-time age plus future submission lead must remain within three of its original source periods; this is not a bound on physical screen latency. Compositor lateness is separated from inference overload. / 沿用三个 drawable 的图层池容纳上一原帧、中间帧与端点，不增加 GPU 并发。迟到端点可重新排期，但接收年龄加未来提交提前量不得超过创建时三个源帧周期；这不限制物理上屏延迟。呈现迟到与推理超载分别处理。
 
@@ -56,7 +58,7 @@ The spatial scaler caches at most two dimension pairs to avoid rebuilding resour
 - `./Scripts/test-frame-interpolation-policy.sh`: sizing/fractional rate/admission boundaries; no GPU claim.
 - `./Scripts/test-capture-compatibility.sh`: legacy settings, bounded history, PTS cadence and reset boundaries.
 - `./Scripts/test-frame-interpolator-gpu.sh`: native processor color/orientation/lifetime smoke under Metal validation.
-- `./Scripts/test-preview-interpolation-display.sh`: synthetic input in a real window, ordering, actual generated presentations, three-drawable bound, minimize/restore and disable. `MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60` enables strict actual-presentation throughput/spacing acceptance, not just a smoke pass. Optional `MONIVIEW_TEST_FPS`, `MONIVIEW_TEST_WIDTH`, `MONIVIEW_TEST_HEIGHT` vary synthetic input. `MONIVIEW_TEST_PRESENTATION_FAILURE=1` injects lost presentation callbacks.
+- `./Scripts/test-preview-interpolation-display.sh`: synthetic input in a real window, ordering, actual generated presentations, three-drawable bound, minimize/restore and disable. `MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60` enables strict actual-presentation throughput/spacing acceptance, not just a smoke pass. Optional `MONIVIEW_TEST_FPS`, `MONIVIEW_TEST_WIDTH`, `MONIVIEW_TEST_HEIGHT` vary synthetic input. `MONIVIEW_TEST_METADATA=missing` exercises the Core Image fallback. `MONIVIEW_TEST_PRESENTATION_FAILURE=1` injects lost presentation callbacks.
 
 Sustained 120 FPS has **not been certified**. Do not report the strict 120 test as PASS until the native-window run completes and its actual drawable-present callbacks satisfy cadence, spacing and deadline checks. GPU command duration, generated-frame counts, or successful processing alone are not presentation acceptance.
 

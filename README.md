@@ -137,4 +137,4 @@ See [the local validation record](docs/LOCAL_VALIDATION.md) for the tested Mac, 
 
 ### Experimental frame interpolation
 
-Off by default on supported macOS 26+ hardware. Smooth/Clear tiers target 2× preview FPS and remain gated by actual display cadence and processing cost. MetalFX/Lanczos scaling remains available; standalone AI upscaling is suspended while interpolating. Capture/recording FPS is unchanged. See [dimension, latency, resource and validation boundaries](docs/FRAME_INTERPOLATION.md).
+Off by default on supported macOS 26+ hardware. Smooth/Clear tiers target 2× preview FPS and remain gated by actual display cadence and processing cost. Source endpoints and Clear midpoints can use MetalFX/Lanczos scaling; Smooth midpoints use one lighter final resize. Standalone AI upscaling is suspended while interpolating and resumes eligibility when interpolation is off. Capture/recording FPS is unchanged. See [dimension, latency, resource and validation boundaries](docs/FRAME_INTERPOLATION.md).

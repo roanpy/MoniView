@@ -136,3 +136,29 @@ The feature remains experimental and off by default. Source recording/PNG do not
 ### Follow-up deployment / 本轮部署
 
 The ordinary AI-capable arm64 development bundle **0.2.0 (10)** was installed in Applications after preserving the previous bundle. Strict codesign verification passed and the installed/packaged executable SHA-256 matched (`2ed671eaecdcc0530f350e2219e4b441438c224628a373ff3701a328363fef5e`). The Mac remained locked, so the installed bundle has not received final UI/UVC acceptance. / 普通 AI 版已备份后安装，签名和可执行文件哈希核对通过；锁屏限制下，安装后的最终界面与 UVC 验收仍未完成。这是本地开发部署，不是商店或公开 release。
+
+## Efficient fallback follow-up — 2026-10-06 / 流畅档回退优化补充
+
+### Real input baseline / 真实输入基线
+
+After unlock, build 10 displayed upright Jemdo 1920×1080 approximately 60 FPS input with live audio. Display Settings was found at fixed 60 Hz, then changed through the native UI to ProMotion; the app reported a 120 Hz maximum and display-link period. At default 1512×982-point display resolution, the actual capture buffers were 420v but lacked YCbCr matrix, color primaries and transfer-function attachments. The renderer correctly used its Core Image conversion fallback rather than assuming Rec.709 metadata.
+
+解锁后 build 10 可显示方向正确的真实 Jemdo 1080p60 画面和音频电平。系统起初为固定 60 Hz，通过原生设置改为 ProMotion 后，程序报告上限和显示链路为 120 Hz。内屏默认 1512×982 点；采集缓冲为 420v，但缺少矩阵、原色和传递函数附件，因此走 Core Image 转换回退，不伪造 Rec.709 元数据。
+
+With Match Display (about 2300×1294 visible output), Vivid color and enhancement strength 1, Clear interpolation exceeded its processing gate and Smooth adapted to 640×360 yet still mostly fell back to source frames. Selecting original output, Natural color and strength 0 also did not establish 120 FPS in build 10. These are failed real-input observations, not an accepted before/after performance comparison. / 匹配屏幕、鲜艳和增强强度 1 时，清晰档超预算，流畅档降到 640×360 后仍主要回退原帧；改为原始目标、自然和强度 0 也未在 build 10 建立 120 FPS。不能把这组观察报告为已通过或同条件前后加速对照。
+
+### Changes and executed checks / 修改与已执行检查
+
+Smooth now uses faster affine input resampling when conversion fallback is required, and generated midpoints use one final resize instead of intermediate MetalFX/Lanczos enlargement. Original source rendering and Clear's Lanczos input path remain intact. This is a resource/quality tradeoff; fine moving details can soften or alias. The general enhancement badge remains tied to the source pipeline, with temporal dimensions/counts reported separately. / 流畅档转换回退改用较轻的仿射缩放，中间帧只做一次最终缩放；原帧和清晰档路径保留。该取舍可能使运动细节模糊或产生锯齿，不等于画质认证；空间标签与插帧数据分开。
+
+- `./Scripts/test-frame-interpolator-gpu.sh`: all **11** color/range/orientation/lifetime cases passed with Metal validation, including the new fast nonzero-origin 1920×1080→640×360 fallback. / 11 场景通过。
+- `MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60 MONIVIEW_TEST_METADATA=missing ./Scripts/test-preview-interpolation-display.sh`: **PASS**, **29/30** one-second acceptance windows met source/generated thresholds over 39 seconds. Actual presented spacing mean **8.420 ms**, P95 **8.333 ms**; drawable acquisition P95 **0.078 ms**, max **2.621 ms**. Input was synthetic 1920×1080 420v without color metadata, drawable 1920×1080, Smooth working size 640×360, original target and no extra sharpening. This includes the endpoint/watchdog and current rendering changes; it is still not real UVC acceptance. / 缺元数据合成输入 strict 通过，29/30 达标；已覆盖当前渲染及端点／恢复修复，但仍不是实际采集卡验收。
+- Policy **177** checks, audio FIFO, configuration revision, capture compatibility and all **11** native writer fault scenarios reran successfully. Ordinary and explicit non-AI Apple SDK debug/release packaging and bilingual strings lint passed. / 上述非图形回归与构建通过。
+
+### Pending physical acceptance / 仍待真机验收
+
+The optimized build 12 opened but waited for camera authorization after its ad-hoc signing identity changed; the Mac then locked. It was quit before further isolated GPU work. New-bundle real UVC 1080p60→120, combined 2K/4K/Match Display throughput, motion quality, long-term thermals and other cards/displays remain unverified. The package does not change macOS camera permissions or weaken signing requirements. / 优化包 build 12 打开后因 ad-hoc 签名变化等待摄像头授权，随后锁屏；在继续离屏 GPU 测试前退出。新版真实 UVC120、各放大目标吞吐与运动画质等未验收，不修改系统权限或弱化签名要求。
+
+### Optimized deployment / 优化版部署
+
+The same production code was packaged as the ordinary AI-capable arm64 **0.2.0 (13)** and installed in Applications after backing up build 10. Strict signature verification passed; packaged and installed executable SHA-256 matched (`cc331ce9f1c631444b6c99e04dc377eaff0e583d471d934cf864f971b7fd3e9b`). Because the Mac remained locked, the new installation has not been launched or accepted on real UVC. The last UI benchmark selections (Smooth, original target, Natural and strength 0) have not been restored through the UI. / 普通 AI 版 build 13 已备份旧包后安装，签名与哈希一致。锁屏下未启动或完成真实采集验收；上次界面测试的流畅、原始目标、自然和强度 0 设置还未通过界面恢复。
