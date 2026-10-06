@@ -2,6 +2,18 @@
 
 ## Unreleased / 未发布
 
+- Unify interpolation timing on measured unique-frame cadence: midpoint budget, PTS and endpoint phase follow actual unique-pair PTS intervals (1-3 capture ticks), and Follow mode measures without requiring the duplicate-skip toggle, keeps fractional rates end to end, and serializes with async format switches. / 插帧时序统一到实测唯一帧节奏：预算、PTS 与端点相位按唯一帧实际 PTS 间隔计算；跟随模式无需重复跳过开关即可测量，保留分数帧率，并与异步格式切换串行化。
+- Add a Flow Beta interpolation tier: the app's own Metal optical-flow blend engine (three-level luma pyramid, sparse bidirectional block match, confidence-gated warp, dissolve fallback). Windowed fixture on the 120 Hz internal display with synthetic 1080p60: 60 source + 60 generated presented per second sustained, pair P95 about 5 ms against a 15 ms pair budget. / 新增光流 Beta 插帧档：自研 Metal 光流混合引擎（三级亮度金字塔、稀疏双向块匹配、置信度门控、淡化回退）。120Hz 内屏窗口夹具合成 1080p60 实测：每秒持续 60 原帧 + 60 生成帧上屏，每对 P95 约 5ms（预算 15ms）。
+- Fix stale preview/interpolation state labels when every frame deduplicates, and report a dedicated duplicate-skip state. / 修复全重复画面下预览/插帧状态标签过期问题，增加去重跳过状态。
+
+- Reuse conforming IOSurface interpolation inputs at native working size; reject unspecified/conflicting chroma locations instead of guessing. / 同尺寸插帧直接保活满足条件的 IOSurface 输入；未知或冲突的色度位置继续走转换。
+- Include encode-to-completion waits in interpolation budgets without adding elapsed time twice; clear stale running status on deadline fallback. / 插帧预算包含编码至完成回调的等待且不重复累加；呈现期限回退时清除过期运行状态。
+- Prune spatial-scaler failure keys periodically and add an optimized spatial/interpolation GPU matrix plus strict visible-window validation. / 周期清理空间放大失败键，新增优化编译的离屏兼容性矩阵与严格可见窗口验收。
+
+- Add experimental, off-by-default Apple GPU midpoint interpolation with adaptive sizing, display-link timing checks, measured budget fallback and bounded presentation recovery. / 新增默认关闭的实验性 Apple GPU 中间帧插帧，支持自适应处理尺寸、显示链路周期核查、预算回退和有界呈现恢复。
+- Keep spatial scaling available during interpolation; pause the standalone AI scaler and preserve its preference. Source recording and PNG FPS/dimensions remain unchanged. / 插帧时保留空间放大，暂停独立 AI 超分并保留偏好；源录制与 PNG 帧率、尺寸不变。
+- Reduce Smooth midpoint work with fast fallback input resampling and a single final resize; retain original source rendering and Clear quality. Keep the spatial status badge stable and explain the standalone AI pause. / 流畅档采用较轻的回退输入缩放和一次最终缩放，保留原帧渲染与清晰档质量；稳定空间处理标签，并说明独立 AI 暂停状态。
+
 - Fix native AI black output, swapped channels and upside-down rows; retain render resources through GPU completion and wake retries without new frames. / 修复 AI 黑屏、红蓝交换与上下颠倒，保活渲染资源，并让静止输入也能重试。
 - Add optional 1080p processing target, separate enhancement-label visibility and hidden-by-default status. / 新增 1080p 处理目标，增强标签独立显示开关，状态默认隐藏。
 - Validate precise format priority, non-USB discovery fallback, output pixel formats after negotiation, and rollback a failed audio switch. / 核对精确格式优先级、非 USB 默认选择、协商后像素格式，并回滚失败的音频切换。

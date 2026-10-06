@@ -12,6 +12,8 @@ private enum PanelKind: String, Hashable {
 
 struct MainView: View {
     @EnvironmentObject private var capture: CaptureManager
+    @State private var panelContentHeight: CGFloat = 560
+    private let iconButtonHitTarget: CGFloat = 32
     @State private var activePanel: PanelKind?
     @State private var showInformation = false
     @State private var expandedInformation = false
@@ -54,15 +56,30 @@ struct MainView: View {
                 .animation(.easeInOut(duration: 0.2), value: fullscreenControlsVisible)
         }
         .overlay(alignment: .bottom) {
-            if let activePanel {
-                panelContent(activePanel)
-                    .padding(16)
+            GeometryReader { geometry in
+                if let activePanel {
+                    let bottom = isFullscreen ? 98.0 : 82.0
+                    ScrollView {
+                        panelContent(activePanel)
+                            .padding(16)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onGeometryChange(for: CGFloat.self) { content in
+                                content.size.height
+                            } action: { height in
+                                if height > 0 { panelContentHeight = height }
+                            }
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollIndicators(.hidden)
                     .frame(width: activePanel == .settings ? 365 : 330)
+                    .frame(height: min(panelContentHeight, min(activePanel == .clarity ? 560 : 700, max(120, geometry.size.height - bottom - 12))))
                     .background(Color(hex: 0x24201c).opacity(0.92), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.7))
                     .shadow(color: .black.opacity(0.35), radius: 24, y: 8)
-                    .padding(.bottom, isFullscreen ? 98 : 82)
+                    .padding(.bottom, bottom)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
             }
         }
         .animation(.easeOut(duration: 0.18), value: activePanel)
@@ -137,6 +154,8 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xd2c9c0))
                     .frame(width: 30, height: 30)
                     .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+                    .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("进入全屏 · ⌃⌘F")
@@ -145,7 +164,7 @@ struct MainView: View {
         .overlay {
             if capture.isRunning && capture.showsStatusBar && !showInformation {
                 sourceSummary
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: 640)
                     .allowsHitTesting(false)
             }
         }
@@ -154,7 +173,7 @@ struct MainView: View {
     private var sourceSummary: some View {
         HStack(spacing: 7) {
             Circle().fill(Color(hex: 0x5fd69a)).frame(width: 6, height: 6)
-            Text(L10n.text(capture.deviceName)).lineLimit(1).truncationMode(.middle)
+            Text(L10n.text(capture.deviceName)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 132)
             Text("·")
             Text(actualBufferResolution).fixedSize()
             Text("·")
@@ -162,6 +181,12 @@ struct MainView: View {
             if capture.picture.enhancementEnabled && capture.showsEngineStatus {
                 Text("·")
                 Text(enhancementSummary)
+                    .fixedSize()
+                    .foregroundStyle(Color(hex: 0xec8718))
+            }
+            if capture.showsEngineStatus && capture.picture.frameInterpolation != .off {
+                Text("·")
+                Text(L10n.format("输出 %d FPS", capture.outputFPS))
                     .fixedSize()
                     .foregroundStyle(Color(hex: 0xec8718))
             }
@@ -192,6 +217,7 @@ struct MainView: View {
             // Keep the preview alive across signal drops and fullscreen transitions so the GPU
             // pipeline is never rebuilt; overlays communicate state instead.
             PreviewLayerView(capture: capture)
+                .id(capture.previewRevision)
                 .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 17, style: .continuous))
                 .padding(isFullscreen ? 0 : 3)
             if !capture.isRunning { waitingForInput }
@@ -362,10 +388,18 @@ struct MainView: View {
                 Text(L10n.text(capture.deviceName)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 0)
                 Button { expandedInformation.toggle() } label: {
-                    Image(systemName: expandedInformation ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
-                }.buttonStyle(.plain).help("展开诊断数据").accessibilityLabel("展开诊断数据")
+                    Image(systemName: expandedInformation ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .help(L10n.text(expandedInformation ? "收起诊断数据" : "展开诊断数据"))
+                    .accessibilityLabel(L10n.text(expandedInformation ? "收起诊断数据" : "展开诊断数据"))
                 Button { showInformation = false } label: {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).help("关闭画面信息").accessibilityLabel("关闭画面信息")
             }
             HStack(spacing: 17) {
@@ -389,7 +423,26 @@ struct MainView: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
+            if let contentFPS = capture.detectedContentFPS {
+                Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
+                                 Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+            }
+            if capture.picture.frameInterpolation != .off {
+                Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Color(hex: 0xaaa199))
+            }
+            if capture.picture.frameInterpolation != .off, capture.interpolationBudgetMS > 0 {
+                Text(L10n.format("插帧预算 %.0f%% · %.1f ms", capture.interpolationCostMS / capture.interpolationBudgetMS * 100, capture.interpolationCostMS))
+                    .font(.system(size: 9, design: .monospaced))
+            }
             if expandedInformation {
+                if capture.presentationIntervalP95MS > 0 {
+                    Text(L10n.format("呈现间隔 P95 %.1f ms", capture.presentationIntervalP95MS))
+                }
+                if capture.picture.skipsExactDuplicateInterpolation {
+                    Text(L10n.format("跳过重复插帧 %d 对/秒", capture.skippedDuplicatePairsPerSecond))
+                }
                 Text(L10n.format("回调→GPU %.1f ms · P95 %.1f", capture.processingMilliseconds, capture.processingP95))
                 Text(L10n.format("等待/CPU %.1f ms", max(0, capture.processingMilliseconds - capture.gpuMilliseconds)))
                 Text(L10n.text(capture.picture.lowLatency ? "低延迟 · 按显示尺寸处理" : "按完整目标尺寸处理"))
@@ -399,7 +452,10 @@ struct MainView: View {
             }
             HStack(spacing: 6) {
                 Button { capture.setMuted(!capture.isMuted) } label: {
-                    Image(systemName: capture.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill").foregroundStyle(Color(hex: 0xe9a24d))
+                    Image(systemName: capture.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .foregroundStyle(Color(hex: 0xe9a24d))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).help("静音监听 · ⌘⇧M")
                 Text(L10n.text(capture.isMuted ? "静音" : capture.audioStatus)).lineLimit(1)
                 Spacer(minLength: 0)
@@ -447,34 +503,99 @@ struct MainView: View {
     }
 
     private var clarityPanel: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: 12) {
             panelHeading("画质增强", subtitle: "实时预览处理", icon: "sparkles.tv")
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 9) {
                 settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
-                Text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。")
-                    .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                    .help(L10n.text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。"))
                 settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
                 labeledPicker("放大方式", selection: Binding(
-                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported) },
+                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
                     set: { capture.picture.upscaleMethod = $0 }),
-                    choices: UpscaleMethod.allCases.filter { $0 != .ai || AIUpscalerSupport.isSupported }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
+                    choices: UpscaleMethod.allCases.filter { $0 != .ai || (AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                     .disabled(!capture.picture.enhancementEnabled)
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
                     .disabled(!capture.picture.enhancementEnabled)
-                Text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color(hex: 0x98908a))
-                    .fixedSize(horizontal: false, vertical: true)
+                    .help(L10n.text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。"))
+                if capture.picture.frameInterpolation != .off, capture.picture.upscaleMethod == .ai {
+                    Text("AI 超分暂停，关闭插帧后恢复")
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                }
+                Divider().overlay(Color.white.opacity(0.06))
+                labeledPicker("插帧倍率", selection: Binding(
+                    get: { capture.picture.frameInterpolation != .off },
+                    set: { enabled in
+                        if enabled { capture.picture.frameInterpolation = capture.picture.preferredInterpolationQuality ?? .balanced }
+                        else {
+                            capture.picture.preferredInterpolationQuality = capture.picture.frameInterpolation
+                            capture.picture.frameInterpolation = .off
+                        }
+                    }), choices: [PickerChoice(value: false, title: L10n.text("关闭")), PickerChoice(value: true, title: "2×")])
+                    .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported)
+                    .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。"))
+                if capture.picture.frameInterpolation != .off {
+                    labeledPicker("插帧质量", selection: Binding(
+                        get: { capture.picture.frameInterpolation },
+                        set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
+                        choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 8) {
+                            settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
+                                .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
+                            settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
+                                .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
+                        }.padding(.top, 6)
+                    } label: {
+                        Text(L10n.text("更多选项"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color(hex: 0xd9cfc6))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 5)
+                    }
+                    HStack {
+                        if let contentFPS = capture.detectedContentFPS {
+                            Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
+                                             Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+                        } else if let sourceFPS = capture.frames.sourceFrameRate(), let nominal = FrameInterpolationPolicy.nominalInputFPS(sourceFPS) {
+                            Text(L10n.format("目标 %.0f FPS · 屏幕 %.0f Hz", nominal * 2, capture.displayMaximumFPS))
+                        } else {
+                            Text(L10n.format("屏幕 %.0f Hz", capture.displayMaximumFPS))
+                        }
+                        Spacer(minLength: 4)
+                        Button {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
+                        } label: {
+                            Image(systemName: "display")
+                                .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.link).help("显示器设置…")
+                    }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                    Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color(hex: 0xe9a24d))
+                    if capture.interpolationBudgetMS > 0 {
+                        Text(L10n.format("插帧预算 %.0f%% · %.1f ms", capture.interpolationCostMS / capture.interpolationBudgetMS * 100, capture.interpolationCostMS))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS ? Color.orange : Color(hex: 0x98908a))
+                            .help(L10n.text("处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。"))
+                    }
+                }
+                if capture.picture.frameInterpolation != .off || !FrameInterpolatorSupport.isSupported {
+                    Text(L10n.text(FrameInterpolatorSupport.isSupported ? capture.interpolationStatus : "插帧不可用"))
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if recordingFreezesColor {
                     Text("本次录制使用开始时的设置")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x98908a))
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                 }
             }
-            .padding(13)
+            .padding(12)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
         }
     }
@@ -522,6 +643,8 @@ struct MainView: View {
                         .foregroundStyle(Color(hex: 0xe9a24d))
                         .frame(width: 30, height: 30)
                         .background(Color.white.opacity(0.06), in: Circle())
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("刷新采集设备")
@@ -551,11 +674,39 @@ struct MainView: View {
                     Spacer()
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
-                        fpsButton(30, title: "30")
-                        fpsButton(60, title: "60")
+                        if capture.frameRateOptions.contains(where: { $0 > 0 }) {
+                            Button {
+                                capture.followsRealContentRate.toggle()
+                            } label: {
+                                Text(L10n.text("跟随"))
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(capture.followsRealContentRate ? Color(hex: 0x2d1b0b) : Color(hex: 0xe9a24d))
+                                    .frame(minWidth: 32)
+                                    .padding(.vertical, 6)
+                                    .background(capture.followsRealContentRate ? Color(hex: 0xf2a340) : .clear, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                            .help(L10n.text("开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
+                        }
+                        ForEach(quickFrameRates, id: \.self) { fps in
+                            fpsButton(fps, title: String(fps))
+                        }
                     }
                     .padding(3)
                     .background(Color.black.opacity(0.28), in: Capsule())
+                    .frame(width: 195, alignment: .trailing)
+                }
+                if let contentFPS = capture.detectedContentFPS {
+                    Text(L10n.format("实测内容约 %d FPS", Int(contentFPS.rounded())))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                } else if capture.followsRealContentRate {
+                    Text(L10n.text("跟随已开启，暂未检测到可跟随节奏"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
                 labeledPicker("帧率档位", fieldWidth: 195,
@@ -723,10 +874,24 @@ struct MainView: View {
         .accessibilityValue(L10n.text(selected ? "已选中" : "未选中"))
     }
 
+    private var quickFrameRates: [Int] {
+        // Follow takes one of the existing shortcut slots. All advertised rates remain
+        // in the dropdown; high-rate hardware gets its 90/120 shortcuts too.
+        let supported = [30, 45, 50, 60, 90, 120].filter { fps in
+            capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
+        }
+        var choices = Array(supported.suffix(3))
+        if let selected = supported.first(where: { abs(Double($0) - capture.selectedFrameRate) < 0.01 }), !choices.contains(selected) {
+            choices[0] = selected; choices.sort()
+        }
+        return choices
+    }
+
     private func fpsButton(_ fps: Int, title: String) -> some View {
         let selected = abs(capture.selectedFrameRate - Double(fps)) < 0.01
-        let option = capture.formatOptions.first(where: { $0.id == capture.selectedFormatID })
-        let isSupported = fps == 0 || (option?.supportsFPS(fps) ?? false)
+        // Same-resolution pixel formats can advertise different frame rates;
+        // configureFormat selects the compatible variant when needed.
+        let isSupported = capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
 
         return Button {
             capture.selectFrameRate(fps)
@@ -734,7 +899,7 @@ struct MainView: View {
             Text(L10n.text(title))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(isSupported ? Color(hex: 0xf1e9e1) : Color(hex: 0x6d6660))
-                .frame(minWidth: 40)
+                .frame(minWidth: 32)
                 .padding(.vertical, 6)
                 .background(selected ? Color(hex: 0x635850) : .clear, in: Capsule())
         }

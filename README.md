@@ -80,7 +80,7 @@ See [performance notes](docs/PERFORMANCE.md) for the pipeline, observed device s
 
 ## Honest upscaling
 
-MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. This version has no frame interpolation.
+MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. Experimental interpolation is a separate, off-by-default preview feature; see the interpolation section below.
 
 - **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX/Lanczos while the model loads, when unsupported, or when no supported factor fits the processing-size cap. Check the actual engine in the info card.
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
@@ -134,3 +134,9 @@ MIT. See [LICENSE](LICENSE).
 ### Native validation
 
 See [the local validation record](docs/LOCAL_VALIDATION.md) for the tested Mac, capture device, build commands and remaining gaps. The device chooses from its advertised formats and precise rates; switching audio reasserts the requested video format. Compatibility with every UVC card is not certified. A 4K HDMI input specification is not proof of 4K USB capture; processing targets do not change capture resolution.
+
+### Experimental frame interpolation
+
+Off by default on supported macOS 26+ hardware. A separate Off/2× selector and Low/Medium/High quality tiers target 2× preview FPS; a Flow Beta tier runs the app's own Metal optical-flow engine (no model weights, no third-party runtime) at far lower measured cost than the VideoToolbox processor. Automatic mode checks processing cost; the optional force switch ignores the cost budget, while preserving display eligibility, deadlines and resource bounds. Source endpoints and Clear midpoints can use MetalFX/Lanczos scaling; Smooth midpoints use one lighter final resize. Standalone AI upscaling is suspended while interpolating and resumes eligibility when interpolation is off. Interpolation itself leaves capture/recording FPS unchanged. See [dimension, latency, resource and validation boundaries](docs/FRAME_INTERPOLATION.md).
+
+Capture FPS describes frames delivered by the selected device, not a game's internal render rate. Selecting 30 FPS limits the capture stream and cannot control the source console. Follow estimates cadence only from exact adjacent-frame repeats, when Follow or duplicate skipping is enabled; static scenes, compressed/noisy repeats, and a capture rate already reduced to the content rate can leave it unavailable. Follow waits for a stable estimate, changes only the Mac's capture rate, and pauses while recording; a later source speedup must be selected manually. This is not game-FPS telemetry. This release has no ScreenCaptureKit input backend. See [input and interpolation limits](docs/FRAME_INTERPOLATION.md).

@@ -37,6 +37,7 @@
 "渲染" = "Render";
 "丢帧" = "Dropped";
 "展开诊断数据" = "Show Diagnostics";
+"收起诊断数据" = "Hide Diagnostics";
 "关闭画面信息" = "Close Info";
 "低延迟 · 按显示尺寸处理" = "Low latency · process at display size";
 "按完整目标尺寸处理" = "Process at full target size";
@@ -47,6 +48,8 @@
 "2K · 2560 px 宽" = "2K · 2560 px wide";
 "4K · 3840 px 宽" = "4K · 3840 px wide";
 "原始＋锐化" = "Native + sharpen";
+"流畅插帧" = "Smooth interpolation";
+"独立 AI 超分已暂停，关闭插帧后恢复。" = "Standalone AI upscaling is paused; it resumes when interpolation is off.";
 "采集丢帧" = "Capture drops";
 "2K · 长边 2560 px" = "2K · long edge 2560 px";
 "4K · 长边 3840 px" = "4K · long edge 3840 px";
@@ -171,3 +174,75 @@
 "AI 超分" = "AI Upscale";
 
 "1080p · 长边 1920 px" = "1080p · long edge 1920 px";
+
+// Optional preview frame interpolation
+"画面插帧" = "Frame interpolation";
+"流畅 · 720p" = "Smooth · 720p";
+"清晰 · 1080p" = "Clear · 1080p";
+"清晰 · 最高1080p" = "Clear · up to 1080p";
+"插帧不可用" = "Frame interpolation unavailable";
+"显示器刷新率不足，使用原始帧率" = "Display refresh is insufficient; using source frames";
+"等待稳定输入帧率" = "Waiting for a stable input frame rate";
+"处理超预算，暂用原始帧率" = "Processing over budget; temporarily using source frames";
+"插帧准备中" = "Preparing frame interpolation";
+"插帧运行中" = "Interpolation running";
+"输出 %d FPS" = "Output %d FPS";
+"输出 %d FPS · 生成 %d · %@" = "Output %d FPS · generated %d · %@";
+"预览目标 2×（实验性）；按当前显示器刷新率和处理预算启用。可能增加延迟和运动瑕疵，插帧时使用空间放大，不改变采集或录制帧率。" = "Experimental 2× preview target, gated by current display refresh and processing budget. May add latency and motion artifacts. Uses spatial scaling while interpolating; capture and recording FPS stay unchanged.";
+"处理 %.1f ms / 周期预算 %.1f ms · 预算 %.0f%%" = "Processing %.1f ms / cycle budget %.1f ms · budget %.0f%%";
+"插帧预算 %.0f%% · %.1f ms" = "Interpolation budget %.0f%% · %.1f ms";
+
+"显示链路 %.0f Hz · 当前上限 %.0f Hz" = "Display link %.0f Hz · current maximum %.0f Hz";
+"显示器设置…" = "Display settings…";
+"呈现中断，重建预览" = "Presentation interrupted; rebuilding preview";
+"流畅 · 自适应" = "Smooth · Adaptive";
+
+"呈现节奏调整" = "Adjusting presentation cadence";
+
+"插帧处理 %@ · 输出 %d FPS（生成 %d）" = "Interpolation %@ · output %d FPS (generated %d)";
+"输出 %d FPS（生成 %d）" = "Output %d FPS (generated %d)";
+"清晰档超预算，保留原始画面" = "Clear tier over budget; keeping original frames";
+"流畅档降低中间帧分辨率；清晰档保留最高1080p，超预算恢复原帧并自动重试。输出帧率按实际呈现统计，2×是目标。" = "The Smooth tier lowers midpoint resolution. The Clear tier keeps up to 1080p, restores original frames when over budget, and retries automatically. Output FPS reflects actual presentation; 2× is a target.";
+
+/* Interpolation controls: multiplier, quality and budget override. */
+"插帧倍率" = "Interpolation multiplier";
+"插帧质量" = "Interpolation quality";
+"低 · 自适应" = "Low · Adaptive";
+"中 · 最高720p" = "Medium · Up to 720p";
+"高 · 最高1080p" = "High · Up to 1080p";
+"光流 Beta · 最高1080p" = "Flow Beta · Up to 1080p";
+"重复画面 · 跳过插帧" = "Duplicate input · interpolation skipped";
+"强制尝试插帧" = "Force interpolation attempts";
+"强制插帧运行中" = "Forced interpolation running";
+"忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。" = "Ignore the performance budget and keep the selected quality. Display refresh, valid input, and presentation deadlines still apply. May increase latency and stutter.";
+"自动按处理预算保护原始画面，超预算后重试。" = "Automatically protect original frames based on the processing budget and retry after overload.";
+"2×目标 %.0f FPS · 屏幕上限 %.0f Hz" = "2× target %.0f FPS · Display limit %.0f Hz";
+"低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。" = "Low adaptively reduces midpoint resolution; Medium and High retain their respective limits. Output FPS reflects actual presentation; 2× is a target. 3× is not currently supported.";
+"GPU错误，保留原始画面" = "GPU error; keeping original frames";
+"跳过完全重复画面的插帧" = "Skip interpolation of identical frames";
+"预览不可见，暂停呈现" = "Preview hidden; presentation paused";
+"呈现间隔 P95 %.1f ms" = "Presentation interval P95 %.1f ms";
+"跳过重复插帧 %d 对/秒" = "Duplicate interpolation skipped: %d pairs/s";
+"当前输入帧率不支持2×，使用原始帧率" = "2× is unavailable at this input rate; using original frames";
+
+"AI 超分暂停，关闭插帧后恢复" = "AI upscaling paused; resumes when interpolation is off";
+
+"更多选项" = "More options";
+
+"跳过重复插帧" = "Skip duplicate pairs";
+
+"仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。" = "Only skips midpoint generation for identical images. Capture cadence is unchanged; this is not the game frame rate.";
+
+"目标 %.0f FPS · 屏幕 %.0f Hz" = "Target %.0f FPS · Display %.0f Hz";
+
+"屏幕 %.0f Hz" = "Display %.0f Hz";
+
+"处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。" = "Processing budget is not total GPU utilization. See Video Info for sizes and presentation statistics.";
+"实际内容约 %d FPS · 2× 目标 %d" = "Detected content %d FPS · 2x target %d";
+"实际内容约 %d FPS · 2× 输出 %d" = "Detected content %d FPS · 2x target %d";
+"实测内容约 %d FPS" = "Measured content ~ %d FPS";
+"将采集帧率设为实测内容帧率（取不低于内容的最近档位）；内容若以后变快，需要手动调回。" = "Set the capture rate to the measured content rate (nearest supported rate at or above it). If content speeds up later, switch back manually.";
+"跟随" = "Follow";
+"开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。" = "When on, the capture rate follows the measured content rate (nearest supported rate at or above it). A later content speedup is undetectable; raise it manually. Picking a rate exits follow mode.";
+"内容已达采集上限 · 无重复帧" = "Content fills the capture rate · no duplicates";
+"跟随已开启，暂未检测到可跟随节奏" = "Follow is on; no content cadence is currently measurable.";

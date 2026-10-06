@@ -86,3 +86,9 @@ Public APIs alone do not establish App Store readiness. The installed developmen
 - Apple WWDC25, Enhance your app with machine-learning-based video effects: https://developer.apple.com/videos/play/wwdc2025/300/
 - Apple toolchain / SDK compatibility: https://developer.apple.com/support/xcode/
 - Apple Metal drawable lifetime: https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/Drawables.html
+
+## Preview interpolation / 预览插帧
+
+Standalone AI upscaling is suspended while optional frame interpolation is selected. Spatial scaling remains available. See [FRAME_INTERPOLATION.md](FRAME_INTERPOLATION.md) for composition and acceptance boundaries.
+
+选择可选插帧时暂停独立 AI 超分，仍可空间放大；组合与验收边界见 [FRAME_INTERPOLATION.md](FRAME_INTERPOLATION.md)。
