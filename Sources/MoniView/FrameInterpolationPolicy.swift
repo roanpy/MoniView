@@ -59,6 +59,19 @@ enum FrameInterpolationPolicy {
         [1280, 960, 854, 640].first { $0 < current }
     }
 
+    /// Next higher working-size rung after a step-down; nil means the mode ceiling.
+    static func raisedLongEdge(after current: Int) -> Int? {
+        [640, 854, 960, 1280].first { $0 > current }
+    }
+
+    /// Effective long-edge ceiling for a mode at a given input cadence. Mirrors the
+    /// >40 FPS efficient-tier cap in targetDimensions so callers can compare rungs.
+    static func ceilingLongEdge(mode: FrameInterpolationMode, inputFPS: Double?) -> Int? {
+        guard var cap = mode.longEdgeCap else { return nil }
+        if mode == .efficient, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 960) }
+        return cap
+    }
+
     /// Preserve fractional broadcast rates; normalize only the small UVC overshoot
     /// around nominal 60. Callers should prefer configured rate / precise PTS cadence
     /// over integer FPS counters, and use the result consistently for slot timing.

@@ -164,6 +164,12 @@ struct MainView: View {
                 Text(enhancementSummary)
                     .fixedSize()
                     .foregroundStyle(Color(hex: 0xec8718))
+                if capture.generatedFPS > 0 {
+                    Text("·")
+                    Text(L10n.format("插帧 %d FPS", capture.generatedFPS + capture.renderedFPS))
+                        .fixedSize()
+                        .foregroundStyle(Color(hex: 0xec8718))
+                }
             }
         }
         .font(.system(size: 11, weight: .medium, design: .monospaced))

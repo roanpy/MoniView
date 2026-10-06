@@ -105,6 +105,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var lastMeasuredSequence: UInt64?
     private var forceDraw = false
     private var failedDrawRetries = 0
+    private var drawableFailures = 0
+    private var firstDrawableFailureAt = 0.0
+    private var comfortableMidpoints = 0
+    private var lastRaiseAt = 0.0
+    private var lastRaisedToLongEdge: Int?
+    private var blockedRaiseTarget: Int?
 
     init(frames: LatestVideoFrame) {
         self.frames = frames
@@ -155,6 +161,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             presentationEpoch &+= 1; presentedMidpoint = nil
             pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
             cooldownUntil = 0; lastSourceSequence = nil; awaitingSourcePresentation = nil
+            comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             previousMode = mode; previousInterpolationEnabled = enabled
             if #available(macOS 26.0, *) { interpolator?.stop() }
         }
@@ -203,6 +210,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
         pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+        comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
         observedDisplayFPS = 0; displayTargetTime = 0; lastSourceSequence = nil
         configureInterpolation()
     }
@@ -235,6 +243,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         pendingSource = nil
+        // Output-size changes alter midpoint cost; a rung blocked at one size may fit at another.
+        blockedRaiseTarget = nil; comfortableMidpoints = 0
         forceDraw = true
         requestRender()
     }
@@ -291,6 +301,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             adaptiveLongEdge = nil; interpolationDimensions = nil
             pendingSource = nil; presentedMidpoint = nil; lastSourceSequence = nil
             midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0
+            comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
         }
         let size = drawableSize
         guard size.width > 0, size.height > 0 else { return }
@@ -337,8 +348,20 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else {
             inFlight.signal()
             forceDraw = true
+            // A CAMetalLayer can stop vending drawables after a display-mode change while
+            // no tracked presentation is left to time out. Retire the layer like a
+            // presentation failure so SwiftUI rebuilds it, instead of retrying forever.
+            if drawableFailures == 0 { firstDrawableFailureAt = now }
+            drawableFailures += 1
+            if drawableFailures >= 3, now - firstDrawableFailureAt > 0.5 {
+                retiringForPresentationFailure = true
+                interpolationLink?.invalidate(); pendingSource = nil
+                frames.setInterpolationState("呈现中断，重建预览")
+                onPresentationRecovery?()
+            }
             return
         }
+        drawableFailures = 0
         #if MONIVIEW_PREVIEW_TESTING
         let waited = (CACurrentMediaTime() - drawableStarted) * 1000
         drawableWaitMS.append(waited)
@@ -614,17 +637,53 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // GPU errors invalidate the pair; age/epoch guards still apply.
                         if !succeeded { self.pendingSource = nil }
                         let lower = measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
-                        if succeeded, expectedSettings.frameInterpolation == .efficient, let lower {
+                        // Both tiers step down under overload. Quality keeps a 960 long-edge
+                        // floor; below it the honest fallback reads better than secret 640p.
+                        if succeeded, expectedSettings.frameInterpolation != .off, let lower,
+                           (expectedSettings.frameInterpolation == .efficient || lower >= 960) {
                             self.adaptiveLongEdge = lower
                             self.cooldownUntil = CACurrentMediaTime() + 0.1
                         } else {
                             self.cooldownUntil = CACurrentMediaTime() + FrameInterpolationPolicy.overloadCooldownSeconds
                         }
+                        // A size that fails right after a raise is genuinely too expensive;
+                        // do not climb back into it for the rest of this session.
+                        if succeeded, let failed = measuredDimensions.map({ max($0.width, $0.height) }),
+                           failed == self.lastRaisedToLongEdge {
+                            self.blockedRaiseTarget = failed
+                            self.lastRaisedToLongEdge = nil
+                        }
                         self.midpointCosts.removeAll(); self.calibrationWarmupsRemaining = 2
+                        self.comfortableMidpoints = 0
                         #if MONIVIEW_PREVIEW_TESTING
                         self.trace("COST fail seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) endpoint=\(wasEndpoint) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
                         #endif
                         frameStore.setInterpolationState("处理超预算，暂用原始帧率")
+                    } else if succeeded, wasMidpoint, measuredSlot > 0, let mid = self.p95(self.midpointCosts) {
+                        // Sustained headroom after a step-down: climb one rung back and
+                        // re-measure. ~90 presented midpoints is about 1.5 s at 60 FPS.
+                        if self.adaptiveLongEdge != nil, mid <= measuredSlot * 0.55 {
+                            self.comfortableMidpoints += 1
+                        } else {
+                            self.comfortableMidpoints = 0
+                        }
+                        if self.comfortableMidpoints >= 90 {
+                            self.comfortableMidpoints = 0
+                            self.lastRaisedToLongEdge = nil // Current size has proven itself.
+                            let nowT = CACurrentMediaTime()
+                            if let current = self.adaptiveLongEdge, nowT - self.lastRaiseAt > 10 {
+                                let ceiling = FrameInterpolationPolicy.ceilingLongEdge(mode: expectedSettings.frameInterpolation, inputFPS: 0.5 / measuredSlot)
+                                var target = FrameInterpolationPolicy.raisedLongEdge(after: current)
+                                if let ceiling, (target ?? ceiling) >= ceiling { target = nil }
+                                let targetEdge = target ?? ceiling
+                                if targetEdge != nil, targetEdge != self.blockedRaiseTarget {
+                                    self.adaptiveLongEdge = target
+                                    self.lastRaiseAt = nowT
+                                    self.lastRaisedToLongEdge = targetEdge
+                                    self.midpointCosts.removeAll(); self.calibrationWarmupsRemaining = 2
+                                }
+                            }
+                        }
                     }
                 }
                 if !succeeded && self.awaitingSourcePresentation?.sequence == frameSequence {
