@@ -676,7 +676,7 @@ struct MainView: View {
                         .foregroundStyle(Color(hex: 0xc8bfb7))
                     Spacer()
                     HStack(spacing: 2) {
-                        fpsButton(0, title: "自动")
+                        fpsButton(0, title: capture.detectedContentFPS.map { L10n.format("自动·%d", $0) } ?? L10n.text("自动"))
                         ForEach(quickFrameRates, id: \.self) { fps in
                             fpsButton(fps, title: String(fps))
                         }
