@@ -12,7 +12,7 @@ if [ "$SDK_MAJOR" -lt 26 ]; then
 fi
 
 cp "$ROOT/Tests/FrameInterpolatorGPUTests.swift" "$WORK/main.swift"
-xcrun --sdk macosx swiftc -swift-version 5 \
+xcrun --sdk macosx swiftc -swift-version 5 -D MONIVIEW_FRAME_INTERPOLATOR_TESTING \
     "$ROOT/Sources/MoniView/AIUpscaler.swift" \
     "$ROOT/Sources/MoniView/FrameInterpolator.swift" \
     "$WORK/main.swift" \

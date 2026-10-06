@@ -38,6 +38,7 @@ final class FrameInterpolator {
         let key: Key
         let processor: VTFrameProcessor
         let sourcePool: CVPixelBufferPool
+        let sourceAttributes: [String: Any]
         let destinationPool: CVPixelBufferPool
         let cache: CVMetalTextureCache
         let bgra: MTLTexture
@@ -49,6 +50,7 @@ final class FrameInterpolator {
                   config.supportedPixelFormats.contains(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                   convert != nil || resize420v != nil else { throw Failure.unsupported }
             sourcePool = try Self.pool(config.sourcePixelBufferAttributes)
+            sourceAttributes = config.sourcePixelBufferAttributes
             destinationPool = try Self.pool(config.destinationPixelBufferAttributes)
             var cache: CVMetalTextureCache?
             guard CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let cache else { throw Failure.unsupported }
@@ -110,6 +112,9 @@ final class FrameInterpolator {
     private var retryWakeup: DispatchWorkItem?
     var onStateChange: (() -> Void)?
     var isReady: Bool { dispatchPrecondition(condition: .onQueue(.main)); return session != nil && session?.key == requested }
+    #if MONIVIEW_FRAME_INTERPOLATOR_TESTING
+    private(set) var testInputPath = "none"
+    #endif
     init(device: MTLDevice) {
         self.device = device
         let library = try? device.makeLibrary(source: AIUpscaler.converterSource, options: nil)
@@ -199,6 +204,38 @@ final class FrameInterpolator {
         return PlaneTexture(reference: reference, texture: texture)
     }
 
+    /// Only bypass the source pools when every processor requirement is understood
+    /// and satisfied. Unknown SDK requirements deliberately retain the conversion path.
+    private func matchesSourceRequirements(_ buffer: CVPixelBuffer, attributes: [String: Any]) -> Bool {
+        var left = 0, right = 0, top = 0, bottom = 0
+        CVPixelBufferGetExtendedPixels(buffer, &left, &right, &top, &bottom)
+        for (key, value) in attributes {
+            switch key {
+            case let name where name == kCVPixelBufferIOSurfacePropertiesKey as String:
+                guard let properties = value as? NSDictionary, properties.count == 0,
+                      CVPixelBufferGetIOSurface(buffer) != nil else { return false }
+            case let name where name == kCVPixelBufferWidthKey as String:
+                guard (value as? NSNumber)?.intValue == CVPixelBufferGetWidth(buffer) else { return false }
+            case let name where name == kCVPixelBufferHeightKey as String:
+                guard (value as? NSNumber)?.intValue == CVPixelBufferGetHeight(buffer) else { return false }
+            case let name where name == kCVPixelBufferPixelFormatTypeKey as String:
+                guard (value as? NSNumber)?.uint32Value == CVPixelBufferGetPixelFormatType(buffer) else { return false }
+            case let name where name == kCVPixelBufferExtendedPixelsLeftKey as String:
+                guard (value as? NSNumber)?.intValue == left else { return false }
+            case let name where name == kCVPixelBufferExtendedPixelsRightKey as String:
+                guard (value as? NSNumber)?.intValue == right else { return false }
+            case let name where name == kCVPixelBufferExtendedPixelsTopKey as String:
+                guard (value as? NSNumber)?.intValue == top else { return false }
+            case let name where name == kCVPixelBufferExtendedPixelsBottomKey as String:
+                guard (value as? NSNumber)?.intValue == bottom else { return false }
+            default: return false
+            }
+        }
+        // VTFrameProcessorFrame requires an IOSurface even if a future dictionary
+        // happens to omit the surface key.
+        return CVPixelBufferGetIOSurface(buffer) != nil
+    }
+
     private func resampleInput(source: CVPixelBuffer, destination: CVPixelBuffer, cache: CVMetalTextureCache,
                                width: Int, height: Int) -> ResampleInput? {
         guard let sourceY = planeTexture(buffer: source, cache: cache, format: .r8Unorm,
@@ -227,10 +264,10 @@ final class FrameInterpolator {
         return true
     }
 
-    /// Both unadjusted inputs are converted to the model's required SDR 420v pools on the
-    /// caller's command buffer. Matching 420v/Rec.709 pixel buffers bypass RGB conversion;
-    /// all other inputs keep the CI conversion path. Color/scale/sharpening are applied once
-    /// after interpolation.
+    /// Exact-size, compatible SDR 420v buffers are referenced directly. Other matching
+    /// 420v/Rec.709 inputs are resampled into processor pools on the caller's command;
+    /// remaining inputs retain the CI conversion path. Color/scale/sharpening apply once
+    /// after interpolation. Every input remains retained through command completion.
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
                      context: CIContext, command: MTLCommandBuffer,
                      previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
@@ -239,7 +276,20 @@ final class FrameInterpolator {
         guard let session, session.key == requested, previousTime.isNumeric, currentTime.isNumeric, currentTime > previousTime else { return nil }
         let width = session.key.width, height = session.key.height
         var buffers: [CVPixelBuffer] = []
-        for pool in [session.sourcePool, session.sourcePool, session.destinationPool] {
+        if let previousBuffer, let currentBuffer,
+           CVPixelBufferGetWidth(previousBuffer) == width, CVPixelBufferGetHeight(previousBuffer) == height,
+           CVPixelBufferGetWidth(currentBuffer) == width, CVPixelBufferGetHeight(currentBuffer) == height,
+           isDirectInput(previousBuffer, image: previous), isDirectInput(currentBuffer, image: current),
+           matchesSourceRequirements(previousBuffer, attributes: session.sourceAttributes),
+           matchesSourceRequirements(currentBuffer, attributes: session.sourceAttributes) {
+            buffers = [previousBuffer, currentBuffer]
+        }
+        let originalInputs = buffers.count == 2
+        #if MONIVIEW_FRAME_INTERPOLATOR_TESTING
+        testInputPath = originalInputs ? "original" : "converted"
+        #endif
+        let pools = originalInputs ? [session.destinationPool] : [session.sourcePool, session.sourcePool, session.destinationPool]
+        for pool in pools {
             var buffer: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer,
                   CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -259,8 +309,8 @@ final class FrameInterpolator {
         var tasks: [CIRenderTask] = []
         // Freeze complete lifetime ownership on every return, including partial encoding.
         defer { retain(session, parameters, buffers, textures, tasks, command: command) }
-        var used420v = false
-        if let previousBuffer, let currentBuffer, let resize420v,
+        var used420v = originalInputs
+        if !originalInputs, let previousBuffer, let currentBuffer, let resize420v,
            CVPixelBufferGetWidth(previousBuffer) == CVPixelBufferGetWidth(currentBuffer),
            CVPixelBufferGetHeight(previousBuffer) == CVPixelBufferGetHeight(currentBuffer),
            isDirectInput(previousBuffer, image: previous), isDirectInput(currentBuffer, image: current),
@@ -268,18 +318,16 @@ final class FrameInterpolator {
            let currentInput = resampleInput(source: currentBuffer, destination: buffers[1], cache: session.cache, width: width, height: height) {
             CVBufferPropagateAttachments(previousBuffer, buffers[0])
             CVBufferPropagateAttachments(currentBuffer, buffers[1])
-            for buffer in buffers {
-                for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
-                                     (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
-                                     (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)] {
-                    CVBufferSetAttachment(buffer, key, value, .shouldPropagate)
-                }
-            }
+            // isDirectInput requires these exact Rec.709 values on both sources;
+            // buffers[0...2] already carry them from pool allocation above.
             buffers += [previousBuffer, currentBuffer]
             textures += previousInput.references + currentInput.references
             if encodeResample(previousInput, pipeline: resize420v, width: width, height: height, command: command),
                encodeResample(currentInput, pipeline: resize420v, width: width, height: height, command: command) {
                 used420v = true
+                #if MONIVIEW_FRAME_INTERPOLATOR_TESTING
+                testInputPath = "resampled"
+                #endif
             }
         }
         if !used420v {

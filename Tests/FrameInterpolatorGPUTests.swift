@@ -28,6 +28,7 @@ private final class FrameInterpolatorGPUSuite {
         case otherColorFallback
         case orientedFallback
         case cositedChromaFallback
+        case surfaceMissingFallback
     }
     private struct Case {
         let name: String
@@ -55,13 +56,15 @@ private final class FrameInterpolatorGPUSuite {
         Case(name: "CI fallback resize warmed 1920x1080→1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
         Case(name: "CI fast fallback nonzero-origin 1920x1080→640x360", targetWidth: 640, targetHeight: 360, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallbackFast, stopWhileInFlight: false),
         Case(name: "direct 420v resize 1920x1080→1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1920, inputHeight: 1080, inputMode: .direct420v, stopWhileInFlight: false),
+        Case(name: "original 420v buffers 1280x720", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .direct420v, stopWhileInFlight: false),
         Case(name: "full-range input falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .fullRangeFallback, stopWhileInFlight: false),
         Case(name: "non-709 input falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .otherColorFallback, stopWhileInFlight: false),
         Case(name: "non-up orientation falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .orientedFallback, stopWhileInFlight: false),
         Case(name: "cosited chroma attachment falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .cositedChromaFallback, stopWhileInFlight: false),
+        Case(name: "non-IOSurface buffers fall back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .surfaceMissingFallback, stopWhileInFlight: false),
         Case(name: "CI fallback copy warmup 1920x1080", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
         Case(name: "CI fallback copy warmed 1920x1080", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
-        Case(name: "direct 420v copy 1920x1080", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .direct420v, stopWhileInFlight: true)
+        Case(name: "original 420v buffers 1920x1080, in-flight stop", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .direct420v, stopWhileInFlight: true)
     ]
     private var phase: Phase = .cancelledWarmup
     private var pollScheduled = false
@@ -144,6 +147,7 @@ private final class FrameInterpolatorGPUSuite {
                                 originX: testCase.inputMode == .direct420v ? 0 : -19,
                                 originY: testCase.inputMode == .direct420v ? 0 : 11)
         let inputBuffers = makeInputBuffers(for: testCase, previous: previous, current: current)
+        let sourceSnapshots = inputBuffers.map { (Self.activeBytes($0.0), Self.activeBytes($0.1)) }
         let interpolationPrevious: CIImage
         let interpolationCurrent: CIImage
         if testCase.inputMode == .direct420v {
@@ -178,6 +182,12 @@ private final class FrameInterpolatorGPUSuite {
             currentBuffer: inputBuffers?.1,
             fastInputResampling: testCase.inputMode == .ciFallbackFast
         ) else { fail("interpolation encoding returned nil for \(testCase.name)") }
+        let expectedPath = testCase.inputMode == .direct420v
+            ? (testCase.inputWidth == width && testCase.inputHeight == height ? "original" : "resampled")
+            : "converted"
+        guard interpolator.testInputPath == expectedPath else {
+            fail("wrong source path for \(testCase.name): expected \(expectedPath), got \(interpolator.testInputPath)")
+        }
         let encodeMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - encodeStarted) / 1_000_000
 
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
@@ -190,7 +200,7 @@ private final class FrameInterpolatorGPUSuite {
         context.render(normalized(current, width: width, height: height), to: currentTexture, commandBuffer: command, bounds: bounds, colorSpace: colorSpace)
         context.render(middle, to: middleTexture, commandBuffer: command, bounds: bounds, colorSpace: colorSpace)
 
-        command.addCompletedHandler { [weak self, previous, current, middle, previousTexture, currentTexture, middleTexture, stopGate, inputBuffers, testCase] completed in
+        command.addCompletedHandler { [weak self, previous, current, middle, previousTexture, currentTexture, middleTexture, stopGate, inputBuffers, sourceSnapshots, testCase] completed in
             withExtendedLifetime((previous, current, middle, stopGate, inputBuffers)) {}
             guard completed.status == .completed else {
                 fail("Metal command failed for \(testCase.name): \(String(describing: completed.error))")
@@ -199,6 +209,10 @@ private final class FrameInterpolatorGPUSuite {
             let currentPixels = Self.read(currentTexture, width: width, height: height)
             let middlePixels = Self.read(middleTexture, width: width, height: height)
             var caseFailures = Self.colorFailures(middlePixels, width: width, height: height)
+            if let inputBuffers, let sourceSnapshots,
+               Self.activeBytes(inputBuffers.0) != sourceSnapshots.0 || Self.activeBytes(inputBuffers.1) != sourceSnapshots.1 {
+                caseFailures.append("processor modified source pixels")
+            }
             let previousDistance = Self.meanDifference(middlePixels, previousPixels, width: width, height: height)
             let currentDistance = Self.meanDifference(middlePixels, currentPixels, width: width, height: height)
             let previousCenter = Self.magentaCenterX(previousPixels, width: width, height: height)
@@ -313,12 +327,34 @@ private final class FrameInterpolatorGPUSuite {
                                 format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
                                 chromaLocation: kCVImageBufferChromaLocation_Left)
             )
+        case .surfaceMissingFallback:
+            return (
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709, surfaceBacked: false),
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709, surfaceBacked: false)
+            )
         }
     }
 
     private enum BufferColor {
         case rec709
         case rec2020
+    }
+
+    private static func activeBytes(_ buffer: CVPixelBuffer) -> Data {
+        guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { fail("source snapshot lock failed") }
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        var bytes = Data()
+        for plane in 0..<CVPixelBufferGetPlaneCount(buffer) {
+            guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { fail("source snapshot plane missing") }
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
+            let activeWidth = CVPixelBufferGetWidth(buffer) // 420v Y and interleaved UV rows both contain width bytes.
+            for row in 0..<CVPixelBufferGetHeightOfPlane(buffer, plane) {
+                bytes.append(base.advanced(by: row * stride).assumingMemoryBound(to: UInt8.self), count: activeWidth)
+            }
+        }
+        return bytes
     }
 
     private enum BufferOrientation {
@@ -328,14 +364,15 @@ private final class FrameInterpolatorGPUSuite {
 
     private func makePixelBuffer(from image: CIImage?, width: Int, height: Int, format: OSType,
                                  color: BufferColor, orientation: BufferOrientation = .up,
-                                 chromaLocation: CFString? = nil) -> CVPixelBuffer {
-        let attributes: [String: Any] = [
+                                 chromaLocation: CFString? = nil, surfaceBacked: Bool = true) -> CVPixelBuffer {
+        let attributes: [String: Any] = surfaceBacked ? [
             kCVPixelBufferMetalCompatibilityKey as String: true,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:]
-        ]
+        ] : [:]
         var buffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &buffer)
         guard status == kCVReturnSuccess, let buffer else { fail("could not allocate (format) input buffer at \(width)x\(height)") }
+        if !surfaceBacked && CVPixelBufferGetIOSurface(buffer) != nil { fail("non-IOSurface fixture unexpectedly has a surface") }
         if let image {
             context.render(normalized(image, width: width, height: height), to: buffer,
                            bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: colorSpace)
