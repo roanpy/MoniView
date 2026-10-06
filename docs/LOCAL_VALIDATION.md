@@ -209,3 +209,35 @@ Ad-hoc signing changes the cdhash on every rebuild, so each redeploy dropped the
 Build **0.2.0 (16)** deployed to /Applications with this identity (backup: `~/Developer/MoniView-app-backups/20261006-build15`), `codesign --verify --strict` passed, all three regression scripts and plutil lint passed. The UI change in this build reports total presented output FPS (sources + midpoints) in the status capsule, right HUD and enhancement sheet, replacing the generated-only numbers. / build 16 已用稳定身份部署，校验与回归通过；界面三处的插帧帧率统一为真实呈现总帧数。
 
 **Pending on unlock / 待解锁后处理**: accept the camera and microphone prompts once (they were re-issued for the stable identity after the tccutil reset); grants then survive future rebuilds. Commits `6966981` and `64b87f1` are local only — the GitHub credential expired mid-session (gh token invalid, no keychain entry, SSH key not authorized), so `git push` needs re-authentication first. / 解锁后允许一次摄像头与麦克风弹窗即可，之后重打包不再失效。两个新提交仍在本地：GitHub 凭据已过期，需先重新登录再推送。
+
+## Interpolation clarity, output counts and frame-rate shortcuts — 2026-10-06 / 插帧清晰度、输出计数与帧率入口
+
+Environment / 环境: Apple M5 Max (sysctl), macOS 27.0.1, Swift 6.2.4, macOS SDK 26.2, built-in display reported at 120 Hz.
+
+- Clear retains its 1920px long-edge cap and no longer secretly steps down to 960×540. Smooth stops its adaptive ladder at 854px instead of 640px; it still trades moving detail for cost. / 清晰档不再暗降到 540p；流畅档不再降到长边 640，但较低分辨率中间帧仍可能偏软。
+- Admission checks midpoint <= 1.5 slots, source <= 0.9 slot, pair P95 sum <= 90% of the source cycle, and presentation deadlines. The displayed cost/budget now describe the pair. This is a scheduling-policy change, not evidence of faster GPU inference. / 准入与预算改用整对周期并保留单项及呈现期限；这不等于 GPU 推理加速。
+- All output FPS surfaces count presented source + generated frames in one window. Source redraws are deduplicated across windows; epoch checks are atomic with counting, excluding retired streams. Native fallback reports its actual source output instead of zero. / 按实际上屏回调统计原帧与生成帧总和，原帧重绘去重、旧流计数过滤；回退时不再显示输出 0。
+- The shortcuts show only advertised 30/45/50/60 choices; remaining advertised rates stay in the picker. Jemdo discovery reports 1080p/720p fixed approximately 30, 50, 60 FPS (also 10/20), no 45 FPS. Synthetic 45→90 results do not certify Jemdo at 45 FPS. / 按设备能力显示快捷档位；Jemdo 没有 45 档，不能将合成输入测试当作真机支持。
+
+### Executed validation / 已执行验证
+
+| Scenario / 场景 | Result / 结果 |
+| --- | --- |
+| Debug build; signed release packaging; strings lint; interpolation policy (181 checks); capture compatibility including output sampling/retired epoch regression | PASS |
+| GPU interpolation fixture under Metal validation, including orientation/color/fallback/resource lifetime | PASS; synthetic pixels, no image-quality certification |
+| Synthetic 1920×1080 @30, Clear, native target, real window | PASS smoke; measured working size 1920×1080, steady output 60 FPS, pair P95 examples 20.5–22.6 ms against 30 ms budget |
+| Synthetic 1280×720 @45, Smooth, 4K target, low-latency cap disabled, real window | PASS smoke; steady output 90 FPS, work 960×540, pair P95 examples 11.0–11.4 ms against 20 ms budget. No native 4K midpoint or uniform 90 Hz spacing claim |
+| Synthetic 1920×1080 @60, Clear, budget fallback allowed | PASS fallback/order/disable smoke; working size remained 1920×1080; 5 midpoints across the test, most windows output 60 with generation 0. This does NOT pass 60→120 |
+| Synthetic @60, Smooth, ordinary window/minimize/restore/disable smoke after visibility guard change | PASS smoke; 695 presented midpoints in total; no >=85% target windows. This does NOT pass sustained 120 |
+| Strict @60→120 | FAILED. Earlier attempts produced windows near 120 but failed acceptance; another run retired its layer at startup after missing presentation callbacks. Strict acceptance remains unresolved |
+| Injected missing presentation callbacks with cleared input | PASS; old layer retired without recycling outstanding tokens |
+
+Visibility is now checked before presentation timeout retirement, so an occluded/minimized window is not immediately treated as an active presentation failure. The regular smoke and injected-loss tests pass; this does not prove recovery from every screen-mode change. / 已先判断窗口可见性，再判断呈现超时；普通恢复与故障注入通过，不代表所有刷新率切换都已验证。
+
+### Installed app / 部署与真实输入
+
+Build 17 was installed with the same local signing identity and strict verification passed. Real Jemdo 1920×1080 420v @60 resumed without a new permission grant. Clear showed native output approximately 58–61 FPS, generation 0, working size 1920×1080, a pair cost example 27.9 ms against 15 ms, and live audio level/monitoring. Build 18 then added the conditional 50 FPS shortcut and was installed after backing up build 17; strict verification passed. / build 17 真实采集与音频恢复，清晰档超预算后仍正常显示原帧；build 18 已安装快捷帧率改动并通过签名验证。
+
+Correction to the previous signing note: the keychain search-list command had concatenated the original keychain paths, which hid GitHub credentials. Restoring the separate original paths restored gh authentication; no credential refresh or new token was required. Persistent signing is intended to improve permission continuity, not a promise that macOS will never ask again. / 更正上一段：GitHub 失败由钥匙串搜索列表写错导致，恢复路径后登录恢复；稳定签名不能承诺永不重新授权。
+
+Pending: real Jemdo 30/50 FPS interpolation, visual motion-artifact comparison, strict stable 120, screen refresh changes, native 4K UVC and other cards/computers, joint AI upscaling + interpolation, iPad. Neither these smoke tests nor callback FPS measure HDMI end-to-end latency. / 未完成项如上；帧率回调和窗口测试不测 HDMI 总延迟。
