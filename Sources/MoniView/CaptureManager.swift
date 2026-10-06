@@ -243,6 +243,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var discoveryRetryScheduled = false
     private var isSwitchingVideoDevice = false
     private var pendingAudioDeviceID: String?
+    private var pendingAudioPersist = false
     // Requests originate on main; queued work and its result both check this synchronized token.
     // Never hold its lock while configuring a device, starting a session or publishing UI state.
     private let videoConfiguration = ConfigurationRevision()
@@ -475,17 +476,21 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     func selectAudioDevice(id: String?, persist: Bool = false) {
         guard !isRecording else { statusMessage = "停止录制后可更换音频。"; return }
         selectedAudioID = id
-        if persist { UserDefaults.standard.set(id ?? "off", forKey: "audio.selection") }
-        guard let id else { configureAudioInput(id: nil); return }
+        // Persist only a successfully configured explicit choice; failures must not
+        // erase a saved device that is temporarily unplugged.
+        guard let id else { configureAudioInput(id: nil, persist: persist); return }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: configureAudioInput(id: id)
+        case .authorized: configureAudioInput(id: id, persist: persist)
         case .notDetermined:
             audioStatus = "等待麦克风权限"
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self, self.selectedAudioID == id else { return }
                     // Never reconfigure the session while a recording is in progress.
-                    if granted { if self.isRecording { self.pendingAudioDeviceID = id } else { self.configureAudioInput(id: id) } }
+                    if granted {
+                        if self.isRecording { self.pendingAudioDeviceID = id; self.pendingAudioPersist = persist }
+                        else { self.configureAudioInput(id: id, persist: persist) }
+                    }
                     else { self.audioStatus = "需要麦克风权限"; self.statusMessage = "请在系统设置 › 隐私与安全性 › 麦克风中允许 MoniView。" }
                 }
             }
@@ -495,8 +500,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
     }
 
-    private func configureAudioInput(id: String?) {
-        guard !isRecording else { pendingAudioDeviceID = id; return }
+    private func configureAudioInput(id: String?, persist: Bool = false) {
+        guard !isRecording else { pendingAudioDeviceID = id; pendingAudioPersist = persist; return }
         let device = Self.devices(.audio).first { $0.uniqueID == id }
         let revision = audioConfiguration.advance()
         sessionQueue.async { [weak self] in
@@ -522,6 +527,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 }
                 DispatchQueue.main.async {
                     guard self.audioConfiguration.isCurrent(revision) else { return }
+                    if persist { UserDefaults.standard.set(id ?? "off", forKey: "audio.selection") }
                     self.audioStatus = device == nil ? "未连接音频" : "实时监听中"
                     if device == nil { self.audioLevel = 0 }
                     self.statusMessage = nil
@@ -544,9 +550,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 DispatchQueue.main.async {
                     guard self.audioConfiguration.isCurrent(revision) else { return }
                     self.selectedAudioID = restoredID
-                    if UserDefaults.standard.string(forKey: "audio.selection") == (id ?? "off") {
-                        UserDefaults.standard.set(restoredID ?? "off", forKey: "audio.selection")
-                    }
                     self.audioStatus = restoredID == nil ? "未连接音频" : "实时监听中"
                     if restoredID == nil { self.audioLevel = 0 }
                     self.statusMessage = error.localizedDescription
@@ -790,9 +793,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     }
                     // Apply an audio device change that was deferred to avoid reconfiguring a live recording.
                     if let pending = self.pendingAudioDeviceID {
+                        let persist = self.pendingAudioPersist
                         self.pendingAudioDeviceID = nil
+                        self.pendingAudioPersist = false
                         self.selectedAudioID = pending
-                        self.configureAudioInput(id: pending)
+                        self.configureAudioInput(id: pending, persist: persist)
                     }
                     let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
                 }
