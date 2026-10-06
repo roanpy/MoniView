@@ -676,7 +676,21 @@ struct MainView: View {
                         .foregroundStyle(Color(hex: 0xc8bfb7))
                     Spacer()
                     HStack(spacing: 2) {
-                        fpsButton(0, title: capture.detectedContentFPS.map { L10n.format("自动·%d", $0) } ?? L10n.text("自动"))
+                        fpsButton(0, title: "自动")
+                        if let real = realRateTarget {
+                            Button {
+                                capture.selectFrameRateValue(real.rate)
+                            } label: {
+                                Text(L10n.format("真实·%d", real.content))
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color(hex: 0xe9a24d))
+                                    .frame(minWidth: 32)
+                                    .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                            .help(L10n.text("将采集帧率设为实测内容帧率（取不低于内容的最近档位）；内容若以后变快，需要手动调回。"))
+                        }
                         ForEach(quickFrameRates, id: \.self) { fps in
                             fpsButton(fps, title: String(fps))
                         }
@@ -868,6 +882,16 @@ struct MainView: View {
             choices[0] = selected; choices.sort()
         }
         return choices
+    }
+
+    /// Nearest advertised rate at or above the measured content rate. Never lower:
+    /// a lower rate would discard motion the duplicate detector can never see again.
+    private var realRateTarget: (content: Int, rate: Double)? {
+        guard let content = capture.detectedContentFPS else { return nil }
+        let rates = capture.frameRateOptions.filter { $0 > 0 }.sorted()
+        guard let target = rates.first(where: { $0 >= Double(content) - 0.01 }) ?? rates.last,
+              abs(capture.selectedFrameRate - target) > 0.01 else { return nil }
+        return (content, target)
     }
 
     private func fpsButton(_ fps: Int, title: String) -> some View {

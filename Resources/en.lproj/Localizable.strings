@@ -241,4 +241,5 @@
 "内容约 %d FPS · 采集可设为 %d" = "Content ≈ %d FPS · capture can be %d";
 "内容帧率持续低于采集帧率；设为一致可避免重复帧并降低带宽，切换会短暂断流。" = "Content runs below the capture rate; matching them avoids duplicate frames and lowers bandwidth. Switching briefly interrupts the stream.";
 "实测内容约 %d FPS" = "Measured content ~ %d FPS";
-"自动·%d" = "Auto·%d";
+"真实·%d" = "Real·%d";
+"将采集帧率设为实测内容帧率（取不低于内容的最近档位）；内容若以后变快，需要手动调回。" = "Set the capture rate to the measured content rate (nearest supported rate at or above it). If content speeds up later, switch back manually.";
