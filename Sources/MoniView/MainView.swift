@@ -166,7 +166,7 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xec8718))
                 if capture.generatedFPS > 0 {
                     Text("·")
-                    Text(L10n.format("插帧 %d FPS", capture.generatedFPS + capture.renderedFPS))
+                    Text(L10n.format("插帧 %d FPS", capture.outputFPS))
                         .fixedSize()
                         .foregroundStyle(Color(hex: 0xec8718))
                 }
@@ -397,7 +397,7 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
             if capture.picture.frameInterpolation != .off {
-                Text(L10n.format("生成 %d FPS · %@", capture.generatedFPS, L10n.text(capture.interpolationStatus)))
+                Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
@@ -508,7 +508,7 @@ struct MainView: View {
                         .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS * FrameInterpolationPolicy.budgetFraction ? Color.orange : Color(hex: 0x98908a))
                 }
                 if capture.picture.frameInterpolation != .off, let size = capture.interpolationWorkingSize {
-                    Text(L10n.format("插帧处理 %@ · 生成 %d FPS", size, capture.generatedFPS))
+                    Text(L10n.format("插帧处理 %@ · 输出 %d FPS（生成 %d）", size, capture.outputFPS, capture.generatedFPS))
                         .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
                 }
                 Text(L10n.text(FrameInterpolatorSupport.isSupported ? capture.interpolationStatus : "插帧不可用"))

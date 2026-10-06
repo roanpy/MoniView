@@ -260,6 +260,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var applyingPreset = false
     private var picturePersistWork: DispatchWorkItem?
     @Published private(set) var generatedFPS = 0
+    /// Total presented output while interpolating: captured sources plus generated midpoints.
+    var outputFPS: Int { generatedFPS > 0 ? generatedFPS + renderedFPS : 0 }
     @Published private(set) var interpolationStatus = "关闭"
     @Published private(set) var interpolationCostMS = 0.0
     @Published private(set) var interpolationBudgetMS = 0.0
