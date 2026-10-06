@@ -28,6 +28,9 @@ private final class FrameInterpolatorGPUSuite {
         case otherColorFallback
         case orientedFallback
         case cositedChromaFallback
+        case bottomCositedChromaFallback
+        case missingTopChromaFallback
+        case missingBothChromaFallback
         case surfaceMissingFallback
     }
     private struct Case {
@@ -61,6 +64,9 @@ private final class FrameInterpolatorGPUSuite {
         Case(name: "non-709 input falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .otherColorFallback, stopWhileInFlight: false),
         Case(name: "non-up orientation falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .orientedFallback, stopWhileInFlight: false),
         Case(name: "cosited chroma attachment falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .cositedChromaFallback, stopWhileInFlight: false),
+        Case(name: "bottom cosited chroma attachment falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .bottomCositedChromaFallback, stopWhileInFlight: false),
+        Case(name: "missing top chroma with centered bottom falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .missingTopChromaFallback, stopWhileInFlight: false),
+        Case(name: "missing both chroma locations falls back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .missingBothChromaFallback, stopWhileInFlight: false),
         Case(name: "non-IOSurface buffers fall back", targetWidth: 1280, targetHeight: 720, inputWidth: 1280, inputHeight: 720, inputMode: .surfaceMissingFallback, stopWhileInFlight: false),
         Case(name: "CI fallback copy warmup 1920x1080", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
         Case(name: "CI fallback copy warmed 1920x1080", targetWidth: 1920, targetHeight: 1080, inputWidth: 1920, inputHeight: 1080, inputMode: .ciFallback, stopWhileInFlight: false),
@@ -293,9 +299,11 @@ private final class FrameInterpolatorGPUSuite {
         case .direct420v:
             return (
                 makePixelBuffer(from: previous, width: testCase.inputWidth, height: testCase.inputHeight,
-                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709),
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: kCVImageBufferChromaLocation_Center),
                 makePixelBuffer(from: current, width: testCase.inputWidth, height: testCase.inputHeight,
-                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709)
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: kCVImageBufferChromaLocation_Center)
             )
         case .fullRangeFallback:
             return (
@@ -326,6 +334,35 @@ private final class FrameInterpolatorGPUSuite {
                 makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
                                 format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
                                 chromaLocation: kCVImageBufferChromaLocation_Left)
+            )
+        case .bottomCositedChromaFallback:
+            return (
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: kCVImageBufferChromaLocation_Center,
+                                bottomChromaLocation: kCVImageBufferChromaLocation_Left),
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: kCVImageBufferChromaLocation_Center,
+                                bottomChromaLocation: kCVImageBufferChromaLocation_Left)
+            )
+        case .missingTopChromaFallback:
+            return (
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: nil, bottomChromaLocation: kCVImageBufferChromaLocation_Center),
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: nil, bottomChromaLocation: kCVImageBufferChromaLocation_Center)
+            )
+        case .missingBothChromaFallback:
+            return (
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: nil),
+                makePixelBuffer(from: nil, width: testCase.inputWidth, height: testCase.inputHeight,
+                                format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, color: .rec709,
+                                chromaLocation: nil)
             )
         case .surfaceMissingFallback:
             return (
@@ -364,7 +401,8 @@ private final class FrameInterpolatorGPUSuite {
 
     private func makePixelBuffer(from image: CIImage?, width: Int, height: Int, format: OSType,
                                  color: BufferColor, orientation: BufferOrientation = .up,
-                                 chromaLocation: CFString? = nil, surfaceBacked: Bool = true) -> CVPixelBuffer {
+                                 chromaLocation: CFString? = nil, bottomChromaLocation: CFString? = nil,
+                                 surfaceBacked: Bool = true) -> CVPixelBuffer {
         let attributes: [String: Any] = surfaceBacked ? [
             kCVPixelBufferMetalCompatibilityKey as String: true,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:]
@@ -403,6 +441,9 @@ private final class FrameInterpolatorGPUSuite {
         CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, transfer, .shouldPropagate)
         if let chromaLocation {
             CVBufferSetAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, chromaLocation, .shouldPropagate)
+        }
+        if let bottomChromaLocation {
+            CVBufferSetAttachment(buffer, kCVImageBufferChromaLocationBottomFieldKey, bottomChromaLocation, .shouldPropagate)
         }
         let exifOrientation = orientation == .up
             ? CGImagePropertyOrientation.up.rawValue

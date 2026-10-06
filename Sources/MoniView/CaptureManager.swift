@@ -1089,7 +1089,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             payload["bufferPixelFormat"] = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
             for (key, name) in [(kCVImageBufferYCbCrMatrixKey, "inputYCbCrMatrix"),
                                 (kCVImageBufferColorPrimariesKey, "inputColorPrimaries"),
-                                (kCVImageBufferTransferFunctionKey, "inputTransferFunction")] {
+                                (kCVImageBufferTransferFunctionKey, "inputTransferFunction"),
+                                (kCVImageBufferChromaLocationTopFieldKey, "inputChromaLocationTop"),
+                                (kCVImageBufferChromaLocationBottomFieldKey, "inputChromaLocationBottom")] {
                 if let attachment = CVBufferCopyAttachment(buffer, key, nil) { payload[name] = String(describing: attachment) }
             }
         }

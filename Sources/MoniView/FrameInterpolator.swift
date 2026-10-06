@@ -171,9 +171,11 @@ final class FrameInterpolator {
     }
 
     private func hasCenteredChromaLocation(_ buffer: CVPixelBuffer) -> Bool {
-        for key in [kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocationBottomFieldKey] {
-            guard let location = CVBufferCopyAttachment(buffer, key, nil) else { continue }
-            guard CFEqual(location, kCVImageBufferChromaLocation_Center) else { return false }
+        guard let topLocation = CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, nil),
+              CFEqual(topLocation, kCVImageBufferChromaLocation_Center) else { return false }
+        if let bottomLocation = CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationBottomFieldKey, nil),
+           !CFEqual(bottomLocation, kCVImageBufferChromaLocation_Center) {
+            return false
         }
         return true
     }
