@@ -25,7 +25,7 @@ struct PreviewLayerView: NSViewRepresentable {
     }
     func updateNSView(_ view: CapturePreviewNSView, context: Context) {
         view.settings = capture.picture
-        view.aspectMode = capture.aspectMode
+        view.aspectMode = capture.effectiveAspectMode
         view.configureInterpolation()
         (view.layer as? CAMetalLayer)?.displaySyncEnabled = (capture.picture.enhancementEnabled && capture.picture.frameInterpolation != .off && FrameInterpolatorSupport.isSupported) || !capture.picture.lowLatency
         if capture.picture.upscaleMethod != .ai || !capture.picture.enhancementEnabled || capture.picture.upscaleTarget == .native { view.stopAIUpscaler() }

@@ -325,7 +325,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var selectedFPS = 0
     @Published private(set) var frameRateOptions: [Double] = [0]
     @Published private(set) var selectedFrameRate = 0.0
-    @Published var aspectMode: AspectMode = .fit { didSet { UserDefaults.standard.set(aspectMode.rawValue, forKey: "view.aspect") } }
+    @Published var aspectMode: AspectMode = .fit { didSet { userChoseAspect = true; UserDefaults.standard.set(aspectMode.rawValue, forKey: "view.aspect") } }
+    private var userChoseAspect = false
+    /// Portrait buffers are phone/tablet mirrors: fill the window by default until the
+    /// user picks a mode explicitly. Landscape 4:3 (retro consoles) is never stretched.
+    @Published private(set) var isPortraitSource = false
+    var effectiveAspectMode: AspectMode { isPortraitSource && !userChoseAspect ? .stretch : aspectMode }
     @Published var picture = PictureSettings() {
         didSet {
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
@@ -755,6 +760,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var followsRealContentRate: Bool = UserDefaults.standard.bool(forKey: "capture.followRealRate") {
         didSet { UserDefaults.standard.set(followsRealContentRate, forKey: "capture.followRealRate") }
     }
+    private var saturationStreak = 0
     private var heldDetectedContentFPS: Int?
     private var lastDetectedContentFPSAt: Date = .distantPast
     private var lastRealRateSwitchAt: Date = .distantPast
@@ -1073,13 +1079,30 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             }
             self.detectedContentFPS = detectedContentFPS
             self.stableContentFPS = self.contentFPSStabilityStreak >= 5 ? detectedContentFPS : nil
-            if self.followsRealContentRate, !self.isRecording, let stable = self.stableContentFPS,
-               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 15,
-               let target = self.frameRateOptions.filter({ $0 > 0 }).sorted().first(where: { $0 >= Double(stable) - 0.01 })
-                   ?? self.frameRateOptions.filter({ $0 > 0 }).max(),
-               abs(self.selectedFrameRate - target) > 0.01 {
-                self.lastRealRateSwitchAt = Date()
-                self.selectFrameRateValue(target, fromFollow: true)
+            // Follow with detection headroom: run ~1.34x the content rate so duplicate
+            // frames keep the measurement window open in BOTH directions. Sustained
+            // saturation (content fills the signal) raises the rate one notch instead.
+            if self.followsRealContentRate, !self.isRecording, self.frames.currentPreviewState() != "hidden",
+               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 30 {
+                let rates = self.frameRateOptions.filter { $0 > 0 }.sorted()
+                if let stable = self.stableContentFPS, self.contentFPSStabilityStreak >= 8,
+                   let target = rates.first(where: { $0 >= Double(stable) * 1.34 }) ?? rates.last,
+                   abs(self.selectedFrameRate - target) > 0.01 {
+                    self.lastRealRateSwitchAt = Date()
+                    self.saturationStreak = 0
+                    self.selectFrameRateValue(target, fromFollow: true)
+                } else if self.detectedContentFPS == nil {
+                    self.saturationStreak += 1
+                    if self.saturationStreak >= 8, let current = rates.first(where: { abs($0 - self.selectedFrameRate) < 0.01 }),
+                       let faster = rates.first(where: { $0 > current + 0.01 }) {
+                        self.lastRealRateSwitchAt = Date()
+                        self.saturationStreak = 0
+                        self.selectFrameRateValue(faster, fromFollow: true)
+                    }
+                } else { self.saturationStreak = 0 }
+            } else { self.saturationStreak = 0 }
+            if let (buffer, _, _) = self.frames.latest() {
+                self.isPortraitSource = CVPixelBufferGetHeight(buffer) > CVPixelBufferGetWidth(buffer)
             }
             self.presentationIntervalP95MS = self.frames.presentationP95()
             self.interpolationStatus = self.frames.currentPreviewState() == "hidden" ? "预览不可见，暂停呈现" : self.frames.currentInterpolationState()

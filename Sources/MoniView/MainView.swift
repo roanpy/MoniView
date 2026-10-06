@@ -893,7 +893,7 @@ struct MainView: View {
     private var realRateTarget: (content: Int, rate: Double)? {
         guard let content = capture.detectedContentFPS else { return nil }
         let rates = capture.frameRateOptions.filter { $0 > 0 }.sorted()
-        guard let target = rates.first(where: { $0 >= Double(content) - 0.01 }) ?? rates.last,
+        guard let target = rates.first(where: { $0 >= Double(content) * 1.34 }) ?? rates.last,
               abs(capture.selectedFrameRate - target) > 0.01 else { return nil }
         return (content, target)
     }
