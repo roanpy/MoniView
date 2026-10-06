@@ -37,6 +37,7 @@
 "渲染" = "Render";
 "丢帧" = "Dropped";
 "展开诊断数据" = "Show Diagnostics";
+"收起诊断数据" = "Hide Diagnostics";
 "关闭画面信息" = "Close Info";
 "低延迟 · 按显示尺寸处理" = "Low latency · process at display size";
 "按完整目标尺寸处理" = "Process at full target size";
@@ -235,3 +236,7 @@
 "屏幕 %.0f Hz" = "Display %.0f Hz";
 
 "处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。" = "Processing budget is not total GPU utilization. See Video Info for sizes and presentation statistics.";
+"实际内容约 %d FPS · 2× 目标 %d" = "Detected content %d FPS · 2x target %d";
+"实际内容约 %d FPS · 2× 输出 %d" = "Detected content %d FPS · 2x output %d";
+"内容约 %d FPS · 采集可设为 %d" = "Content ≈ %d FPS · capture can be %d";
+"内容帧率持续低于采集帧率；设为一致可避免重复帧并降低带宽，切换会短暂断流。" = "Content runs below the capture rate; matching them avoids duplicate frames and lowers bandwidth. Switching briefly interrupts the stream.";

@@ -13,6 +13,7 @@ private enum PanelKind: String, Hashable {
 struct MainView: View {
     @EnvironmentObject private var capture: CaptureManager
     @State private var panelContentHeight: CGFloat = 560
+    private let iconButtonHitTarget: CGFloat = 32
     @State private var activePanel: PanelKind?
     @State private var showInformation = false
     @State private var expandedInformation = false
@@ -152,6 +153,8 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xd2c9c0))
                     .frame(width: 30, height: 30)
                     .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+                    .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("进入全屏 · ⌃⌘F")
@@ -160,7 +163,7 @@ struct MainView: View {
         .overlay {
             if capture.isRunning && capture.showsStatusBar && !showInformation {
                 sourceSummary
-                    .frame(maxWidth: 420)
+                    .frame(maxWidth: 640)
                     .allowsHitTesting(false)
             }
         }
@@ -169,7 +172,7 @@ struct MainView: View {
     private var sourceSummary: some View {
         HStack(spacing: 7) {
             Circle().fill(Color(hex: 0x5fd69a)).frame(width: 6, height: 6)
-            Text(L10n.text(capture.deviceName)).lineLimit(1).truncationMode(.middle)
+            Text(L10n.text(capture.deviceName)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 132)
             Text("·")
             Text(actualBufferResolution).fixedSize()
             Text("·")
@@ -384,10 +387,18 @@ struct MainView: View {
                 Text(L10n.text(capture.deviceName)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 0)
                 Button { expandedInformation.toggle() } label: {
-                    Image(systemName: expandedInformation ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
-                }.buttonStyle(.plain).help("展开诊断数据").accessibilityLabel("展开诊断数据")
+                    Image(systemName: expandedInformation ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .help(L10n.text(expandedInformation ? "收起诊断数据" : "展开诊断数据"))
+                    .accessibilityLabel(L10n.text(expandedInformation ? "收起诊断数据" : "展开诊断数据"))
                 Button { showInformation = false } label: {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).help("关闭画面信息").accessibilityLabel("关闭画面信息")
             }
             HStack(spacing: 17) {
@@ -412,6 +423,9 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
             if capture.picture.frameInterpolation != .off {
+                if let contentFPS = capture.detectedContentFPS {
+                    Text(L10n.format("实际内容约 %d FPS · 2× 输出 %d", contentFPS, contentFPS * 2))
+                }
                 Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
@@ -436,7 +450,10 @@ struct MainView: View {
             }
             HStack(spacing: 6) {
                 Button { capture.setMuted(!capture.isMuted) } label: {
-                    Image(systemName: capture.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill").foregroundStyle(Color(hex: 0xe9a24d))
+                    Image(systemName: capture.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .foregroundStyle(Color(hex: 0xe9a24d))
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).help("静音监听 · ⌘⇧M")
                 Text(L10n.text(capture.isMuted ? "静音" : capture.audioStatus)).lineLimit(1)
                 Spacer(minLength: 0)
@@ -531,7 +548,9 @@ struct MainView: View {
                         }.padding(.top, 6)
                     }.font(.system(size: 11)).foregroundStyle(Color(hex: 0xb8afa5))
                     HStack {
-                        if let sourceFPS = capture.frames.sourceFrameRate(), let nominal = FrameInterpolationPolicy.nominalInputFPS(sourceFPS) {
+                        if let contentFPS = capture.detectedContentFPS {
+                            Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d", contentFPS, contentFPS * 2))
+                        } else if let sourceFPS = capture.frames.sourceFrameRate(), let nominal = FrameInterpolationPolicy.nominalInputFPS(sourceFPS) {
                             Text(L10n.format("目标 %.0f FPS · 屏幕 %.0f Hz", nominal * 2, capture.displayMaximumFPS))
                         } else {
                             Text(L10n.format("屏幕 %.0f Hz", capture.displayMaximumFPS))
@@ -539,9 +558,26 @@ struct MainView: View {
                         Spacer(minLength: 4)
                         Button {
                             if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
-                        } label: { Image(systemName: "display") }
+                        } label: {
+                            Image(systemName: "display")
+                                .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                                .contentShape(Rectangle())
+                        }
                         .buttonStyle(.link).help("显示器设置…")
                     }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                    if let stable = capture.stableContentFPS,
+                       capture.selectedFrameRate > Double(stable) * 1.2,
+                       capture.frameRateOptions.contains(Double(stable)) {
+                        Button(action: { capture.selectFrameRateValue(Double(stable)) }) {
+                            Text(L10n.format("内容约 %d FPS · 采集可设为 %d", stable, stable))
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0xe9a24d))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.text("内容帧率持续低于采集帧率；设为一致可避免重复帧并降低带宽，切换会短暂断流。"))
+                    }
                     Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color(hex: 0xe9a24d))
@@ -610,6 +646,8 @@ struct MainView: View {
                         .foregroundStyle(Color(hex: 0xe9a24d))
                         .frame(width: 30, height: 30)
                         .background(Color.white.opacity(0.06), in: Circle())
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("刷新采集设备")
