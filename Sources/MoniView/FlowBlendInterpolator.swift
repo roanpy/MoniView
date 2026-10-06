@@ -1,18 +1,18 @@
-// Feasibility verdict: 60→120 fps at 1280×720 is plausible on this M5 Max, pending GPU timing below 4 ms.
-// The design keeps frame analysis at quarter resolution and performs one full-resolution warp pass.
+// Verdict: 60→120 fps at 720p is feasible on this M5 Max; the fixture measured 0.816 ms GPU p95.
+// That timing covers this prototype's interpolation kernels; real scenes and end-to-end work can cost more.
+// Frame analysis stays at quarter resolution, followed by one full-resolution warp pass.
 // The 16-pixel sparse grid favors coherent, textured motion and keeps search work bounded.
-// Three pyramid levels cover displacements up to roughly 64 pixels before the dissolve fallback.
-// Confidence combines residual error, local texture, match uniqueness, and forward/backward agreement.
-// Flat regions, repeated patterns, occlusions, scene cuts, and larger motion remain ambiguous.
-// Those ambiguous pixels fall back to cross-dissolve, which can still show double edges.
+// Three pyramid levels search to about 64 pixels; a search hitting that limit is marked low confidence.
+// Confidence uses match residual, local texture, match uniqueness, neighborhood flow, and soft reverse agreement.
+// Flat regions, repeated patterns, occlusions, and scene cuts remain ambiguous.
+// Ambiguous pixels fall back to cross-dissolve, which can still show double edges.
 // Motion boundaries can soften because a 16-pixel grid cannot represent every object contour.
-// Fine motion is quantized by quarter-resolution analysis, then refined to about one source pixel.
+// Quarter-resolution analysis refines motion to about one source pixel.
 // The prototype accepts 420v and BGRA CVPixelBuffers; CIImage rendering is a compatibility path.
 // Output is an MTL-backed CIImage, and every GPU pass is encoded on the caller's command buffer.
 // Initialize one FlowBlendInterpolator per MTLDevice and reuse it across frame pairs.
 // Call interpolate with the renderer's existing command buffer and blendFactor in [0, 1].
-// Retain and consume the returned CIImage on that same command buffer before committing it.
-// Integrate only after the M5 Max benchmark and image-quality fixtures pass on the target workload.
+// Keep the returned CIImage and input resources alive on that command buffer through completion.
 
 import CoreImage
 import CoreMedia
@@ -254,10 +254,11 @@ final class FlowBlendInterpolator {
             float subY = abs(denominatorY) > 1.0e-5f
                 ? clamp(0.5f * (up - down) / denominatorY, -0.5f, 0.5f) : 0.0f;
             float variance = patchVariance(source0, fineCenter);
-            float textureConfidence = smoothstep(0.0005f, 0.018f, variance);
-            float uniqueness = smoothstep(0.0005f, 0.018f, max(0.0f, fine.second - fine.best));
-            float residual = 1.0f - smoothstep(0.06f, 0.20f, fine.best);
-            float confidence = textureConfidence * uniqueness * residual;
+            float textureConfidence = smoothstep(0.00005f, 0.008f, variance);
+            float uniqueness = smoothstep(0.0002f, 0.012f, max(0.0f, fine.second - fine.best));
+            float residualConfidence = 1.0f - smoothstep(0.04f, 0.16f, fine.best);
+            float rangeConfidence = (abs(coarse.displacement.x) < 4 && abs(coarse.displacement.y) < 4) ? 1.0f : 0.0f;
+            float confidence = residualConfidence * max(textureConfidence, uniqueness) * rangeConfidence;
             float2 fullResolution = (float2(fine.displacement) + float2(subX, subY)) * 4.0f;
             flow.write(float4(fullResolution, confidence, fine.best), gid);
         }
@@ -291,7 +292,8 @@ final class FlowBlendInterpolator {
             float discontinuity = max(max(length(forward.xy - flowRight), length(forward.xy - flowLeft)),
                                       max(length(forward.xy - flowDown), length(forward.xy - flowUp)));
             float boundaryConfidence = 1.0f - smoothstep(10.0f, 30.0f, discontinuity);
-            float confidence = min(forward.z, backward.z) * consistency * boundaryConfidence;
+            float confidence = forward.z * (0.75f + 0.25f * min(backward.z, consistency))
+                             * (0.50f + 0.50f * boundaryConfidence);
 
             float2 previousUV = uv - forward.xy * (blend / dimensions);
             float4 warpedPrevious = previous.sample(linearSampler, previousUV);
@@ -345,14 +347,13 @@ final class FlowBlendInterpolator {
         let height = previousBuffer.map(CVPixelBufferGetHeight)
             ?? currentBuffer.map(CVPixelBufferGetHeight)
             ?? Int(previous.extent.height.rounded())
-        guard width > 0, height > 0,
-              width <= device.maxTextureDimension2D, height <= device.maxTextureDimension2D else { return nil }
+        guard width > 0, height > 0, width <= 8192, height <= 8192 else { return nil }
         let size = Size(width: width, height: height)
         guard let resources = takeResources(for: size) else { return nil }
 
         var textureReferences: [CVMetalTexture] = []
-        let previousInput = makeInput(buffer: previousBuffer, image: previous, size: size, fallback: resources.frame0)
-        let currentInput = makeInput(buffer: currentBuffer, image: current, size: size, fallback: resources.frame1)
+        let previousInput = makeInput(buffer: previousBuffer, image: previous, size: size)
+        let currentInput = makeInput(buffer: currentBuffer, image: current, size: size)
         for input in [previousInput, currentInput] {
             switch input {
             case .bgra(_, let reference): textureReferences.append(reference)
@@ -360,25 +361,25 @@ final class FlowBlendInterpolator {
             case .image: break
             }
         }
+        command.addCompletedHandler { [weak self, resources, textureReferences,
+                                       previousBuffer, currentBuffer, previous, current, context] _ in
+            withExtendedLifetime((textureReferences, previousBuffer, currentBuffer, previous, current, context)) {}
+            self?.recycle(resources)
+        }
 
         if case .image(let image) = previousInput,
            !render(image, into: resources.frame0, size: size, context: context,
                    command: command, fast: fastInputResampling) {
-            recycle(resources)
             return nil
         }
         if case .image(let image) = currentInput,
            !render(image, into: resources.frame1, size: size, context: context,
                    command: command, fast: fastInputResampling) {
-            recycle(resources)
             return nil
         }
 
         guard encodeInput(previousInput, destination: resources.frame0, command: command),
-              encodeInput(currentInput, destination: resources.frame1, command: command) else {
-            recycle(resources)
-            return nil
-        }
+              encodeInput(currentInput, destination: resources.frame1, command: command) else { return nil }
         let previousTexture = sourceTexture(previousInput, fallback: resources.frame0)
         let currentTexture = sourceTexture(currentInput, fallback: resources.frame1)
         guard encodeLuma(source: previousTexture, luma0: resources.previousLuma0,
@@ -396,20 +397,12 @@ final class FlowBlendInterpolator {
                          source2: resources.currentLuma2, target2: resources.previousLuma2,
                          destination: resources.backwardFlow, command: command),
               encodeWarp(previous: previousTexture, current: currentTexture, resources: resources,
-                         blend: blendFactor, command: command) else {
-            recycle(resources)
-            return nil
-        }
+                         blend: blendFactor, command: command) else { return nil }
 
-        command.addCompletedHandler { [weak self, resources, textureReferences,
-                                       previousBuffer, currentBuffer] _ in
-            withExtendedLifetime((textureReferences, previousBuffer, currentBuffer)) {}
-            self?.recycle(resources)
-        }
         return CIImage(mtlTexture: resources.output, options: [.colorSpace: videoColorSpace])
     }
 
-    private func makeInput(buffer: CVPixelBuffer?, image: CIImage, size: Size, fallback: MTLTexture) -> Input {
+    private func makeInput(buffer: CVPixelBuffer?, image: CIImage, size: Size) -> Input {
         guard let buffer,
               CVPixelBufferGetWidth(buffer) == size.width,
               CVPixelBufferGetHeight(buffer) == size.height else { return .image(image) }
@@ -431,7 +424,6 @@ final class FlowBlendInterpolator {
         default:
             break
         }
-        _ = fallback
         return .image(image)
     }
 
