@@ -102,6 +102,17 @@ struct FrameInterpolationPolicyTests {
                       abs(Double(result.height) - Double(height) * scale) < 2.000001, "Aspect within even-rounding error")
             }
         }
-        print("FrameInterpolationPolicy: \(checks) checks passed (admission/sizing only; no renderer, GPU or presentation claim).")
+        check(P.processingCost(cpu: 2, gpu: 3, encodeToCompletion: 10) == 10, "Queue/processor wait included")
+        check(P.processingCost(cpu: 2, gpu: 3, encodeToCompletion: 4) == 5, "GPU span remains a lower bound")
+        check(P.processingCost(cpu: 0, gpu: 0, encodeToCompletion: 0) == 0, "Zero interval")
+        for invalid in [-1.0, .infinity, .nan] {
+            check(P.processingCost(cpu: invalid, gpu: 1, encodeToCompletion: 1).isInfinite, "Invalid CPU rejects")
+            check(P.processingCost(cpu: 1, gpu: invalid, encodeToCompletion: 1).isInfinite, "Invalid GPU rejects")
+            check(P.processingCost(cpu: 1, gpu: 1, encodeToCompletion: invalid).isInfinite, "Invalid completion interval rejects")
+        }
+        let elapsedMidpoint = P.processingCost(cpu: 0.0006, gpu: 0.0001, encodeToCompletion: 0.018)
+        check(!P.costsFit(midpoint: elapsedMidpoint, source: 0.001, slot: 1.0 / 120), "Tiny GPU span cannot hide 18ms completion")
+        check(P.allowsMeasuredPair(midpoint: elapsedMidpoint, source: 0.001, slot: 1.0 / 120, force: true, deadlineFits: true), "Force still bypasses real measured budget")
+        print("FrameInterpolationPolicy: \(checks) checks passed (admission/sizing/processing interval only; no renderer, GPU or presentation claim).")
     }
 }

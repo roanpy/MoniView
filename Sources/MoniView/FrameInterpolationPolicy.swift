@@ -35,6 +35,16 @@ enum FrameInterpolationPolicy {
     static let midpointBudgetFraction = 1.5
     static let overloadCooldownSeconds = 2.0
 
+    /// FrameProcessor work/queue waits can outlive the command's GPU timestamp span.
+    /// Use encode start through completion callback, including command/queue waits.
+    /// This excludes drawable acquisition, actual presentation, main-thread completion
+    /// bookkeeping and capture transport; it is not total renderer slot occupancy.
+    static func processingCost(cpu: Double, gpu: Double, encodeToCompletion: Double) -> Double {
+        guard cpu.isFinite, gpu.isFinite, encodeToCompletion.isFinite,
+              cpu >= 0, gpu >= 0, encodeToCompletion >= 0 else { return .infinity }
+        return max(cpu + gpu, encodeToCompletion)
+    }
+
     /// Inference may span more than one display slot when encoded ahead of its
     /// presentation. Bound that lead AND the whole pair; the cheap endpoint still
     /// needs to fit its own slot. Deadline checks in the renderer remain mandatory.

@@ -77,6 +77,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     var onPresentation: ((UInt64, Bool, Double) -> Void)?
     private(set) var peakOutstandingPresentations = 0
     private(set) var drawableWaitMS: [Double] = []
+    private(set) var displayTickTimes: [Double] = []
     var suppressPresentedCallbacks = false // failure injection, absent from production builds
     #endif
     #if MONIVIEW_PREVIEW_TESTING
@@ -196,6 +197,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
     }
     fileprivate func interpolationTick(_ link: CADisplayLink) {
+        #if MONIVIEW_PREVIEW_TESTING
+        displayTickTimes.append(CACurrentMediaTime())
+        if displayTickTimes.count > 6000 { displayTickTimes.removeFirst(displayTickTimes.count - 6000) }
+        #endif
         let currentCap = Float(window?.screen?.maximumFramesPerSecond ?? 60)
         if currentCap > 0 && currentCap != configuredDisplayCap { resetInterpolationForDisplay() }
         displayTargetTime = link.targetTimestamp
@@ -499,7 +504,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
         let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
         // Smooth midpoints use their measured working size and one final resize.
-        // Otherwise adaptive 640px input can fall through the >3x spatial wrapper
+        // Otherwise a reduced midpoint can fall through the >3x spatial wrapper
         // guard into expensive Lanczos, undoing the purpose of the lighter tier.
         let smoothMidpoint = generatedMidpoint && settings.frameInterpolation == .efficient
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
@@ -621,6 +626,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let measuredDimensions = interpolationDimensions
         let encodedCPUSeconds = CACurrentMediaTime() - encodingStarted
         command.addCompletedHandler { [weak self] completed in
+            let callbackAt = CACurrentMediaTime()
             let gpuMS = max(0, completed.gpuEndTime - completed.gpuStartTime) * 1000
             let succeeded = completed.status == .completed
             // Measure at the GPU completion callback, before waiting for the main thread.
@@ -634,7 +640,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 }
                 if shouldMeasure { frameStore.markRendered(receivedAt: frameReceivedAt, gpuMS: gpuMS) }
             }
-            let cost = encodedCPUSeconds + gpuMS / 1000
+            let cost = FrameInterpolationPolicy.processingCost(cpu: encodedCPUSeconds,
+                gpu: gpuMS / 1000, encodeToCompletion: max(0, callbackAt - encodingStarted))
             #if MONIVIEW_PREVIEW_TESTING
             if (wasMidpoint || wasCalibration || wasEndpoint), frameSequence % 60 == 0, ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" {
                 print("TIMING seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
@@ -643,6 +650,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // Semaphore release and render bookkeeping remain serialized with draw(in:).
             DispatchQueue.main.async {
                 guard let self else { semaphore.signal(); return }
+                #if MONIVIEW_PREVIEW_TESTING
+                if ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1", frameSequence % 60 == 0 {
+                    self.trace("COMPLETE seq=\(frameSequence) mid=\(wasMidpoint) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS) encodeToGPUStartMS=\((completed.gpuStartTime-encodingStarted)*1000) GPUEndToCallbackMS=\((callbackAt-completed.gpuEndTime)*1000) encodeToCallbackMS=\((callbackAt-encodingStarted)*1000) mainHandoffMS=\((CACurrentMediaTime()-callbackAt)*1000)")
+                }
+                #endif
                 if succeeded { self.outstandingPresentations[token]?.gpuCompleted = true }
                 if succeeded && shouldMeasure { self.lastMeasuredSequence = frameSequence }
                 if succeeded && !wasMidpoint && self.presentationEpoch == epoch { self.lastSourceSequence = frameSequence }
