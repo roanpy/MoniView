@@ -481,6 +481,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         cooldownUntil = CACurrentMediaTime() + FrameInterpolationPolicy.overloadCooldownSeconds
                         midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
                         frames.setInterpolationState(settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")
+                    } else if !deadlineFits {
+                        // Force cannot make a late pair present on time. Do not leave
+                        // a previous successful pair's running label on native fallback.
+                        frames.setInterpolationState("呈现节奏调整")
                     }
                 }
             }
