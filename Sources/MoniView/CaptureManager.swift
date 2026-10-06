@@ -279,6 +279,7 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }
         buffer = nil
         formatDescription = nil
+        measuredContentFPS = nil
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
         sequence &+= 1
         streamEpoch &+= 1

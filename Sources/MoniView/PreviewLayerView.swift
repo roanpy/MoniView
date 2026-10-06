@@ -64,7 +64,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Rolling unique/duplicate pair outcomes. A duplicated cadence (30 Hz content in a
     /// 60 Hz signal) needs half the midpoints, so the per-midpoint budget doubles.
     private var duplicatePairWindow: [Bool] = []
-    private var lastDuplicateCheck: (sequence: UInt64, result: Bool)?
+    private var lastDuplicateCheck: (sequence: UInt64, skipEnabled: Bool, result: Bool)?
     private var lastSourceSequence: UInt64? // last GPU-completed source with an ordered presentation
     private var presentationEpoch: UInt64 = 0
     private var sourceStreamEpoch: UInt64?
@@ -292,10 +292,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Exact-duplicate pair check with one result per sequence. The full-pixel compare
     /// runs once even when both the presentation skip and the pair admission ask.
     private func isDuplicatePair(previous: CVPixelBuffer, current: CVPixelBuffer, sequence: UInt64, streamEpoch: UInt64) -> Bool {
-        if let last = lastDuplicateCheck, last.sequence == sequence { return last.result }
-        let result = settings.skipsExactDuplicateInterpolation && VideoFrameDuplicateDetector.areIdentical(previous, current)
-        lastDuplicateCheck = (sequence, result)
-        if result { frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch) }
+        let skipEnabled = settings.skipsExactDuplicateInterpolation
+        if let last = lastDuplicateCheck, last.sequence == sequence, last.skipEnabled == skipEnabled { return last.result }
+        let result = skipEnabled && VideoFrameDuplicateDetector.areIdentical(previous, current)
+        lastDuplicateCheck = (sequence, skipEnabled, result)
         duplicatePairWindow.append(result)
         duplicatePairWindow = Array(duplicatePairWindow.suffix(16))
         return result
@@ -308,6 +308,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// credit is capped so a pathological stream cannot claim an unbounded budget.
     private func pairBudgetMultiplier() -> Double {
         guard duplicatePairWindow.count >= 8 else { return 1 }
+        // Content that switched back to full rate must lose the scaled budget at once;
+        // only the duplicate-heavy direction earns the slower windowed confirmation.
+        if duplicatePairWindow.suffix(4).allSatisfy({ !$0 }) { return 1 }
         let uniques = duplicatePairWindow.reduce(0) { $0 + ($1 ? 0 : 1) }
         let uniqueRatio = Double(uniques) / Double(duplicatePairWindow.count)
         guard uniqueRatio > 0, uniqueRatio <= 0.75 else { return 1 }
@@ -459,10 +462,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
         // the display already holds the identical previous drawable. Skipping the whole
         // spatial pipeline here saves GPU for midpoint quality on the unique frames.
-        if interpolationRequested, admitted, !skipInterpolation, endpointPresentation == nil,
+        if interpolationRequested, admitted, !forced, !skipInterpolation, endpointPresentation == nil,
            pendingSource == nil, CACurrentMediaTime() >= cooldownUntil,
            let duplicatePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == duplicatePair.1,
            isDuplicatePair(previous: duplicatePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch) {
+            frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch)
             lastSourceSequence = sequence
             lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
             inFlight.signal()
@@ -505,7 +509,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // A hidden calibration pass shares the native frame's command buffer. It
                     // never increments generated counts or advertises interpolation as active.
                     let mayGenerate = midCost.flatMap { mid in sourceCost.map {
-                        FrameInterpolationPolicy.allowsMeasuredPair(midpoint: mid, source: $0, slot: slot,
+                        FrameInterpolationPolicy.allowsMeasuredPair(midpoint: mid, source: $0, slot: budgetSlot,
                             force: settings.forceFrameInterpolation, deadlineFits: deadlineFits)
                     } } ?? false
                     if midCost == nil || mayGenerate {

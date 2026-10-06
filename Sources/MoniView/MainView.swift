@@ -565,10 +565,10 @@ struct MainView: View {
                         }
                         .buttonStyle(.link).help("显示器设置…")
                     }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
-                    if let stable = capture.stableContentFPS,
-                       capture.selectedFrameRate > Double(stable) * 1.2,
-                       capture.frameRateOptions.contains(Double(stable)) {
-                        Button(action: { capture.selectFrameRateValue(Double(stable)) }) {
+                if let stable = capture.stableContentFPS,
+                   capture.selectedFrameRate > Double(stable) * 1.2,
+                   let supportedRate = capture.frameRateOptions.first(where: { abs($0 - Double(stable)) < 0.5 }) {
+                    Button(action: { capture.selectFrameRateValue(supportedRate) }) {
                             Text(L10n.format("内容约 %d FPS · 采集可设为 %d", stable, stable))
                                 .font(.system(size: 10))
                                 .foregroundStyle(Color(hex: 0xe9a24d))
