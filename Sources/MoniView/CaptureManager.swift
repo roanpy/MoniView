@@ -606,7 +606,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             return
         }
         let capture = macWindowCapture ?? MacWindowCapture(
-            frameSink: { [weak self] sample in
+            frameSink: { [weak self] (sample: CMSampleBuffer) in
                 guard let self, let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample)
                 // Same handoff as the capture-device path: the preview keeps only the
@@ -614,7 +614,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 self.frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample))
                 self.recorder.append(sample, video: true)
             },
-            state: { [weak self] state in self?.handleMacWindowState(state) },
+            state: { [weak self] (state: MacWindowCapture.State) in self?.handleMacWindowState(state) },
             dropped: { [weak self] in self?.frames.markDropped() })
         macWindowCapture = capture
         isMacWindowSourceActive = true
