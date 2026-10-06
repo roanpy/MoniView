@@ -63,6 +63,10 @@ struct MainView: View {
                         panelContent(activePanel)
                             .padding(16)
                             .fixedSize(horizontal: false, vertical: true)
+                            // A stable identity per panel: without it SwiftUI reuses one view
+                            // across a panel switch, so the outgoing panel's content and layout
+                            // briefly render behind the incoming one.
+                            .id(activePanel)
                             .onGeometryChange(for: CGFloat.self) { content in
                                 content.size.height
                             } action: { height in
@@ -85,6 +89,10 @@ struct MainView: View {
                 }
             }
         }
+        // A new panel must not inherit the previous panel measured height: the frame
+        // would be the wrong size for one layout pass, which is what made a scrollbar
+        // flash on every switch.
+        .onChange(of: activePanel) { _, _ in panelContentHeight = 0 }
         .animation(.easeOut(duration: 0.18), value: activePanel)
         .background(Color(hex: 0x1d1b19))
         .background {
