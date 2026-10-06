@@ -423,10 +423,11 @@ struct MainView: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
+            if let contentFPS = capture.detectedContentFPS {
+                Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
+                                 Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+            }
             if capture.picture.frameInterpolation != .off {
-                if let contentFPS = capture.detectedContentFPS {
-                    Text(L10n.format("实际内容约 %d FPS · 2× 输出 %d", contentFPS, contentFPS * 2))
-                }
                 Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
@@ -557,7 +558,8 @@ struct MainView: View {
                     }
                     HStack {
                         if let contentFPS = capture.detectedContentFPS {
-                            Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d", contentFPS, contentFPS * 2))
+                            Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
+                                             Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
                         } else if let sourceFPS = capture.frames.sourceFrameRate(), let nominal = FrameInterpolationPolicy.nominalInputFPS(sourceFPS) {
                             Text(L10n.format("目标 %.0f FPS · 屏幕 %.0f Hz", nominal * 2, capture.displayMaximumFPS))
                         } else {
@@ -672,14 +674,11 @@ struct MainView: View {
                     Spacer()
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
-                        if capture.detectedContentFPS != nil || capture.followsRealContentRate {
+                        if capture.frameRateOptions.contains(where: { $0 > 0 }) {
                             Button {
                                 capture.followsRealContentRate.toggle()
-                                if capture.followsRealContentRate, let real = realRateTarget {
-                                    capture.selectFrameRateValue(real.rate, fromFollow: true)
-                                }
                             } label: {
-                                Text(L10n.text("真实"))
+                                Text(L10n.text("跟随"))
                                     .font(.system(size: 10, weight: .semibold))
                                     .foregroundStyle(capture.followsRealContentRate ? Color(hex: 0x2d1b0b) : Color(hex: 0xe9a24d))
                                     .frame(minWidth: 32)
@@ -699,12 +698,12 @@ struct MainView: View {
                     .frame(width: 195, alignment: .trailing)
                 }
                 if let contentFPS = capture.detectedContentFPS {
-                    Text(L10n.format("实测内容约 %d FPS", contentFPS))
+                    Text(L10n.format("实测内容约 %d FPS", Int(contentFPS.rounded())))
                         .font(.system(size: 10))
                         .foregroundStyle(Color(hex: 0x98908a))
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                } else if capture.followsRealContentRate, capture.isRunning {
-                    Text(L10n.text("内容已达采集上限 · 无重复帧"))
+                } else if capture.followsRealContentRate {
+                    Text(L10n.text("跟随已开启，暂未检测到可跟随节奏"))
                         .font(.system(size: 10))
                         .foregroundStyle(Color(hex: 0x98908a))
                         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -876,26 +875,16 @@ struct MainView: View {
     }
 
     private var quickFrameRates: [Int] {
-        // Four shortcuts fit the existing aligned field. All advertised rates remain
+        // Follow takes one of the existing shortcut slots. All advertised rates remain
         // in the dropdown; high-rate hardware gets its 90/120 shortcuts too.
         let supported = [30, 45, 50, 60, 90, 120].filter { fps in
             capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
         }
-        var choices = Array(supported.suffix(4))
+        var choices = Array(supported.suffix(3))
         if let selected = supported.first(where: { abs(Double($0) - capture.selectedFrameRate) < 0.01 }), !choices.contains(selected) {
             choices[0] = selected; choices.sort()
         }
         return choices
-    }
-
-    /// Nearest advertised rate at or above the measured content rate. Never lower:
-    /// a lower rate would discard motion the duplicate detector can never see again.
-    private var realRateTarget: (content: Int, rate: Double)? {
-        guard let content = capture.detectedContentFPS else { return nil }
-        let rates = capture.frameRateOptions.filter { $0 > 0 }.sorted()
-        guard let target = rates.first(where: { $0 >= Double(content) * 1.34 }) ?? rates.last,
-              abs(capture.selectedFrameRate - target) > 0.01 else { return nil }
-        return (content, target)
     }
 
     private func fpsButton(_ fps: Int, title: String) -> some View {

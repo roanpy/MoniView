@@ -206,10 +206,10 @@ final class LatestVideoFrame {
         guard let buffer else { return nil }
         return (buffer, sequence, receivedAt)
     }
-    func latestSnapshot() -> (buffer: CVPixelBuffer, sequence: UInt64, receivedAt: UInt64, streamEpoch: UInt64)? {
+    func latestSnapshot() -> (buffer: CVPixelBuffer, sequence: UInt64, receivedAt: UInt64, streamEpoch: UInt64, pts: CMTime)? {
         lock.lock(); defer { lock.unlock() }
         guard let buffer else { return nil }
-        return (buffer, sequence, receivedAt, streamEpoch)
+        return (buffer, sequence, receivedAt, streamEpoch, pts)
     }
     /// Keep capture metadata paired with its buffer. Only the current description is retained.
     func latestFormatSnapshot() -> (buffer: CVPixelBuffer, description: CMFormatDescription?)? {
@@ -351,8 +351,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var presentedSourceFPS = 0
     @Published private(set) var presentedOutputFPS = 0
     @Published private(set) var skippedDuplicatePairsPerSecond = 0
-    @Published private(set) var detectedContentFPS: Int?
-    @Published private(set) var stableContentFPS: Int?
+    @Published private(set) var detectedContentFPS: Double?
+    @Published private(set) var stableContentFPS: Double?
     private var contentFPSStabilityStreak = 0
     @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
@@ -422,6 +422,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var discoveryRetryCount = 0
     private var discoveryRetryScheduled = false
     private var isSwitchingVideoDevice = false
+    // Main-queue transaction state; prevents follow from reusing the old format ID.
+    private var pendingVideoConfiguration: (formatID: Int, frameRate: Double, fromFollow: Bool)?
     private var pendingAudioDeviceID: String?
     private var pendingAudioPersist = false
     // Requests originate on main; queued work and its result both check this synchronized token.
@@ -539,6 +541,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         selectedFrameRate = 0
         selectedFPS = 0
         isSwitchingVideoDevice = true
+        pendingVideoConfiguration = nil
+        resetContentRateObservation()
         let generation = videoConfiguration.advance()
         if let id { UserDefaults.standard.set(id, forKey: "device.lastVideo") }
         frames.clear()
@@ -589,6 +593,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         self.selectedFrameRate = desiredFPS
                         self.frameRateOptions = Self.frameRates(for: device)
                         self.isSwitchingVideoDevice = false
+                        self.lastRealRateSwitchAt = .distantPast
+                        self.resetContentRateObservation()
                         self.statusMessage = nil
                         self.autoSelectAudio(for: device, replacePair: previouslyPaired)
                     }
@@ -605,6 +611,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         self.formatOptions = []; self.selectedFormatID = nil
                         self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
                         self.isSwitchingVideoDevice = false
+                        self.lastRealRateSwitchAt = .distantPast
+                        self.resetContentRateObservation()
                         self.isRunning = false
                         self.selectAudioDevice(id: nil, persist: false)
                     }
@@ -623,6 +631,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.formatOptions = []; self.selectedFormatID = nil
                     self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
                     self.isSwitchingVideoDevice = false
+                    self.lastRealRateSwitchAt = .distantPast
+                    self.resetContentRateObservation()
                     self.isRunning = false
                     self.statusMessage = L10n.format("连接失败：%@", error.localizedDescription)
                 }
@@ -753,46 +763,56 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         guard !isRecording else { statusMessage = "停止录制后可更改格式。"; return }
         guard let id else { return }
         let option = formatOptions.first { $0.id == id }
-        applyFormat(index: id, fps: option?.supportsFrameRate(selectedFrameRate) == true ? selectedFrameRate : 0)
+        let currentRate = pendingVideoConfiguration?.frameRate ?? selectedFrameRate
+        applyFormat(index: id, fps: option?.supportsFrameRate(currentRate) == true ? currentRate : 0)
     }
     /// Follow mode: capture rate tracks the measured content rate (nearest supported
     /// rate at or above it). Manual rate selection exits the mode. Persisted.
     @Published var followsRealContentRate: Bool = UserDefaults.standard.bool(forKey: "capture.followRealRate") {
         didSet { UserDefaults.standard.set(followsRealContentRate, forKey: "capture.followRealRate") }
     }
-    private var saturationStreak = 0
-    private var heldDetectedContentFPS: Int?
+    private var heldDetectedContentFPS: Double?
     private var lastDetectedContentFPSAt: Date = .distantPast
     private var lastRealRateSwitchAt: Date = .distantPast
     func selectFrameRate(_ fps: Int) { selectFrameRateValue(Double(fps)) }
     func selectFrameRateValue(_ fps: Double, fromFollow: Bool = false) {
         if !fromFollow { followsRealContentRate = false }
         guard !isRecording else { statusMessage = "停止录制后可更改帧率。"; return }
-        guard let selectedFormatID else { return }
-        applyFormat(index: selectedFormatID, fps: fps)
+        guard let formatID = pendingVideoConfiguration?.formatID ?? selectedFormatID else { return }
+        applyFormat(index: formatID, fps: fps, fromFollow: fromFollow)
     }
-    private func applyFormat(index: Int, fps: Double) {
+    private func applyFormat(index: Int, fps: Double, fromFollow: Bool = false) {
+        pendingVideoConfiguration = (index, fps, fromFollow)
+        if !fromFollow { resetContentRateObservation() }
         let generation = videoConfiguration.advance()
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.selectedDevice else { return }
+            guard let self else { return }
             guard self.videoConfiguration.isCurrent(generation) else { return }
+            guard let device = self.selectedDevice else {
+                DispatchQueue.main.async {
+                    guard self.videoConfiguration.isCurrent(generation) else { return }
+                    self.pendingVideoConfiguration = nil
+                }
+                return
+            }
             do {
                 // Direct device configuration only: committing the session here reverts
                 // activeFormat to the preset choice on the current capture stack.
                 try self.configureFormat(device, index: index, fps: fps)
                 self.requestedFrameRate = fps
                 self.requestedFormatIndex = index
-                self.publishFormat(device: device, index: index, fps: fps, generation: generation)
+                self.publishFormat(device: device, index: index, fps: fps, generation: generation, fromFollow: fromFollow)
             } catch {
                 DispatchQueue.main.async {
                     guard self.videoConfiguration.isCurrent(generation) else { return }
+                    self.pendingVideoConfiguration = nil
                     self.statusMessage = error.localizedDescription
                 }
             }
         }
     }
 
-    private func publishFormat(device: AVCaptureDevice, index: Int, fps: Double, generation: UInt64) {
+    private func publishFormat(device: AVCaptureDevice, index: Int, fps: Double, generation: UInt64, fromFollow: Bool) {
         let format = device.activeFormat
         let dim = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         let options = Self.frameRates(for: device)
@@ -805,7 +825,19 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.selectedFPS = Int(fps.rounded()); self.selectedFrameRate = fps
             self.frameRateOptions = options
             self.resolution = "\(dim.width) × \(dim.height)"; self.pixelFormat = pixel; self.statusMessage = nil
+            self.pendingVideoConfiguration = nil
+            self.lastRealRateSwitchAt = fromFollow ? Date() : .distantPast
+            self.resetContentRateObservation()
         }
+    }
+
+    private func resetContentRateObservation() {
+        heldDetectedContentFPS = nil
+        lastDetectedContentFPSAt = .distantPast
+        detectedContentFPS = nil
+        stableContentFPS = nil
+        contentFPSStabilityStreak = 0
+        frames.setMeasuredContentFPS(nil)
     }
     private static func frameRates(for format: AVCaptureDevice.Format) -> [Double] {
         var values = Set<Double>()
@@ -1069,38 +1101,21 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
             // Hold a lost detection briefly: content hovering at the duplicate threshold
             // must not flap the UI. Budget math uses its own live window, unaffected.
-            let rawDetected = self.frames.currentMeasuredContentFPS().map { Int($0.rounded()) }
+            let rawDetected = self.frames.currentMeasuredContentFPS()
             if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
             let detectedContentFPS = rawDetected ?? (Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil)
-            if let detectedContentFPS, detectedContentFPS == self.detectedContentFPS {
-                self.contentFPSStabilityStreak += 1
-            } else {
-                self.contentFPSStabilityStreak = 0
-            }
+            self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
+                previous: self.detectedContentFPS, current: detectedContentFPS, streak: self.contentFPSStabilityStreak)
             self.detectedContentFPS = detectedContentFPS
-            self.stableContentFPS = self.contentFPSStabilityStreak >= 5 ? detectedContentFPS : nil
-            // Follow with detection headroom: run ~1.34x the content rate so duplicate
-            // frames keep the measurement window open in BOTH directions. Sustained
-            // saturation (content fills the signal) raises the rate one notch instead.
-            if self.followsRealContentRate, !self.isRecording, self.frames.currentPreviewState() != "hidden",
-               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 30 {
-                let rates = self.frameRateOptions.filter { $0 > 0 }.sorted()
-                if let stable = self.stableContentFPS, self.contentFPSStabilityStreak >= 8,
-                   let target = rates.first(where: { $0 >= Double(stable) * 1.34 }) ?? rates.last,
-                   abs(self.selectedFrameRate - target) > 0.01 {
-                    self.lastRealRateSwitchAt = Date()
-                    self.saturationStreak = 0
-                    self.selectFrameRateValue(target, fromFollow: true)
-                } else if self.detectedContentFPS == nil {
-                    self.saturationStreak += 1
-                    if self.saturationStreak >= 8, let current = rates.first(where: { abs($0 - self.selectedFrameRate) < 0.01 }),
-                       let faster = rates.first(where: { $0 > current + 0.01 }) {
-                        self.lastRealRateSwitchAt = Date()
-                        self.saturationStreak = 0
-                        self.selectFrameRateValue(faster, fromFollow: true)
-                    }
-                } else { self.saturationStreak = 0 }
-            } else { self.saturationStreak = 0 }
+            self.stableContentFPS = ContentCadencePolicy.stableRate(detectedContentFPS, streak: self.contentFPSStabilityStreak)
+            if self.followsRealContentRate, !self.isRecording, !self.isSwitchingVideoDevice,
+               self.pendingVideoConfiguration == nil, self.frames.currentPreviewState() != "hidden",
+               let stable = self.stableContentFPS,
+               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 15,
+               let target = ContentCadencePolicy.targetRate(contentFPS: stable, supportedRates: self.frameRateOptions),
+               abs(self.selectedFrameRate - target) > 0.01 {
+                self.selectFrameRateValue(target, fromFollow: true)
+            }
             if let (buffer, _, _) = self.frames.latest() {
                 self.isPortraitSource = CVPixelBufferGetHeight(buffer) > CVPixelBufferGetWidth(buffer)
             }
@@ -1176,7 +1191,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["interpolationForce"] = picture.forceFrameInterpolation
         payload["interpolationSkipDuplicates"] = picture.skipsExactDuplicateInterpolation
         payload["skippedDuplicatePairsPerSecond"] = skippedDuplicatePairsPerSecond
-        if let detectedContentFPS { payload["detectedContentFPS"] = detectedContentFPS }
+        payload["followsRealContentRate"] = followsRealContentRate
+        payload["selectedFrameRate"] = selectedFrameRate
+        payload["frameRateOptions"] = frameRateOptions
+        payload["videoFormatChangeInProgress"] = isSwitchingVideoDevice || pendingVideoConfiguration != nil
+        payload["detectedContentFPS"] = detectedContentFPS as Any? ?? NSNull()
+        payload["stableContentFPS"] = stableContentFPS as Any? ?? NSNull()
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
         payload["generatedFPS"] = generatedFPS

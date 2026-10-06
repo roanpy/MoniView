@@ -127,9 +127,17 @@ Selecting 30 FPS configures the UVC stream accepted by the Mac; it does not chan
 
 选30 FPS配置Mac收到的UVC流，不会改变主机／电脑的HDMI输出或游戏帧率。界面采集帧率来自收到的时间戳，不是HDMI源遥测。60流可能承载重复的30内容、静止画面、菜单或设备重复输出，不能依据品牌区分。应保留原始PTS、采集和录制节奏。
 
-Optional exact-duplicate interpolation skipping compares all active pixels (not padding or a sparse thumbnail) and relevant image metadata on supported 420v/420f/BGRA buffers. Identical pairs skip midpoint inference while preserving their original endpoints. It defaults off, never labels the result game FPS, and does not silently change the capture rate or interpolate between non-adjacent references. Noisy/compressed near-duplicates remain distinct deliberately. Diagnostics count skipped inference pairs, not the stream's unique-content FPS. Sampling, scene-cut detection, arbitrary-phase rate conversion and automatic content-cadence adaptation need separate motion/latency acceptance before being enabled.
+The Follow control or optional duplicate-skipping setting enables exact cadence measurement. The detector compares all active pixels (not padding or a sparse thumbnail) and relevant image metadata on supported 420v/420f/BGRA buffers. It needs at least eight adjacent-pair samples and reports a rate only when repeats are both present and not overwhelming; the repeat ratio is capped at 3×. Thus 30-in-60 can estimate about 30, and 40-in-60 about 40, while all-identical static input, mostly unique input, noisy/compressed near-duplicates, or unstable timestamps can produce no estimate. This is an exact-repeat estimate of visible content updates, never game-FPS telemetry or brand recognition. The default has both controls off.
 
-可选的完全重复检测比较420v/420f/BGRA全部有效像素及相关图像信息，不比较padding、不凭缩略图。相同的两帧仅跳过中点推理，原始端点继续显示。默认关闭，不标作游戏FPS、不自动改变采集档位、不把不相邻参考帧混入当前时序。带噪／压缩的近似重复仍作为不同画面。诊断计数是跳过的推理对，不是整条流的内容更新帧率。采样去重、场景切换检测、可变相位转换及自动内容节奏适配须另做运动与延迟验收。
+When duplicate skipping is enabled, identical adjacent pairs skip midpoint inference while preserving their source presentation. For a later unique frame, interpolation retains the last presented unique buffer and its original PTS; midpoint timing and endpoint phase use the actual PTS interval between those unique endpoints. Only intervals within one to three stable capture ticks are admitted; stale or irregular intervals fall back to a native source frame. With skipping off, inference continues to use adjacent source frames and their cadence.
+
+Follow waits for a stable estimate, selects the nearest supported capture rate at or above it (or the device's highest supported rate if none reaches it), and applies changes only while preview is visible and recording is stopped. A successful automatic change starts a 15-second cooldown. The setting changes only the UVC rate delivered to the Mac; it cannot change the console's output. Once capture is reduced to the observed content rate, repeats may disappear, so a later source speedup is not detectable and must be selected manually. Exact near-duplicates remain distinct deliberately. Diagnostics count skipped inference pairs separately from the estimated content cadence.
+
+「跟随」或可选的重复帧跳过设置会启用精确节奏测量。检测器比较受支持的420v/420f/BGRA缓冲区全部有效像素（不含padding，不使用稀疏缩略图）及相关图像信息。至少需要8个相邻帧样本；只有存在重复、且重复没有压倒性占比时才报告节奏，倍率最多3×。因此60信号中的30节奏可估为约30，40节奏可估为约40；完全相同的静止输入、几乎全唯一的输入、带噪／压缩的近似重复或不稳定时间戳都可能没有估算。这只是可见画面更新的精确重复估算，不是游戏内部FPS遥测或品牌识别。默认两个开关都关闭。
+
+启用重复跳过后，完全相同的相邻帧只跳过中点推理，原始端点仍照常呈现。遇到后续唯一帧时，插帧保留上一个实际上屏的唯一缓冲区及其原始PTS；中点时刻和端点相位按两个唯一端点之间的实际PTS间隔计算。仅接纳1到3个稳定采集周期内的间隔；过期或不规则间隔回退为原帧。关闭跳过时，推理仍使用相邻采集帧及其采集节奏。
+
+跟随会等待估算稳定，选择不低于估算值的最近支持档位（若没有更高档，则使用设备最高档），并且仅在预览可见、未录制时改档。成功的自动改档后冷却15秒。它只改变Mac收到的UVC采集率，不能改变主机输出。采集率降到观测内容节奏后，重复帧可能消失，因此不能再发现之后的源内容加速；需要手动调高。近似重复仍按不同帧处理。跳过推理计数与内容节奏估算分开记录。
 
 Presented interval P95 uses actual positive drawable presented times for unique source presentations and generated frames, with a bounded 120-interval history. Same-source redraws and retired-stream callbacks do not contribute. Hidden previews reset the interval baseline and report presentation paused; neither invisible-window zero FPS nor callback/GPU timing is HDMI latency. Averages such as 80–90 FPS alone cannot prove even frame pacing.
 
@@ -138,11 +146,11 @@ Presented interval P95 uses actual positive drawable presented times for unique 
 ### Priorities after this baseline / 后续优先级
 
 1. Keep the window genuinely visible and measure actual presentation intervals, source retention, missed endpoints and P95 costs under fixed input/settings. Do not use invisible-window zero FPS as a throughput sample. Prefer stable original 60 to an uneven forced 80–90.
-2. Validate motion-aware duplicate/content-cadence and scene-cut handling independently before retiming. Exact duplicate skipping is a safe cost optimization, not inferred game telemetry.
+2. Validate exact-repeat estimates, unique-endpoint PTS pacing and scene cuts on real UVC motion. Exact duplicate skipping is a cost optimization and cadence clue, not inferred game telemetry.
 3. Prototype arbitrary-phase interpolation for 45/50→60 and 3× only after an engine actually supplies the required phases. Reuse existing bounded buffer ownership; no unbounded frame queue.
 4. Compare Apple's temporal processor with a license-verified lite RIFE Core ML/Metal prototype at identical input, output size and actual cadence. Ship a replacement only if quality and end-to-end cost beat the current path. Lossless Scaling's Windows/DirectX model and its Linux community ports are design references, not a macOS backend available to this app. See its [official requirements](https://store.steampowered.com/app/993090/Lossless_Scaling_2/).
 
-先做固定输入／设置下可见窗口的真实间隔与端点验收，宁可稳定原生60也不承诺强制80～90更顺滑；重复内容／切场景先独立验证，再重排时间线；可变相位及3×必须由引擎真正提供；RIFE轻量原型需核实许可并同条件对照，不能把小黄鸭Windows／Linux能力当作本程序Mac后端。
+先用真实UVC运动验收完全重复估算、唯一端点PTS节奏与切场景行为；可变相位及3×必须由引擎真正提供；RIFE轻量原型需核实许可并同条件对照，不能把小黄鸭Windows／Linux能力当作本程序Mac后端。
 
 ### Source references for duplicate policy / 去重策略来源
 
