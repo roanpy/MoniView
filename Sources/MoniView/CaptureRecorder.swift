@@ -10,6 +10,95 @@ private struct RetainedSample: @unchecked Sendable {
     let buffer: CMSampleBuffer
 }
 
+#if MONIVIEW_RECORDER_TESTING
+/// Synchronized controls and observations for the standalone fault-injection build.
+/// Ordinary app builds omit this type and every call to it.
+final class RecorderFaultInjectionHooks {
+    struct Snapshot {
+        let receivedAudioPTS: [CMTime]
+        let pendingAudioPTS: [CMTime]
+        let acceptedAudioPTS: [CMTime]
+        let droppedAudioPTS: [CMTime]
+        let ignoredAudioPTS: [CMTime]
+        let failedAudioPTS: [CMTime]
+        let notReadyObservations: Int
+        let writerStarted: Bool
+        let finishing: Bool
+        let finishWritingStarted: Bool
+        let sessionID: Int
+    }
+
+    private let lock = NSLock()
+    private var forceAudioNotReady = false
+    private var failNextCommit = false
+    private var received: [CMTime] = []
+    private var pending: [CMTime] = []
+    private var accepted: [CMTime] = []
+    private var dropped: [CMTime] = []
+    private var ignored: [CMTime] = []
+    private var failed: [CMTime] = []
+    private var notReadyObservations = 0
+    private var writerStarted = false
+    private var finishing = false
+    private var finishWritingStarted = false
+    private var sessionID = 0
+
+    func setAudioInputForcedNotReady(_ value: Bool) {
+        lock.lock(); forceAudioNotReady = value; lock.unlock()
+    }
+
+    func injectNextCommitFailure() {
+        lock.lock(); failNextCommit = true; lock.unlock()
+    }
+
+    func audioInputIsReady(actualReadiness: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let ready = actualReadiness && !forceAudioNotReady
+        if !ready { notReadyObservations += 1 }
+        return ready
+    }
+
+    func resetSession() {
+        lock.lock(); defer { lock.unlock() }
+        received.removeAll(); accepted.removeAll(); dropped.removeAll()
+        pending.removeAll()
+        ignored.removeAll(); failed.removeAll()
+        notReadyObservations = 0
+        writerStarted = false; finishing = false; finishWritingStarted = false
+        sessionID += 1
+    }
+
+    func markWriterStarted() { lock.lock(); writerStarted = true; lock.unlock() }
+    func markFinishing() { lock.lock(); finishing = true; lock.unlock() }
+    func markFinishWritingStarted() { lock.lock(); finishWritingStarted = true; lock.unlock() }
+    func markCompleted() { lock.lock(); finishing = false; lock.unlock() }
+
+    func recordReceived(_ pts: CMTime) { lock.lock(); received.append(pts); lock.unlock() }
+    func setPending(_ pts: [CMTime]) { lock.lock(); pending = pts; lock.unlock() }
+    func recordAccepted(_ pts: CMTime) { lock.lock(); accepted.append(pts); lock.unlock() }
+    func recordDropped(_ pts: CMTime) { lock.lock(); dropped.append(pts); lock.unlock() }
+    func recordIgnored(_ pts: CMTime) { lock.lock(); ignored.append(pts); lock.unlock() }
+    func recordFailed(_ pts: CMTime) { lock.lock(); failed.append(pts); lock.unlock() }
+
+    func snapshot() -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        return Snapshot(receivedAudioPTS: received, pendingAudioPTS: pending,
+                        acceptedAudioPTS: accepted,
+                        droppedAudioPTS: dropped, ignoredAudioPTS: ignored,
+                        failedAudioPTS: failed, notReadyObservations: notReadyObservations,
+                        writerStarted: writerStarted, finishing: finishing,
+                        finishWritingStarted: finishWritingStarted, sessionID: sessionID)
+    }
+
+    func consumeCommitFailure() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let shouldFail = failNextCommit
+        failNextCommit = false
+        return shouldFail
+    }
+}
+#endif
+
 final class CaptureRecorder {
     /// How this recording treats the video samples. Fixed at `start()` so a mid-recording
     /// shortage of processing resources can never silently change the color path.
@@ -46,6 +135,13 @@ final class CaptureRecorder {
     private var lastAudioTime: CMTime?
     private var picture: PictureSettings?
     private var mode: VideoMode = .source
+#if MONIVIEW_RECORDER_TESTING
+    let testing = RecorderFaultInjectionHooks()
+    // Mirrors queued PTS order so FIFO evictions can be reported precisely.
+    // Protected by `lock`, like audioBacklog itself.
+    private var testAudioBacklogPTS: [CMTime] = []
+    private var testLastAudioTimestamp: Double?
+#endif
     // Recording writes to a unique temporary file and is moved onto the user's URL only after
     // the writer finishes successfully, so an existing file is never truncated on failure.
     private var workingURL: URL?
@@ -63,6 +159,9 @@ final class CaptureRecorder {
     func start(url: URL, width: Int, height: Int, fps: Double, audio: AudioStreamBasicDescription?, completion: @escaping (Error?) -> Void) {
         queue.async {
             guard self.writer == nil else { completion(CaptureFailure.message("录制仍在保存，请稍后再试。")); return }
+#if MONIVIEW_RECORDER_TESTING
+            self.testing.resetSession()
+#endif
             self.resetDroppedSamples()
             self.clearAudioBacklog()
             self.lastAudioTime = nil
@@ -126,6 +225,9 @@ final class CaptureRecorder {
                 self.writer = writer; self.videoInput = video; self.audioInput = audioInput
                 self.startTime = nil; self.videoCount = 0; self.completion = completion
                 self.writerGeneration = self.beginAccepting()
+#if MONIVIEW_RECORDER_TESTING
+                self.testing.markWriterStarted()
+#endif
             } catch {
                 self.clearAcceptingAfterStartFailure()
                 self.clearAudioBacklog()
@@ -200,7 +302,8 @@ final class CaptureRecorder {
     }
 
     private func appendAudio(_ sample: CMSampleBuffer) {
-        let time = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sample)
+        let time = presentationTime.seconds
         var duration = CMSampleBufferGetDuration(sample).seconds
         if !duration.isFinite || duration <= 0,
            let description = CMSampleBufferGetFormatDescription(sample),
@@ -210,7 +313,25 @@ final class CaptureRecorder {
         lock.lock()
         defer { lock.unlock() }
         guard accepting else { return }
-        droppedAudioSamples += audioBacklog.append(RetainedSample(buffer: sample), duration: duration, timestamp: time)
+        let dropped = audioBacklog.append(RetainedSample(buffer: sample), duration: duration, timestamp: time)
+        droppedAudioSamples += dropped
+#if MONIVIEW_RECORDER_TESTING
+        testing.recordReceived(presentationTime)
+        let end = time + duration
+        let valid = duration.isFinite && duration > 0 && time.isFinite && end.isFinite
+            && (testLastAudioTimestamp.map { time >= $0 } ?? true)
+        if valid {
+            testLastAudioTimestamp = time
+            testAudioBacklogPTS.append(presentationTime)
+            // The actual FIFO supplies the eviction count; evictions remove oldest entries.
+            for _ in 0..<dropped where !testAudioBacklogPTS.isEmpty {
+                testing.recordDropped(testAudioBacklogPTS.removeFirst())
+            }
+        } else {
+            testing.recordDropped(presentationTime)
+        }
+        testing.setPending(testAudioBacklogPTS)
+#endif
         guard !audioBacklog.isEmpty, !audioDrainScheduled else { return }
         let sampleGeneration = generation
         audioDrainScheduled = true
@@ -236,27 +357,68 @@ final class CaptureRecorder {
         if let input = audioInput {
             var handled = 0
             // Yield to video work even if audio keeps arriving during the drain.
-            while handled < 64 && input.isReadyForMoreMediaData {
+            while handled < 64 {
+#if MONIVIEW_RECORDER_TESTING
+                guard testing.audioInputIsReady(actualReadiness: input.isReadyForMoreMediaData) else { break }
+#else
+                guard input.isReadyForMoreMediaData else { break }
+#endif
                 lock.lock()
                 let retained = audioBacklog.popFirst()
+#if MONIVIEW_RECORDER_TESTING
+                if retained != nil, !testAudioBacklogPTS.isEmpty { testAudioBacklogPTS.removeFirst() }
+                testing.setPending(testAudioBacklogPTS)
+#endif
                 lock.unlock()
                 guard let retained else { break }
                 handled += 1
                 let sample = retained.buffer
                 let time = CMSampleBufferGetPresentationTimeStamp(sample)
                 // Leading audio before the first video is preroll, not recording overload.
-                guard time >= start else { continue }
-                if let lastAudioTime, time <= lastAudioTime { recordDroppedSample(video: false); continue }
+                guard time >= start else {
+#if MONIVIEW_RECORDER_TESTING
+                    testing.recordIgnored(time)
+#endif
+                    continue
+                }
+                if let lastAudioTime, time <= lastAudioTime {
+                    recordDroppedSample(video: false)
+#if MONIVIEW_RECORDER_TESTING
+                    testing.recordDropped(time)
+#endif
+                    continue
+                }
                 guard input.append(sample) else {
+#if MONIVIEW_RECORDER_TESTING
+                    testing.recordFailed(time)
+#endif
                     fail(writer.error ?? CaptureFailure.message("录制写入失败。"), writer: writer, generation: generation)
                     return
                 }
                 lastAudioTime = time
+#if MONIVIEW_RECORDER_TESTING
+                testing.recordAccepted(time)
+#endif
             }
-        } else { clearAudioBacklog() }
+        } else {
+#if MONIVIEW_RECORDER_TESTING
+            lock.lock()
+            let ignoredPTS = testAudioBacklogPTS
+            testAudioBacklogPTS.removeAll()
+            testing.setPending([])
+            lock.unlock()
+            for pts in ignoredPTS { testing.recordIgnored(pts) }
+#endif
+            clearAudioBacklog()
+        }
         lock.lock()
         if finishing, let deadline = audioDrainDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
             // A stalled audio input must not keep tail draining indefinitely. Report the loss.
+#if MONIVIEW_RECORDER_TESTING
+            for pts in testAudioBacklogPTS { testing.recordDropped(pts) }
+            testAudioBacklogPTS.removeAll()
+            testing.setPending([])
+#endif
             droppedAudioSamples += audioBacklog.count
             audioBacklog.removeAll()
         }
@@ -286,6 +448,11 @@ final class CaptureRecorder {
         lock.lock()
         audioBacklog.removeAll()
         audioDrainScheduled = false
+#if MONIVIEW_RECORDER_TESTING
+        testAudioBacklogPTS.removeAll()
+        testLastAudioTimestamp = nil
+        testing.setPending([])
+#endif
         lock.unlock()
     }
 
@@ -325,6 +492,9 @@ final class CaptureRecorder {
                 return
             }
             self.finishing = true
+#if MONIVIEW_RECORDER_TESTING
+            self.testing.markFinishing()
+#endif
             guard writer.status == .writing else {
                 let error = writer.status == .completed ? nil : (writer.error ?? CaptureFailure.message("录制无法完成：writer 已停止。"))
                 self.complete(error, writer: writer, generation: generation)
@@ -344,6 +514,9 @@ final class CaptureRecorder {
     private func finishWriting(writer: AVAssetWriter, generation: UInt64) {
         guard isCurrentWriter(writer, generation: generation), !finishWritingStarted else { return }
         finishWritingStarted = true
+#if MONIVIEW_RECORDER_TESTING
+        testing.markFinishWritingStarted()
+#endif
         audioInput?.markAsFinished()
         writer.finishWriting { [weak self] in
             guard let self else { return }
@@ -403,6 +576,16 @@ final class CaptureRecorder {
     private func complete(_ error: Error?, writer expectedWriter: AVAssetWriter, generation expectedGeneration: UInt64) {
         guard isCurrentWriter(expectedWriter, generation: expectedGeneration) else { return }
         stopAccepting(generation: expectedGeneration)
+#if MONIVIEW_RECORDER_TESTING
+        if error != nil {
+            lock.lock()
+            let failedPTS = testAudioBacklogPTS
+            testAudioBacklogPTS.removeAll()
+            testing.setPending([])
+            lock.unlock()
+            for pts in failedPTS { testing.recordFailed(pts) }
+        }
+#endif
         clearAudioBacklog()
         lastAudioTime = nil; audioDrainDeadline = nil; finishWritingStarted = false
         lock.lock(); stopRequested = false; lock.unlock()
@@ -413,6 +596,9 @@ final class CaptureRecorder {
         let working = workingURL
         let destination = destinationURL
         workingURL = nil; destinationURL = nil
+#if MONIVIEW_RECORDER_TESTING
+        testing.markCompleted()
+#endif
         guard let working, let destination else { callback?(error); return }
         guard error == nil else {
             // Remove the partial file and leave any existing destination untouched.
@@ -420,7 +606,22 @@ final class CaptureRecorder {
             callback?(error)
             return
         }
-        callback?(Self.commit(working: working, destination: destination))
+#if MONIVIEW_RECORDER_TESTING
+        let commitError: Error?
+        if testing.consumeCommitFailure() {
+            commitError = CaptureFailure.message("测试注入的录制提交失败。")
+        } else {
+            commitError = Self.commit(working: working, destination: destination)
+        }
+#else
+        let commitError = Self.commit(working: working, destination: destination)
+#endif
+        if commitError != nil {
+            // A failed replacement must leave the prior destination intact and discard the
+            // finished temporary recording instead of leaking it beside the destination.
+            try? FileManager.default.removeItem(at: working)
+        }
+        callback?(commitError)
     }
 
     /// Moves a finished recording onto the user's chosen URL, replacing an existing file only now.
