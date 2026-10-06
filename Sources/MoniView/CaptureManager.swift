@@ -19,6 +19,13 @@ struct CaptureFormatOption: Identifiable, Hashable {
     var title: String { "\(width) × \(height)" }
     var fpsTitle: String { L10n.format("最高 %d FPS", maximumFPS) }
     func supportsFPS(_ fps: Int) -> Bool { supportsFrameRate(Double(fps)) }
+    /// Preserve fractional maxima when choosing the representative of a resolution.
+    /// Integer UI labels must not make a 59.94 format outrank a real 60 format.
+    func prefers(over previous: CaptureFormatOption, nativeNV12: Bool) -> Bool {
+        let candidate = rates.map(\.upperBound).max() ?? 0
+        let current = previous.rates.map(\.upperBound).max() ?? 0
+        return candidate > current + 0.00001 || (abs(candidate - current) <= 0.00001 && nativeNV12)
+    }
     func supportsFrameRate(_ fps: Double) -> Bool {
         fps == 0 || rates.contains { $0.lowerBound - 0.01 <= fps && $0.upperBound + 0.01 >= fps }
     }
@@ -45,7 +52,7 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
         case .uhd: return 3840
         }
     }
-    /// Resolves the processing long edge; the screen target adapts to the display's native pixel count.
+    /// Resolves the processing long edge; the screen target adapts to the display's backing-store pixel count.
     func resolvedLongEdge(screenLongEdge: Double?, sourceLongEdge: Double) -> Double {
         switch self {
         case .native: return sourceLongEdge
@@ -220,7 +227,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var audioInput: AVCaptureDeviceInput?
     private var selectedDevice: AVCaptureDevice?
     private var requestedFrameRate = 0.0
+    private var requestedFormatIndex: Int?
     private var configuredFrameDuration = CMTime.invalid
+    private var writtenPixelFormat: OSType?
     private var lastStatsTime = ProcessInfo.processInfo.systemUptime
     private var diagnosticTick = 0
     private var recordingFinished: (() -> Void)?
@@ -231,6 +240,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     // Requests originate on main; queued work and its result both check this synchronized token.
     // Never hold its lock while configuring a device, starting a session or publishing UI state.
     private let videoConfiguration = ConfigurationRevision()
+    private let audioConfiguration = ConfigurationRevision()
 
     override init() {
         super.init()
@@ -325,7 +335,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         // Prefer a USB capture device over Continuity Camera.
         let preferredID = UserDefaults.standard.string(forKey: "device.lastVideo")
-        selectVideoDevice(id: videos.first(where: { $0.uniqueID == preferredID })?.uniqueID ?? videos.first(where: { $0.transportType == 0x75736220 })?.uniqueID)
+        selectVideoDevice(id: videos.first(where: { $0.uniqueID == preferredID })?.uniqueID ?? videos.first(where: { $0.transportType == 0x75736220 })?.uniqueID
+            ?? videos.first(where: { $0.deviceType == .external })?.uniqueID
+            ?? videos.first?.uniqueID)
     }
 
     func selectVideoDevice(id: String?) {
@@ -347,11 +359,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             guard let self else { return }
             guard self.videoConfiguration.isCurrent(generation) else { return }
             self.session.beginConfiguration()
+            var configurationOpen = true
             do {
                 if let device {
                     if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
                     self.selectedDevice = nil
                     self.configuredFrameDuration = .invalid
+                    self.requestedFormatIndex = nil
                     let input = try AVCaptureDeviceInput(device: device)
                     guard self.session.canAddInput(input) else { throw CaptureFailure.message("无法连接视频设备。") }
                     self.session.addInput(input)
@@ -366,11 +380,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     let savedFPS = saved?["fps"] as? Double ?? 0
                     let desiredFPS = preferred?.supportsFrameRate(savedFPS) == true ? savedFPS : 0
                     self.requestedFrameRate = desiredFPS
-                    if let preferred { try self.configureFormat(device, index: preferred.id, fps: desiredFPS) }
                     self.session.commitConfiguration()
-                    self.configureConnectionTiming()
+                    configurationOpen = false
                     if !self.session.isRunning { self.session.startRunning() }
-                    self.configureConnectionTiming()
+                    // The session negotiates its own preset format at commit/start, and a format
+                    // set inside a session configuration is reverted. Apply the chosen format
+                    // directly to the device afterwards; this is verified to stick on UVC hardware.
+                    if let preferred { try self.configureFormat(device, index: preferred.id, fps: desiredFPS) }
+                    self.requestedFormatIndex = preferred?.id
                     let dim = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
                     DispatchQueue.main.async {
                         // A newer switch superseded this one; do not publish stale state.
@@ -391,6 +408,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
                     self.selectedDevice = nil
                     self.configuredFrameDuration = .invalid
+                    self.requestedFormatIndex = nil
                     self.session.commitConfiguration()
                     self.session.stopRunning()
                     DispatchQueue.main.async {
@@ -405,9 +423,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 }
             } catch {
                 // Roll back to a consistent state: no video input, no stale device identity.
+                if !configurationOpen { self.session.beginConfiguration() }
                 if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
                 self.selectedDevice = nil
                 self.configuredFrameDuration = .invalid
+                self.requestedFormatIndex = nil
                 self.session.commitConfiguration()
                 DispatchQueue.main.async {
                     guard self.videoConfiguration.isCurrent(generation) else { return }
@@ -471,29 +491,59 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private func configureAudioInput(id: String?) {
         guard !isRecording else { pendingAudioDeviceID = id; return }
         let device = Self.devices(.audio).first { $0.uniqueID == id }
+        let revision = audioConfiguration.advance()
         sessionQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.audioConfiguration.isCurrent(revision) else { return }
+            let previousInput = self.audioInput
             self.session.beginConfiguration()
-            if let old = self.audioInput { self.session.removeInput(old); self.audioInput = nil }
+            var configurationOpen = true
             do {
+                guard id == nil || device != nil else { throw CaptureFailure.message("无法连接音频输入。") }
+                if let old = self.audioInput { self.session.removeInput(old); self.audioInput = nil }
                 if let device {
                     let input = try AVCaptureDeviceInput(device: device)
                     guard self.session.canAddInput(input) else { throw CaptureFailure.message("无法连接音频输入。") }
                     self.session.addInput(input); self.audioInput = input
                 }
-                // Adding an audio input may renegotiate video. Reassert the precise device timing.
-                if let video = self.selectedDevice { try self.configureFormat(video, index: video.formats.firstIndex(of: video.activeFormat) ?? 0, fps: self.requestedFrameRate) }
                 self.session.commitConfiguration()
-                self.configureConnectionTiming()
+                configurationOpen = false
+                // Adding an audio input may renegotiate video. Reassert the requested format
+                // directly; a session commit would revert it to the preset choice.
+                if let video = self.selectedDevice {
+                    let index = self.requestedFormatIndex ?? video.formats.firstIndex(of: video.activeFormat) ?? 0
+                    try self.configureFormat(video, index: index, fps: self.requestedFrameRate)
+                }
                 DispatchQueue.main.async {
+                    guard self.audioConfiguration.isCurrent(revision) else { return }
                     self.audioStatus = device == nil ? "未连接音频" : "实时监听中"
                     if device == nil { self.audioLevel = 0 }
                     self.statusMessage = nil
                 }
             } catch {
+                // Keep the UI, preference and actual session aligned if adding an input
+                // or restoring the video format fails. Only the newest request publishes.
+                if !configurationOpen { self.session.beginConfiguration() }
+                if let current = self.audioInput { self.session.removeInput(current); self.audioInput = nil }
+                if let previousInput, self.session.canAddInput(previousInput) {
+                    self.session.addInput(previousInput)
+                    self.audioInput = previousInput
+                }
                 self.session.commitConfiguration()
+                if let video = self.selectedDevice, let index = self.requestedFormatIndex {
+                    try? self.configureFormat(video, index: index, fps: self.requestedFrameRate)
+                }
                 self.configureConnectionTiming()
-                DispatchQueue.main.async { self.audioStatus = "音频连接失败"; self.statusMessage = error.localizedDescription }
+                let restoredID = self.audioInput?.device.uniqueID
+                DispatchQueue.main.async {
+                    guard self.audioConfiguration.isCurrent(revision) else { return }
+                    self.selectedAudioID = restoredID
+                    if UserDefaults.standard.string(forKey: "audio.selection") == (id ?? "off") {
+                        UserDefaults.standard.set(restoredID ?? "off", forKey: "audio.selection")
+                    }
+                    self.audioStatus = restoredID == nil ? "未连接音频" : "实时监听中"
+                    if restoredID == nil { self.audioLevel = 0 }
+                    self.statusMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -526,15 +576,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         sessionQueue.async { [weak self] in
             guard let self, let device = self.selectedDevice else { return }
             guard self.videoConfiguration.isCurrent(generation) else { return }
-            self.session.beginConfiguration()
             do {
+                // Direct device configuration only: committing the session here reverts
+                // activeFormat to the preset choice on the current capture stack.
                 try self.configureFormat(device, index: index, fps: fps)
-                self.session.commitConfiguration()
-                self.configureConnectionTiming()
                 self.requestedFrameRate = fps
+                self.requestedFormatIndex = index
                 self.publishFormat(device: device, index: index, fps: fps, generation: generation)
             } catch {
-                self.session.commitConfiguration()
                 DispatchQueue.main.async {
                     guard self.videoConfiguration.isCurrent(generation) else { return }
                     self.statusMessage = error.localizedDescription
@@ -604,34 +653,64 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         if abs(range.maxFrameRate - target) < 0.01 { duration = range.minFrameDuration }
         else if abs(range.minFrameRate - target) < 0.01 { duration = range.maxFrameDuration }
         else { duration = CMTime(seconds: 1 / target, preferredTimescale: 1_000_000) }
-        try device.lockForConfiguration()
-        defer { device.unlockForConfiguration() }
-        device.activeFormat = format
         let supported = videoOutput.availableVideoPixelFormatTypes
         let preferences: [OSType] = [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_32BGRA, kCVPixelFormatType_422YpCbCr8, kCVPixelFormatType_422YpCbCr8_yuvs]
         guard let outputType = preferences.first(where: { supported.contains($0) }) else {
             throw CaptureFailure.message("设备没有提供可用于预览的像素格式。")
         }
-        // Request only the pixel format: explicit dimensions would force a scaling/conversion pass.
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: outputType]
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        // Writing videoSettings renegotiates the session and reverts activeFormat on
+        // current macOS, so only touch it when the pixel format actually changes, and
+        // always before selecting the device format. Request only the pixel format:
+        // explicit dimensions would force a scaling/conversion pass.
+        if writtenPixelFormat != outputType {
+            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: outputType]
+            writtenPixelFormat = outputType
+        }
+        // Setting connection frame durations also renegotiates and reverts activeFormat
+        // (verified on UVC hardware), so it happens here, only on change, and always
+        // before the device format is selected.
+        if let connection = videoOutput.connection(with: .video) {
+            if connection.isVideoMinFrameDurationSupported, CMTimeCompare(connection.videoMinFrameDuration, duration) != 0 { connection.videoMinFrameDuration = duration }
+            if connection.isVideoMaxFrameDurationSupported, CMTimeCompare(connection.videoMaxFrameDuration, duration) != 0 { connection.videoMaxFrameDuration = duration }
+        }
+        device.activeFormat = format
         // Output negotiation may reset the device's interval. Apply timing afterwards.
         try Self.setDuration(duration, on: device)
+        // Drivers may change their output list after a new device format. Re-negotiate
+        // only when necessary, with a bounded retry, then reassert format and timing.
+        for _ in 0..<2 {
+            let finalTypes = videoOutput.availableVideoPixelFormatTypes
+            if let writtenPixelFormat, finalTypes.contains(writtenPixelFormat) { break }
+            guard let replacement = preferences.first(where: { finalTypes.contains($0) }) else {
+                throw CaptureFailure.message("设备没有提供可用于预览的像素格式。")
+            }
+            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: replacement]
+            writtenPixelFormat = replacement
+            device.activeFormat = format
+            try Self.setDuration(duration, on: device)
+        }
+        guard let writtenPixelFormat, videoOutput.availableVideoPixelFormatTypes.contains(writtenPixelFormat) else {
+            throw CaptureFailure.message("设备没有提供可用于预览的像素格式。")
+        }
         configuredFrameDuration = duration
     }
 
     private func configureConnectionTiming() {
         guard let device = selectedDevice, let connection = videoOutput.connection(with: .video) else { return }
         let duration = configuredFrameDuration.isValid ? configuredFrameDuration : device.activeVideoMinFrameDuration
+        let format = device.activeFormat
         do {
             try device.lockForConfiguration()
             defer { device.unlockForConfiguration() }
+            if connection.isVideoMinFrameDurationSupported, CMTimeCompare(connection.videoMinFrameDuration, duration) != 0 { connection.videoMinFrameDuration = duration }
+            if connection.isVideoMaxFrameDurationSupported, CMTimeCompare(connection.videoMaxFrameDuration, duration) != 0 { connection.videoMaxFrameDuration = duration }
+            device.activeFormat = format
             try Self.setDuration(duration, on: device)
         } catch {
             DispatchQueue.main.async { self.statusMessage = error.localizedDescription }
-            return
         }
-        if connection.isVideoMinFrameDurationSupported { connection.videoMinFrameDuration = duration }
-        if connection.isVideoMaxFrameDurationSupported { connection.videoMaxFrameDuration = duration }
     }
 
     private static func setDuration(_ duration: CMTime, on device: AVCaptureDevice) throws {
@@ -862,7 +941,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             let key = "\(dim.width)x\(dim.height)"
             let nativeNV12 = CMFormatDescriptionGetMediaSubType(format.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             if let previous = best[key] {
-                let preferNew = option.maximumFPS > previous.maximumFPS || (option.maximumFPS == previous.maximumFPS && nativeNV12)
+                let preferNew = option.prefers(over: previous, nativeNV12: nativeNV12)
                 best[key] = CaptureFormatOption(id: preferNew ? option.id : previous.id, width: option.width, height: option.height,
                     minimumFPS: min(previous.minimumFPS, option.minimumFPS), maximumFPS: max(previous.maximumFPS, option.maximumFPS),
                     rates: previous.rates + option.rates)
