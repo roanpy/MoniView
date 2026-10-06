@@ -112,6 +112,7 @@ final class LatestVideoFrame {
     private let lock = NSLock()
     private var frameHandler: (() -> Void)?
     private var buffer: CVPixelBuffer?
+    private var formatDescription: CMFormatDescription?
     private var sequence: UInt64 = 0
     private var streamEpoch: UInt64 = 0
     private var pts: CMTime = .invalid
@@ -153,6 +154,10 @@ final class LatestVideoFrame {
     private var interpolationCostMS = 0.0
     private var interpolationBudgetMS = 0.0
     private var interpolationWorkingSize: String?
+    private var measuredContentFPS: Double?
+    /// True content cadence behind a duplicated signal (30 FPS game in 60 Hz), if detected.
+    func setMeasuredContentFPS(_ value: Double?) { lock.lock(); measuredContentFPS = value; lock.unlock() }
+    func currentMeasuredContentFPS() -> Double? { lock.lock(); defer { lock.unlock() }; return measuredContentFPS }
     private var displayRates = (maximum: 0.0, observed: 0.0)
     private var captured = 0
     private var rendered = 0
@@ -172,7 +177,7 @@ final class LatestVideoFrame {
     private var timings: [Double] = []
     private var gpuTimings: [Double] = []
 
-    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid) {
+    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid, formatDescription: CMFormatDescription? = nil) {
         lock.lock()
         let sameSize = buffer.map { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pixelBuffer) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pixelBuffer) } ?? false
         let interval = CMTimeGetSeconds(CMTimeSubtract(pts, self.pts))
@@ -187,6 +192,7 @@ final class LatestVideoFrame {
         previous = historyEnabled && sameSize ? buffer.map { ($0, sequence, self.pts) } : nil
         self.pts = pts
         buffer = pixelBuffer
+        self.formatDescription = formatDescription
         receivedAt = DispatchTime.now().uptimeNanoseconds
         sequence &+= 1
         captured += 1
@@ -204,6 +210,12 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }
         guard let buffer else { return nil }
         return (buffer, sequence, receivedAt, streamEpoch)
+    }
+    /// Keep capture metadata paired with its buffer. Only the current description is retained.
+    func latestFormatSnapshot() -> (buffer: CVPixelBuffer, description: CMFormatDescription?)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let buffer else { return nil }
+        return (buffer, formatDescription)
     }
     /// Actual media timestamps, not selected/rounded FPS or callback arrival jitter.
     func sourceFrameRate() -> Double? {
@@ -266,6 +278,7 @@ final class LatestVideoFrame {
     func clear() {
         lock.lock(); defer { lock.unlock() }
         buffer = nil
+        formatDescription = nil
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
         sequence &+= 1
         streamEpoch &+= 1
@@ -332,6 +345,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var presentedSourceFPS = 0
     @Published private(set) var presentedOutputFPS = 0
     @Published private(set) var skippedDuplicatePairsPerSecond = 0
+    @Published private(set) var detectedContentFPS: Int?
+    @Published private(set) var stableContentFPS: Int?
+    private var contentFPSStabilityStreak = 0
     @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
     var outputFPS: Int { presentedOutputFPS }
@@ -973,7 +989,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
             recorder.append(sampleBuffer, video: true)
         } else if output === audioOutput {
             let power = connection.audioChannels.map(\.averagePowerLevel).max() ?? -160
@@ -1035,6 +1051,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.presentedSourceFPS = Int((Double(presentationStats.presentedSource) / elapsed).rounded())
             self.presentedOutputFPS = Int((Double(presentationStats.presentedSource + presentationStats.generated) / elapsed).rounded())
             self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
+            let detectedContentFPS = self.frames.currentMeasuredContentFPS().map { Int($0.rounded()) }
+            if let detectedContentFPS, detectedContentFPS == self.detectedContentFPS {
+                self.contentFPSStabilityStreak += 1
+            } else {
+                self.contentFPSStabilityStreak = 0
+            }
+            self.detectedContentFPS = detectedContentFPS
+            self.stableContentFPS = self.contentFPSStabilityStreak >= 5 ? detectedContentFPS : nil
             self.presentationIntervalP95MS = self.frames.presentationP95()
             self.interpolationStatus = self.frames.currentPreviewState() == "hidden" ? "预览不可见，暂停呈现" : self.frames.currentInterpolationState()
             let interpolationCost = self.frames.interpolationCost()
@@ -1083,7 +1107,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
     private func writeDiagnostics() {
         var payload: [String: Any] = ["date": ISO8601DateFormatter().string(from: Date()), "device": deviceName, "resolution": resolution, "captureFPS": measuredFPS, "renderFPS": renderedFPS, "droppedFrames": droppedFrames, "pixelFormat": pixelFormat, "audioDevice": audioOptions.first { $0.id == selectedAudioID }?.name ?? "none", "audioLevel": audioLevel, "audioStatus": audioStatus, "muted": isMuted, "volume": audioVolume]
-        if let (buffer, _, _) = frames.latest() {
+        if let (buffer, description) = frames.latestFormatSnapshot() {
             payload["bufferWidth"] = CVPixelBufferGetWidth(buffer)
             payload["bufferHeight"] = CVPixelBufferGetHeight(buffer)
             payload["bufferPixelFormat"] = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
@@ -1093,6 +1117,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                                 (kCVImageBufferChromaLocationTopFieldKey, "inputChromaLocationTop"),
                                 (kCVImageBufferChromaLocationBottomFieldKey, "inputChromaLocationBottom")] {
                 if let attachment = CVBufferCopyAttachment(buffer, key, nil) { payload[name] = String(describing: attachment) }
+                if let description, let value = CMFormatDescriptionGetExtension(description, extensionKey: key) {
+                    payload["format" + name.dropFirst(5)] = String(describing: value)
+                }
             }
         }
         payload["softwareProcessingMS"] = processingMilliseconds
@@ -1104,6 +1131,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["interpolationForce"] = picture.forceFrameInterpolation
         payload["interpolationSkipDuplicates"] = picture.skipsExactDuplicateInterpolation
         payload["skippedDuplicatePairsPerSecond"] = skippedDuplicatePairsPerSecond
+        if let detectedContentFPS { payload["detectedContentFPS"] = detectedContentFPS }
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
         payload["generatedFPS"] = generatedFPS

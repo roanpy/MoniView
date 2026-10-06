@@ -61,6 +61,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var calibrationWarmupsRemaining = 2
     private var adaptiveLongEdge: Int?
     private var interpolationDimensions: FrameInterpolationPolicy.Dimensions?
+    /// Rolling unique/duplicate pair outcomes. A duplicated cadence (30 Hz content in a
+    /// 60 Hz signal) needs half the midpoints, so the per-midpoint budget doubles.
+    private var duplicatePairWindow: [Bool] = []
+    private var lastDuplicateCheck: (sequence: UInt64, result: Bool)?
     private var lastSourceSequence: UInt64? // last GPU-completed source with an ordered presentation
     private var presentationEpoch: UInt64 = 0
     private var sourceStreamEpoch: UInt64?
@@ -172,6 +176,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             previousMode = mode; previousInterpolationEnabled = enabled
             previousInterpolationForce = settings.forceFrameInterpolation
+            duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
             if #available(macOS 26.0, *) { interpolator?.stop() }
         }
         if enabled {
@@ -224,6 +229,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         presentationEpoch &+= 1; presentedMidpoint = nil
         pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
+        duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
         observedDisplayFPS = 0; displayTargetTime = 0; lastSourceSequence = nil
         configureInterpolation()
     }
@@ -283,11 +289,29 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
     }
 
-    private func shouldInterpolatePair(previous: CVPixelBuffer, current: CVPixelBuffer, sequence: UInt64, streamEpoch: UInt64) -> Bool {
-        guard settings.skipsExactDuplicateInterpolation,
-              VideoFrameDuplicateDetector.areIdentical(previous, current) else { return true }
-        frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch)
-        return false
+    /// Exact-duplicate pair check with one result per sequence. The full-pixel compare
+    /// runs once even when both the presentation skip and the pair admission ask.
+    private func isDuplicatePair(previous: CVPixelBuffer, current: CVPixelBuffer, sequence: UInt64, streamEpoch: UInt64) -> Bool {
+        if let last = lastDuplicateCheck, last.sequence == sequence { return last.result }
+        let result = settings.skipsExactDuplicateInterpolation && VideoFrameDuplicateDetector.areIdentical(previous, current)
+        lastDuplicateCheck = (sequence, result)
+        if result { frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch) }
+        duplicatePairWindow.append(result)
+        duplicatePairWindow = Array(duplicatePairWindow.suffix(16))
+        return result
+    }
+
+    /// Content duplicated into a faster signal (30 or 40 FPS in 60 Hz, or a card that
+    /// occasionally repeats a frame) needs midpoints only for unique pairs. Scale the
+    /// per-midpoint budget by the measured unique-pair rate; presentation timing still
+    /// follows the real source cadence. Ratios above 0.75 are ordinary jitter, and the
+    /// credit is capped so a pathological stream cannot claim an unbounded budget.
+    private func pairBudgetMultiplier() -> Double {
+        guard duplicatePairWindow.count >= 8 else { return 1 }
+        let uniques = duplicatePairWindow.reduce(0) { $0 + ($1 ? 0 : 1) }
+        let uniqueRatio = Double(uniques) / Double(duplicatePairWindow.count)
+        guard uniqueRatio > 0, uniqueRatio <= 0.75 else { return 1 }
+        return min(1 / uniqueRatio, 2.5)
     }
 
     private func endpointIsFresh(_ pending: PendingSource, target: Double? = nil) -> Bool {
@@ -324,6 +348,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             pendingSource = nil; presentedMidpoint = nil; lastSourceSequence = nil
             midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
+            duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
         }
         let size = drawableSize
         guard size.width > 0, size.height > 0 else { return }
@@ -422,7 +447,27 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let sourceFPS = FrameInterpolationPolicy.nominalInputFPS(mediaFPS ?? 0) ?? 0
         let interpolationRequested = settings.enhancementEnabled && settings.frameInterpolation != .off
         let displayFPS = min(observedDisplayFPS, Double(window.screen?.maximumFramesPerSecond ?? 60))
-        let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported, inputFPS: sourceFPS, displayFPS: displayFPS, inputValid: true)
+        // Measure true content cadence even before admission: 30 FPS games duplicated
+        // into a 60 Hz signal should still admit 2x on 60 Hz displays.
+        if interpolationRequested, endpointPresentation == nil,
+           let cadencePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == cadencePair.1 {
+            _ = isDuplicatePair(previous: cadencePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch)
+        }
+        let contentFPS = sourceFPS / pairBudgetMultiplier()
+        frames.setMeasuredContentFPS(interpolationRequested && pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
+        let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported, inputFPS: contentFPS, displayFPS: displayFPS, inputValid: true)
+        // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
+        // the display already holds the identical previous drawable. Skipping the whole
+        // spatial pipeline here saves GPU for midpoint quality on the unique frames.
+        if interpolationRequested, admitted, !skipInterpolation, endpointPresentation == nil,
+           pendingSource == nil, CACurrentMediaTime() >= cooldownUntil,
+           let duplicatePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == duplicatePair.1,
+           isDuplicatePair(previous: duplicatePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch) {
+            lastSourceSequence = sequence
+            lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
+            inFlight.signal()
+            return
+        }
         if interpolationRequested {
             if !FrameInterpolatorSupport.isSupported { frames.setInterpolationState("插帧不可用") }
             else if !admitted {
@@ -432,11 +477,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             else if CACurrentMediaTime() < cooldownUntil { frames.setInterpolationState(cooldownReason ?? (settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")) }
             else if endpointPresentation == nil, !skipInterpolation,
                     let pair = frames.interpolationPair(sequence: sequence), lastSourceSequence == pair.1,
-                    let dimensions = FrameInterpolationPolicy.targetDimensions(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mode: settings.frameInterpolation, inputFPS: sourceFPS, maximumLongEdge: adaptiveLongEdge),
+                    let dimensions = FrameInterpolationPolicy.targetDimensions(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mode: settings.frameInterpolation, inputFPS: sourceFPS / pairBudgetMultiplier(), maximumLongEdge: adaptiveLongEdge),
                     pair.2.isNumeric, pair.3.isNumeric,
                     abs(CMTimeGetSeconds(CMTimeSubtract(pair.3, pair.2)) - 1 / sourceFPS) <= 0.1 / sourceFPS,
                     CVPixelBufferGetWidth(pair.0) == CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(pair.0) == CVPixelBufferGetHeight(buffer),
-                    shouldInterpolatePair(previous: pair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch),
+                    !isDuplicatePair(previous: pair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch),
                     #available(macOS 26.0, *), let interpolator {
                 if interpolationDimensions != dimensions {
                     interpolationDimensions = dimensions
@@ -447,15 +492,16 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 if interpolator.isReady {
                     let midCost = p95(midpointCosts), sourceCost = p95(nativeCosts)
                     let slot = 0.5 / sourceFPS
-                    let budgetFits = midCost.map { $0 <= slot * FrameInterpolationPolicy.midpointBudgetFraction } ?? false
-                    let sourceFits = sourceCost.map { $0 <= slot * FrameInterpolationPolicy.budgetFraction } ?? false
-                    let pairFits = midCost.flatMap { mid in sourceCost.map { FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: slot) } } ?? false
+                    let budgetSlot = slot * pairBudgetMultiplier()
+                    let budgetFits = midCost.map { $0 <= budgetSlot * FrameInterpolationPolicy.midpointBudgetFraction } ?? false
+                    let sourceFits = sourceCost.map { $0 <= budgetSlot * FrameInterpolationPolicy.budgetFraction } ?? false
+                    let pairFits = midCost.flatMap { mid in sourceCost.map { FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: budgetSlot) } } ?? false
                     let earliest = CACurrentMediaTime() + (midCost ?? 0.002) + slot * 0.1
                     let displaySlot = displayFPS > 0 ? 1 / displayFPS : slot
                     let nextPairSlot = scheduledSourceUntil + slot
                     let target = nextPairSlot >= earliest ? nextPairSlot :
                         displayTargetTime + max(0, ceil((earliest - displayTargetTime) / displaySlot)) * displaySlot
-                    let deadlineFits = displayTargetTime > 0 && target <= CACurrentMediaTime() + 1.5 / sourceFPS
+                    let deadlineFits = displayTargetTime > 0 && target <= CACurrentMediaTime() + 1.5 * pairBudgetMultiplier() / sourceFPS
                     // A hidden calibration pass shares the native frame's command buffer. It
                     // never increments generated counts or advertises interpolation as active.
                     let mayGenerate = midCost.flatMap { mid in sourceCost.map {
@@ -626,6 +672,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let wasMidpoint = generatedMidpoint
         let wasCalibration = calibratedMidpoint
         let measuredSlot = sourceFPS > 0 ? 0.5 / sourceFPS : 0
+        let measuredBudgetSlot = measuredSlot * pairBudgetMultiplier()
         let expectedSettings = settings
         let measuredDimensions = interpolationDimensions
         let encodedCPUSeconds = CACurrentMediaTime() - encodingStarted
@@ -672,21 +719,21 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationCost(seconds: cost + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: cost + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             frameStore.setInterpolationState("插帧准备中")
                         } else if wasMidpoint || wasCalibration {
                             self.midpointCosts.append(cost); self.midpointCosts = Array(self.midpointCosts.suffix(32))
-                            frameStore.setInterpolationCost(seconds: (self.p95(self.midpointCosts) ?? cost) + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: (self.p95(self.midpointCosts) ?? cost) + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                         } else {
                             self.nativeCosts.append(cost); self.nativeCosts = Array(self.nativeCosts.suffix(32))
                             if let mid = self.p95(self.midpointCosts) {
-                                frameStore.setInterpolationCost(seconds: mid + (self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                                frameStore.setInterpolationCost(seconds: mid + (self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             }
                         }
                     }
                     let measuredCost = (wasMidpoint || wasCalibration) ? self.p95(self.midpointCosts) : self.p95(self.nativeCosts)
-                    let pairOverBudget = self.p95(self.midpointCosts).flatMap { mid in self.p95(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredSlot) } } ?? false
-                    let individualLimit = measuredSlot * ((wasMidpoint || wasCalibration) ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
+                    let pairOverBudget = self.p95(self.midpointCosts).flatMap { mid in self.p95(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredBudgetSlot) } } ?? false
+                    let individualLimit = measuredBudgetSlot * ((wasMidpoint || wasCalibration) ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
                     if !succeeded || (!expectedSettings.forceFrameInterpolation && !warming && (wasMidpoint || wasCalibration || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
                         // A successful midpoint already owns a fixed endpoint. Complete
                         // that pair even when its measured cost disables the NEXT pair.
@@ -718,7 +765,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     } else if succeeded, wasMidpoint, measuredSlot > 0, let mid = self.p95(self.midpointCosts) {
                         // Sustained headroom after a step-down: climb one rung back and
                         // re-measure. ~90 presented midpoints is about 1.5 s at 60 FPS.
-                        if self.adaptiveLongEdge != nil, mid <= measuredSlot * 0.55 {
+                        if self.adaptiveLongEdge != nil, mid <= measuredBudgetSlot * 0.55 {
                             self.comfortableMidpoints += 1
                         } else {
                             self.comfortableMidpoints = 0
@@ -728,7 +775,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             self.lastRaisedToLongEdge = nil // Current size has proven itself.
                             let nowT = CACurrentMediaTime()
                             if let current = self.adaptiveLongEdge, nowT - self.lastRaiseAt > 10 {
-                                let ceiling = FrameInterpolationPolicy.ceilingLongEdge(mode: expectedSettings.frameInterpolation, inputFPS: 0.5 / measuredSlot)
+                                let ceiling = FrameInterpolationPolicy.ceilingLongEdge(mode: expectedSettings.frameInterpolation, inputFPS: 0.5 / measuredBudgetSlot)
                                 var target = FrameInterpolationPolicy.raisedLongEdge(after: current)
                                 if let ceiling, (target ?? ceiling) >= ceiling { target = nil }
                                 let targetEdge = target ?? ceiling
