@@ -47,6 +47,8 @@
 "2K · 2560 px 宽" = "2K · 2560 px wide";
 "4K · 3840 px 宽" = "4K · 3840 px wide";
 "原始＋锐化" = "Native + sharpen";
+"流畅插帧" = "Smooth interpolation";
+"独立 AI 超分已暂停，关闭插帧后恢复。" = "Standalone AI upscaling is paused; it resumes when interpolation is off.";
 "采集丢帧" = "Capture drops";
 "2K · 长边 2560 px" = "2K · long edge 2560 px";
 "4K · 长边 3840 px" = "4K · long edge 3840 px";

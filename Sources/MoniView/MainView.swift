@@ -474,6 +474,10 @@ struct MainView: View {
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
                     .disabled(!capture.picture.enhancementEnabled)
+                if capture.picture.frameInterpolation != .off, capture.picture.upscaleMethod == .ai {
+                    Text("独立 AI 超分已暂停，关闭插帧后恢复。")
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                }
                 Text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(hex: 0x98908a))
