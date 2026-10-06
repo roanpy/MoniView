@@ -160,7 +160,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     func configureInterpolation() {
         let mode = settings.frameInterpolation
         let enabled = settings.enhancementEnabled && mode != .off && FrameInterpolatorSupport.isSupported
-        frames.setInterpolationHistoryEnabled(enabled)
+        frames.setInterpolationHistoryEnabled(true) // content-rate detection also runs without interpolation
         if mode != previousMode || enabled != previousInterpolationEnabled || settings.forceFrameInterpolation != previousInterpolationForce {
             let failureCooldown = FrameInterpolationPolicy.preserveFailureCooldown(
                 forceChanged: settings.forceFrameInterpolation != previousInterpolationForce,
@@ -452,12 +452,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let displayFPS = min(observedDisplayFPS, Double(window.screen?.maximumFramesPerSecond ?? 60))
         // Measure true content cadence even before admission: 30 FPS games duplicated
         // into a 60 Hz signal should still admit 2x on 60 Hz displays.
-        if interpolationRequested, endpointPresentation == nil,
+        if endpointPresentation == nil,
            let cadencePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == cadencePair.1 {
             _ = isDuplicatePair(previous: cadencePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch)
         }
         let contentFPS = sourceFPS / pairBudgetMultiplier()
-        frames.setMeasuredContentFPS(interpolationRequested && pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
+        frames.setMeasuredContentFPS(pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
         let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported, inputFPS: contentFPS, displayFPS: displayFPS, inputValid: true)
         // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
         // the display already holds the identical previous drawable. Skipping the whole

@@ -565,19 +565,6 @@ struct MainView: View {
                         }
                         .buttonStyle(.link).help("显示器设置…")
                     }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
-                if let stable = capture.stableContentFPS,
-                   capture.selectedFrameRate > Double(stable) * 1.2,
-                   let supportedRate = capture.frameRateOptions.first(where: { abs($0 - Double(stable)) < 0.5 }) {
-                    Button(action: { capture.selectFrameRateValue(supportedRate) }) {
-                            Text(L10n.format("内容约 %d FPS · 采集可设为 %d", stable, stable))
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color(hex: 0xe9a24d))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(L10n.text("内容帧率持续低于采集帧率；设为一致可避免重复帧并降低带宽，切换会短暂断流。"))
-                    }
                     Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color(hex: 0xe9a24d))
@@ -677,19 +664,23 @@ struct MainView: View {
                     Spacer()
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
-                        if let real = realRateTarget {
+                        if capture.detectedContentFPS != nil || capture.followsRealContentRate {
                             Button {
-                                capture.selectFrameRateValue(real.rate)
+                                capture.followsRealContentRate.toggle()
+                                if capture.followsRealContentRate, let real = realRateTarget {
+                                    capture.selectFrameRateValue(real.rate, fromFollow: true)
+                                }
                             } label: {
-                                Text(L10n.format("真实·%d", real.content))
+                                Text(L10n.text("真实"))
                                     .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(Color(hex: 0xe9a24d))
+                                    .foregroundStyle(capture.followsRealContentRate ? Color(hex: 0x2d1b0b) : Color(hex: 0xe9a24d))
                                     .frame(minWidth: 32)
                                     .padding(.vertical, 6)
+                                    .background(capture.followsRealContentRate ? Color(hex: 0xf2a340) : .clear, in: Capsule())
                             }
                             .buttonStyle(.plain)
                             .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                            .help(L10n.text("将采集帧率设为实测内容帧率（取不低于内容的最近档位）；内容若以后变快，需要手动调回。"))
+                            .help(L10n.text("开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
                         }
                         ForEach(quickFrameRates, id: \.self) { fps in
                             fpsButton(fps, title: String(fps))

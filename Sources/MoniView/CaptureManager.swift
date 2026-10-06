@@ -750,8 +750,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let option = formatOptions.first { $0.id == id }
         applyFormat(index: id, fps: option?.supportsFrameRate(selectedFrameRate) == true ? selectedFrameRate : 0)
     }
+    /// Follow mode: capture rate tracks the measured content rate (nearest supported
+    /// rate at or above it). Manual rate selection exits the mode. Persisted.
+    @Published var followsRealContentRate: Bool = UserDefaults.standard.bool(forKey: "capture.followRealRate") {
+        didSet { UserDefaults.standard.set(followsRealContentRate, forKey: "capture.followRealRate") }
+    }
+    private var lastRealRateSwitchAt: Date = .distantPast
     func selectFrameRate(_ fps: Int) { selectFrameRateValue(Double(fps)) }
-    func selectFrameRateValue(_ fps: Double) {
+    func selectFrameRateValue(_ fps: Double, fromFollow: Bool = false) {
+        if !fromFollow { followsRealContentRate = false }
         guard !isRecording else { statusMessage = "停止录制后可更改帧率。"; return }
         guard let selectedFormatID else { return }
         applyFormat(index: selectedFormatID, fps: fps)
@@ -1060,6 +1067,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             }
             self.detectedContentFPS = detectedContentFPS
             self.stableContentFPS = self.contentFPSStabilityStreak >= 5 ? detectedContentFPS : nil
+            if self.followsRealContentRate, !self.isRecording, let stable = self.stableContentFPS,
+               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 15,
+               let target = self.frameRateOptions.filter({ $0 > 0 }).sorted().first(where: { $0 >= Double(stable) - 0.01 })
+                   ?? self.frameRateOptions.filter({ $0 > 0 }).max(),
+               abs(self.selectedFrameRate - target) > 0.01 {
+                self.lastRealRateSwitchAt = Date()
+                self.selectFrameRateValue(target, fromFollow: true)
+            }
             self.presentationIntervalP95MS = self.frames.presentationP95()
             self.interpolationStatus = self.frames.currentPreviewState() == "hidden" ? "预览不可见，暂停呈现" : self.frames.currentInterpolationState()
             let interpolationCost = self.frames.interpolationCost()
