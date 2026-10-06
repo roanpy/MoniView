@@ -604,14 +604,15 @@ struct MainView: View {
                     Spacer()
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
-                        fpsButton(30, title: "30")
-                        if capture.frameRateOptions.contains(45) {
-                            fpsButton(45, title: "45")
+                        ForEach([30, 45, 50, 60].filter { fps in
+                            capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
+                        }, id: \.self) { fps in
+                            fpsButton(fps, title: String(fps))
                         }
-                        fpsButton(60, title: "60")
                     }
                     .padding(3)
                     .background(Color.black.opacity(0.28), in: Capsule())
+                    .frame(width: 195, alignment: .trailing)
                 }
 
                 labeledPicker("帧率档位", fieldWidth: 195,
@@ -791,7 +792,7 @@ struct MainView: View {
             Text(L10n.text(title))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(isSupported ? Color(hex: 0xf1e9e1) : Color(hex: 0x6d6660))
-                .frame(minWidth: 40)
+                .frame(minWidth: 32)
                 .padding(.vertical, 6)
                 .background(selected ? Color(hex: 0x635850) : .clear, in: Capsule())
         }
