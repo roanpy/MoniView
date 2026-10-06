@@ -1,5 +1,3 @@
-// Verdict: 60→120 fps at 720p is feasible on this M5 Max; the fixture measured 0.816 ms GPU p95.
-// That timing covers this prototype's interpolation kernels; real scenes and end-to-end work can cost more.
 // Frame analysis stays at quarter resolution, followed by one full-resolution warp pass.
 // The 16-pixel sparse grid favors coherent, textured motion and keeps search work bounded.
 // Three pyramid levels search to about 64 pixels; a search hitting that limit is marked low confidence.
@@ -7,8 +5,11 @@
 // Flat regions, repeated patterns, occlusions, and scene cuts remain ambiguous.
 // Ambiguous pixels fall back to cross-dissolve, which can still show double edges.
 // Motion boundaries can soften because a 16-pixel grid cannot represent every object contour.
-// Quarter-resolution analysis refines motion to about one source pixel.
-// The prototype accepts 420v and BGRA CVPixelBuffers; CIImage rendering is a compatibility path.
+// Quarter-resolution analysis refines motion to about one working pixel.
+// Every input is color managed and resampled by Core Image directly into private working textures.
+// This matches the native preview's YUV matrix, transfer function, chroma sampling and CI transforms.
+// Working textures use sRGB and bottom-up rows, including the texture returned as a CIImage.
+// prepare sets the actual working dimensions; source pixel buffers can be larger.
 // Output is an MTL-backed CIImage, and every GPU pass is encoded on the caller's command buffer.
 // Initialize one FlowBlendInterpolator per MTLDevice and reuse it across frame pairs.
 // Call interpolate with the renderer's existing command buffer and blendFactor in [0, 1].
@@ -89,21 +90,14 @@ final class FlowBlendInterpolator {
         }
     }
 
-    private enum Input {
-        case bgra(MTLTexture, CVMetalTexture)
-        case yuv(MTLTexture, CVMetalTexture, MTLTexture, CVMetalTexture)
-        case image(CIImage)
-    }
-
     private let device: MTLDevice
-    private let textureCache: CVMetalTextureCache
-    private let videoColorSpace = CGColorSpace(name: CGColorSpace.itur_709)!
-    private let convert420vPipeline: MTLComputePipelineState
+    private let workingColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let buildLumaPipeline: MTLComputePipelineState
     private let downsamplePipeline: MTLComputePipelineState
     private let flowPipeline: MTLComputePipelineState
     private let warpPipeline: MTLComputePipelineState
     private let poolLock = NSLock()
+    private var requestedSize: Size?
     private var resourcePool: [Size: [FrameResources]] = [:]
 
     private static let metalSource = #"""
@@ -165,7 +159,13 @@ final class FlowBlendInterpolator {
                 for (int x = -radius; x <= radius; ++x) {
                     int2 candidate = seed + int2(x, y);
                     float cost = patchCost(source, target, center, candidate);
-                    if (cost < result.best) {
+                    // Equal-cost matches must favor the smallest displacement.
+                    // Otherwise a static repeated pattern selects the first (negative)
+                    // search offset and moves only on generated frames.
+                    int candidateLength = candidate.x * candidate.x + candidate.y * candidate.y;
+                    int bestLength = result.displacement.x * result.displacement.x
+                                   + result.displacement.y * result.displacement.y;
+                    if (cost < result.best || (cost == result.best && candidateLength < bestLength)) {
                         result.second = result.best;
                         result.best = cost;
                         result.displacement = candidate;
@@ -175,22 +175,6 @@ final class FlowBlendInterpolator {
                 }
             }
             return result;
-        }
-
-        kernel void convert420v(texture2d<float, access::read> sourceY [[texture(0)]],
-                                 texture2d<float, access::read> sourceUV [[texture(1)]],
-                                 texture2d<float, access::write> destination [[texture(2)]],
-                                 uint2 gid [[thread_position_in_grid]]) {
-            if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) return;
-            float yCode = sourceY.read(gid).r;
-            float2 chroma = sourceUV.read(gid / 2).rg;
-            float y = clamp((yCode * 255.0f - 16.0f) / 219.0f, 0.0f, 1.0f);
-            float cb = (chroma.x * 255.0f - 128.0f) / 224.0f;
-            float cr = (chroma.y * 255.0f - 128.0f) / 224.0f;
-            float3 rgb = float3(y + 1.5748f * cr,
-                                y - 0.1873f * cb - 0.4681f * cr,
-                                y + 1.8556f * cb);
-            destination.write(float4(clamp(rgb, 0.0f, 1.0f), 1.0f), gid);
         }
 
         kernel void buildLuma4(texture2d<float, access::read> source [[texture(0)]],
@@ -249,9 +233,11 @@ final class FlowBlendInterpolator {
                                    fine.displacement + int2(0, 1));
             float denominatorX = left - 2.0f * fine.best + right;
             float denominatorY = up - 2.0f * fine.best + down;
-            float subX = abs(denominatorX) > 1.0e-5f
+            // An exact integer match needs no parabolic correction. An asymmetric
+            // neighborhood can otherwise invent subpixel movement on static frames.
+            float subX = fine.best > 1.0e-6f && abs(denominatorX) > 1.0e-5f
                 ? clamp(0.5f * (left - right) / denominatorX, -0.5f, 0.5f) : 0.0f;
-            float subY = abs(denominatorY) > 1.0e-5f
+            float subY = fine.best > 1.0e-6f && abs(denominatorY) > 1.0e-5f
                 ? clamp(0.5f * (up - down) / denominatorY, -0.5f, 0.5f) : 0.0f;
             float variance = patchVariance(source0, fineCenter);
             float textureConfidence = smoothstep(0.00005f, 0.008f, variance);
@@ -305,22 +291,15 @@ final class FlowBlendInterpolator {
 
     init?(device: MTLDevice) {
         guard let library = try? device.makeLibrary(source: Self.metalSource, options: nil),
-              let convertFunction = library.makeFunction(name: "convert420v"),
               let lumaFunction = library.makeFunction(name: "buildLuma4"),
               let downsampleFunction = library.makeFunction(name: "downsample2"),
               let flowFunction = library.makeFunction(name: "matchFlow"),
               let warpFunction = library.makeFunction(name: "warpBlend"),
-              let convert420vPipeline = try? device.makeComputePipelineState(function: convertFunction),
               let buildLumaPipeline = try? device.makeComputePipelineState(function: lumaFunction),
               let downsamplePipeline = try? device.makeComputePipelineState(function: downsampleFunction),
               let flowPipeline = try? device.makeComputePipelineState(function: flowFunction),
               let warpPipeline = try? device.makeComputePipelineState(function: warpFunction) else { return nil }
-        var cache: CVMetalTextureCache?
-        guard CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess,
-              let cache else { return nil }
         self.device = device
-        textureCache = cache
-        self.convert420vPipeline = convert420vPipeline
         self.buildLumaPipeline = buildLumaPipeline
         self.downsamplePipeline = downsamplePipeline
         self.flowPipeline = flowPipeline
@@ -331,8 +310,20 @@ final class FlowBlendInterpolator {
     // prepare/stop match the renderer's engine protocol; resource pools release with ARC.
     var isReady: Bool { true }
     var onStateChange: (() -> Void)?
-    func prepare(width: Int, height: Int) {}
-    func stop() {}
+    func prepare(width: Int, height: Int) {
+        poolLock.lock()
+        requestedSize = width > 0 && height > 0 && width <= 8192 && height <= 8192
+            ? Size(width: width, height: height) : nil
+        // Completed resources at old sizes need not accumulate across rungs.
+        resourcePool = resourcePool.filter { $0.key == requestedSize || $0.value.contains(where: \.inUse) }
+        poolLock.unlock()
+    }
+    func stop() {
+        poolLock.lock()
+        requestedSize = nil
+        resourcePool.removeAll()
+        poolLock.unlock()
+    }
 
     /// Engine-protocol entry point: 2x interpolation always blends at the temporal midpoint.
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
@@ -347,6 +338,7 @@ final class FlowBlendInterpolator {
 
     /// Encodes one interpolated image on `command`; the caller owns command submission.
     /// `blendFactor` is 0 for previous and 1 for current. Pixel buffers may be 420v or BGRA.
+    /// Output uses the prepared size, or the CIImage's size if prepare has not been called.
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
                      context: CIContext, command: MTLCommandBuffer,
                      previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
@@ -359,47 +351,43 @@ final class FlowBlendInterpolator {
             return nil
         }
 
-        let width = previousBuffer.map(CVPixelBufferGetWidth)
-            ?? currentBuffer.map(CVPixelBufferGetWidth)
-            ?? Int(previous.extent.width.rounded())
-        let height = previousBuffer.map(CVPixelBufferGetHeight)
-            ?? currentBuffer.map(CVPixelBufferGetHeight)
-            ?? Int(previous.extent.height.rounded())
+        // CIImage is authoritative: a buffer may back a cropped, oriented or color-
+        // overridden image. Reading its raw texture would silently discard that work.
+        let previousExtent = previous.extent, currentExtent = current.extent
+        guard previousExtent.minX.isFinite, previousExtent.minY.isFinite,
+              currentExtent.minX.isFinite, currentExtent.minY.isFinite,
+              previousExtent.width.isFinite, previousExtent.height.isFinite,
+              currentExtent.width.isFinite, currentExtent.height.isFinite,
+              previousExtent.width > 0, previousExtent.height > 0,
+              currentExtent.width > 0, currentExtent.height > 0,
+              abs(previousExtent.width - currentExtent.width) < 0.001,
+              abs(previousExtent.height - currentExtent.height) < 0.001 else { return nil }
+        poolLock.lock()
+        let requested = requestedSize
+        poolLock.unlock()
+        guard requested != nil || (currentExtent.width <= 8192 && currentExtent.height <= 8192) else { return nil }
+        let width = requested?.width ?? Int(currentExtent.width.rounded())
+        let height = requested?.height ?? Int(currentExtent.height.rounded())
         guard width > 0, height > 0, width <= 8192, height <= 8192 else { return nil }
         let size = Size(width: width, height: height)
         guard let resources = takeResources(for: size) else { return nil }
 
-        var textureReferences: [CVMetalTexture] = []
-        let previousInput = makeInput(buffer: previousBuffer, image: previous, size: size)
-        let currentInput = makeInput(buffer: currentBuffer, image: current, size: size)
-        for input in [previousInput, currentInput] {
-            switch input {
-            case .bgra(_, let reference): textureReferences.append(reference)
-            case .yuv(_, let yReference, _, let uvReference): textureReferences += [yReference, uvReference]
-            case .image: break
+        var renderTasks: [CIRenderTask] = []
+        defer {
+            command.addCompletedHandler { [weak self, resources, renderTasks,
+                                           previousBuffer, currentBuffer, previous, current, context] _ in
+                withExtendedLifetime((resources, renderTasks, previousBuffer, currentBuffer, previous, current, context)) {}
+                self?.recycle(resources)
             }
         }
-        command.addCompletedHandler { [weak self, resources, textureReferences,
-                                       previousBuffer, currentBuffer, previous, current, context] _ in
-            withExtendedLifetime((textureReferences, previousBuffer, currentBuffer, previous, current, context)) {}
-            self?.recycle(resources)
-        }
-
-        if case .image(let image) = previousInput,
-           !render(image, into: resources.frame0, size: size, context: context,
-                   command: command, fast: fastInputResampling) {
-            return nil
-        }
-        if case .image(let image) = currentInput,
-           !render(image, into: resources.frame1, size: size, context: context,
-                   command: command, fast: fastInputResampling) {
-            return nil
-        }
-
-        guard encodeInput(previousInput, destination: resources.frame0, command: command),
-              encodeInput(currentInput, destination: resources.frame1, command: command) else { return nil }
-        let previousTexture = sourceTexture(previousInput, fallback: resources.frame0)
-        let currentTexture = sourceTexture(currentInput, fallback: resources.frame1)
+        guard let previousTask = render(previous, into: resources.frame0, size: size, context: context,
+                                        command: command, fast: fastInputResampling) else { return nil }
+        renderTasks.append(previousTask)
+        guard let currentTask = render(current, into: resources.frame1, size: size, context: context,
+                                       command: command, fast: fastInputResampling) else { return nil }
+        renderTasks.append(currentTask)
+        let previousTexture = resources.frame0
+        let currentTexture = resources.frame1
         guard encodeLuma(source: previousTexture, luma0: resources.previousLuma0,
                          luma1: resources.previousLuma1, luma2: resources.previousLuma2,
                          command: command),
@@ -417,52 +405,13 @@ final class FlowBlendInterpolator {
               encodeWarp(previous: previousTexture, current: currentTexture, resources: resources,
                          blend: blendFactor, command: command) else { return nil }
 
-        return CIImage(mtlTexture: resources.output, options: [.colorSpace: videoColorSpace])
-    }
-
-    private func makeInput(buffer: CVPixelBuffer?, image: CIImage, size: Size) -> Input {
-        guard let buffer,
-              CVPixelBufferGetWidth(buffer) == size.width,
-              CVPixelBufferGetHeight(buffer) == size.height else { return .image(image) }
-        switch CVPixelBufferGetPixelFormatType(buffer) {
-        case kCVPixelFormatType_32BGRA:
-            if let (texture, reference) = makeTexture(buffer: buffer, format: .bgra8Unorm,
-                                                      width: size.width, height: size.height, plane: 0) {
-                return .bgra(texture, reference)
-            }
-        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
-            guard CVPixelBufferGetPlaneCount(buffer) == 2,
-                  let (y, yReference) = makeTexture(buffer: buffer, format: .r8Unorm,
-                                                    width: size.width, height: size.height, plane: 0),
-                  let (uv, uvReference) = makeTexture(buffer: buffer, format: .rg8Unorm,
-                                                      width: size.width / 2, height: size.height / 2, plane: 1) else {
-                return .image(image)
-            }
-            return .yuv(y, yReference, uv, uvReference)
-        default:
-            break
-        }
-        return .image(image)
-    }
-
-    private func makeTexture(buffer: CVPixelBuffer, format: MTLPixelFormat,
-                             width: Int, height: Int, plane: Int) -> (MTLTexture, CVMetalTexture)? {
-        var reference: CVMetalTexture?
-        guard CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, buffer, nil,
-                                                        format, width, height, plane, &reference) == kCVReturnSuccess,
-              let reference, let texture = CVMetalTextureGetTexture(reference) else { return nil }
-        return (texture, reference)
-    }
-
-    private func sourceTexture(_ input: Input, fallback: MTLTexture) -> MTLTexture {
-        if case .bgra(let texture, _) = input { return texture }
-        return fallback
+        return CIImage(mtlTexture: resources.output, options: [.colorSpace: workingColorSpace])
     }
 
     private func render(_ image: CIImage, into texture: MTLTexture, size: Size,
-                        context: CIContext, command: MTLCommandBuffer, fast: Bool) -> Bool {
+                        context: CIContext, command: MTLCommandBuffer, fast: Bool) -> CIRenderTask? {
         let extent = image.extent
-        guard extent.width.isFinite, extent.height.isFinite, extent.width > 0, extent.height > 0 else { return false }
+        guard extent.width.isFinite, extent.height.isFinite, extent.width > 0, extent.height > 0 else { return nil }
         var normalized = image.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
         let sx = Double(size.width) / extent.width
         let sy = Double(size.height) / extent.height
@@ -476,23 +425,16 @@ final class FlowBlendInterpolator {
                 normalized = normalized.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
             }
         }
-        context.render(normalized, to: texture, commandBuffer: command,
-                       bounds: CGRect(x: 0, y: 0, width: size.width, height: size.height),
-                       colorSpace: videoColorSpace)
-        return true
-    }
-
-    private func encodeInput(_ input: Input, destination: MTLTexture, command: MTLCommandBuffer) -> Bool {
-        guard case .yuv(let y, _, let uv, _) = input else { return true }
-        guard let encoder = command.makeComputeCommandEncoder() else { return false }
-        encoder.setComputePipelineState(convert420vPipeline)
-        encoder.setTexture(y, index: 0)
-        encoder.setTexture(uv, index: 1)
-        encoder.setTexture(destination, index: 2)
-        dispatch(encoder, width: destination.width, height: destination.height,
-                 pipeline: convert420vPipeline)
-        encoder.endEncoding()
-        return true
+        // CI reads CV/Metal-backed input directly on the GPU. Render straight to
+        // working size; this engine allocates no source-size RGB staging texture
+        // and performs no CPU readback.
+        // Bottom-up rows match CIImage(mtlTexture:), unlike raw CV's top-down rows.
+        let destination = CIRenderDestination(mtlTexture: texture, commandBuffer: command)
+        destination.colorSpace = workingColorSpace
+        destination.isFlipped = false
+        return try? context.startTask(toRender: normalized,
+                                     from: CGRect(x: 0, y: 0, width: size.width, height: size.height),
+                                     to: destination, at: .zero)
     }
 
     private func encodeLuma(source: MTLTexture, luma0: MTLTexture, luma1: MTLTexture,
