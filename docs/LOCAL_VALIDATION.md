@@ -173,6 +173,7 @@ An isolated fixture uses the public `spatialScaleFactor: 2` configuration and ph
 | --- | --- |
 | `./Scripts/test-joint-interpolation-gpu.sh --compile-only` | SDK 26.2 compilation passed; no GPU claim. / 编译通过。 |
 | `./Scripts/test-joint-interpolation-gpu.sh --gpu` | Failed at 640×360→1280×720 readback: both destination planes were zero, while input colors/positions were correct. Earlier repeated-input variant also lacked a valid GPU timestamp; no throughput numbers accepted. / 两张输出为空，不能计通过。 |
+| `MONIVIEW_JOINT_CASES=640 ./Scripts/test-joint-interpolation-gpu.sh --gpu` after configuration retention / 配置保活后 | Failed at steady command 2 due to zero/unavailable GPU timestamps before readback; this final fixture run is not a pass. / 稳态 GPU 时间无效，未达到读回检查。 |
 | `MTL_DEBUG_LAYER=1 MONIVIEW_JOINT_CASES=960 ./Scripts/test-joint-interpolation-gpu.sh --async-diagnostic` | Failed: `VTFrameProcessorErrorDomain -19730`, “Processor is not initialized”, despite successful session startup. Repeating with configuration strongly retained through completion did not fix it. / 保活配置后仍未初始化。 |
 | `MTL_DEBUG_LAYER=1 MONIVIEW_JOINT_CASES=1920 ./Scripts/test-joint-interpolation-gpu.sh --async-diagnostic` | Same -19730 at 1920×1080→3840×2160; no generated output or GPU/presentation timing accepted. / 4K 输出实验同样失败。 |
 
