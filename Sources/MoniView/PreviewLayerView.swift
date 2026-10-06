@@ -83,6 +83,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var cooldownReason: String?
     private var nativeCosts: [Double] = []
     private var midpointCosts: [Double] = []
+    /// GPU-only span of midpoint commands, published with the total so a CPU-bound
+    /// budget can be told apart from a GPU-bound one.
+    private var midpointGPUCosts: [Double] = []
     private var calibrationWarmupsRemaining = 2
     private var adaptiveLongEdge: Int?
     private var interpolationDimensions: FrameInterpolationPolicy.Dimensions?
@@ -981,6 +984,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             frameStore.setInterpolationState("插帧准备中")
                         } else if wasMidpoint || wasCalibration {
                             self.midpointCosts.append(cost); self.midpointCosts = Array(self.midpointCosts.suffix(32))
+                            self.midpointGPUCosts.append(gpuMS); self.midpointGPUCosts = Array(self.midpointGPUCosts.suffix(32))
+                            if let gpuP95 = self.p95(self.midpointGPUCosts) { frameStore.setInterpolationGPUCost(milliseconds: gpuP95) }
                             frameStore.setInterpolationCost(seconds: (self.p95(self.midpointCosts) ?? cost) + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                         } else {
                             self.nativeCosts.append(cost); self.nativeCosts = Array(self.nativeCosts.suffix(32))

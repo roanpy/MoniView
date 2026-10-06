@@ -257,6 +257,13 @@ final class LatestVideoFrame {
         return (previous.0, previous.1, previous.2, pts)
     }
     func setInterpolationState(_ value: String) { lock.lock(); interpolationState = value; lock.unlock() }
+    private var interpolationMidpointGPUMs = 0.0
+    func setInterpolationGPUCost(milliseconds: Double) {
+        lock.lock(); interpolationMidpointGPUMs = milliseconds; lock.unlock()
+    }
+    func currentInterpolationGPUCost() -> Double {
+        lock.lock(); defer { lock.unlock() }; return interpolationMidpointGPUMs
+    }
     func setInterpolationCost(seconds: Double, budget: Double) {
         lock.lock(); interpolationCostMS = seconds * 1000; interpolationBudgetMS = budget * 1000; lock.unlock()
     }
@@ -537,7 +544,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self?.refreshDevices(force: false)
         })
         startStatsTimer()
-        requestInitialPermission()
+        // Only ask for camera access when the camera-based source is the one in use.
+        // A window-source session never touches AVFoundation video input, so prompting
+        // for it would block the app behind an unrelated permission.
+        if sourceKind == .device { requestInitialPermission() } else { applySourceKind() }
     }
 
     deinit {
@@ -683,6 +693,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func refreshDevices(force: Bool = true) {
+        // Only the device source depends on camera authorization. While a window source
+        // is selected this must not report a camera prompt, or the UI waits on a
+        // permission the current source never needs.
+        guard sourceKind == .device else {
+            cameraPermissionPending = false
+            permissionDenied = false
+            return
+        }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             permissionDenied = false
@@ -1457,6 +1475,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["stableContentFPS"] = stableContentFPS as Any? ?? NSNull()
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
+        payload["interpolationMidpointGPUMs"] = frames.currentInterpolationGPUCost()
         payload["aiUpscaleStatus"] = aiUpscaleStatus
         payload["generatedFPS"] = generatedFPS
         payload["presentedSourceFPS"] = presentedSourceFPS

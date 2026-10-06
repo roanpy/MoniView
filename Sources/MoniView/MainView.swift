@@ -649,12 +649,24 @@ struct MainView: View {
             .padding(4)
             .background(Color.black.opacity(0.2), in: Capsule())
             .disabled(recordingFreezesColor)
-            VStack(spacing: 13) {
-                labeledSlider("高光恢复", value: $capture.picture.highlightRecovery, range: 0...0.5, format: "%.2f")
-                labeledSlider("亮度", value: $capture.picture.brightness, range: -0.5...0.5, format: "%+.2f")
-                labeledSlider("对比度", value: $capture.picture.contrast, range: 0.5...1.5, format: "%.2f")
-                labeledSlider("饱和度", value: $capture.picture.saturation, range: 0...2, format: "%.2f")
-                labeledSlider("鲜艳度", value: $capture.picture.vibrance, range: -1...1, format: "%+.2f")
+            // The presets cover everyday use; the individual sliders stay available
+            // together behind one disclosure so the panel opens short.
+            DisclosureGroup {
+                VStack(spacing: 13) {
+                    labeledSlider("高光恢复", value: $capture.picture.highlightRecovery, range: 0...0.5, format: "%.2f")
+                    labeledSlider("亮度", value: $capture.picture.brightness, range: -0.5...0.5, format: "%+.2f")
+                    labeledSlider("对比度", value: $capture.picture.contrast, range: 0.5...1.5, format: "%.2f")
+                    labeledSlider("饱和度", value: $capture.picture.saturation, range: 0...2, format: "%.2f")
+                    labeledSlider("鲜艳度", value: $capture.picture.vibrance, range: -1...1, format: "%+.2f")
+                }
+                .padding(.top, 8)
+            } label: {
+                Text(L10n.text("色彩微调"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(hex: 0xd9cfc6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 5)
             }
             .padding(13)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
@@ -726,12 +738,7 @@ struct MainView: View {
                         choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
                         .disabled(capture.isRecording)
                 }
-                labeledPicker("音频输入", fieldWidth: 195,
-                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
-                    choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
-                    .disabled(capture.isRecording)
-
-                audioMonitoringControls
+                audioSettings
 
                 if capture.sourceKind == .device {
                 labeledPicker("分辨率", fieldWidth: 195,
@@ -795,11 +802,24 @@ struct MainView: View {
             .padding(12)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
 
-            VStack(spacing: 14) {
-                settingsToggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
-                    .disabled(capture.isRecording)
-                settingsToggle("显示设备状态", isOn: $capture.showsStatusBar)
-                settingsToggle("显示增强状态", isOn: $capture.showsEngineStatus)
+            // Recording and status display are set once; they stay reachable but out of
+            // the way of the source and format choices people actually change.
+            DisclosureGroup {
+                VStack(spacing: 14) {
+                    settingsToggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
+                        .disabled(capture.isRecording)
+                    settingsToggle("显示设备状态", isOn: $capture.showsStatusBar)
+                    settingsToggle("显示增强状态", isOn: $capture.showsEngineStatus)
+                    audioMonitoringControls
+                }
+                .padding(.top, 8)
+            } label: {
+                Text(L10n.text("声音、录制与状态"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(hex: 0xd9cfc6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 5)
             }
             .padding(.horizontal, 12)
             HStack(spacing: 8) {
@@ -808,6 +828,28 @@ struct MainView: View {
             }
             .font(.system(size: 10))
             .foregroundStyle(Color(hex: 0x98908a))
+        }
+    }
+
+    /// Audio input plus monitoring. Both are configuration rather than per-session
+    /// controls, so they share one disclosure.
+    private var audioSettings: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 11) {
+                labeledPicker("音频输入", fieldWidth: 195,
+                    selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
+                    choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
+                    .disabled(capture.isRecording)
+                audioMonitoringControls
+            }
+            .padding(.top, 8)
+        } label: {
+            Text(L10n.text("声音"))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(hex: 0xd9cfc6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(.vertical, 5)
         }
     }
 
