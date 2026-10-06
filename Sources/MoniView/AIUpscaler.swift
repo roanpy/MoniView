@@ -21,7 +21,7 @@ final class AIUpscaler {
     /// Hardware scaler sessions accept bi-planar YUV only; forcing BGRA pools fails on device.
     /// The color-processed frame is converted inside the same command buffer, so the ML pass
     /// still runs in the preview's single-in-flight pipeline. BT.709 video range matches 420v.
-    private static let converterSource = """
+    static let converterSource = """
         #include <metal_stdlib>
         using namespace metal;
         kernel void bgraTo420v(texture2d<float, access::read> src [[texture(0)]],
@@ -146,8 +146,7 @@ final class AIUpscaler {
     /// MetalFX/Lanczos remain available when no supported factor fits the requested budget.
     static func scaleFactor(for sourceWidth: Int, sourceHeight: Int, requested: Double) -> Float? {
         guard AIUpscalerSupport.isSupported, sourceWidth > 0, sourceHeight > 0, sourceWidth % 2 == 0, sourceHeight % 2 == 0, requested.isFinite else { return nil }
-        return VTLowLatencySuperResolutionScalerConfiguration.__supportedScaleFactors(forFrameWidth: sourceWidth, frameHeight: sourceHeight)
-            .map { $0.floatValue }
+        return VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors(frameWidth: sourceWidth, frameHeight: sourceHeight)
             .filter { $0.isFinite && $0 > 1 && Double($0) <= requested + 0.000001 }
             .max()
     }

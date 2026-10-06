@@ -87,6 +87,12 @@ No before/after latency benchmark is claimed. GPU completion/software callback i
 
 以上缺口均不计通过，保留在后续验收清单。/ These gaps are deliberately not marked passed.
 
+## Final deployment / 最终部署
+
+At the integrated revision, all five native scripts, debug/release builds, explicit non-AI build/package, and bilingual string lint were rerun in the independent validation worktree successfully. The ordinary AI-capable arm64 bundle, version 0.2.0 (3), was installed in Applications after backing up the old bundle. Signature verification passed; installed and validated executable SHA-256 hashes matched. Native UI showed an upright real UVC picture, 1920×1080 input, connected Jemdo audio with a live meter, and both status-label settings off. This is a local development deployment, not an App Store release.
+
+集成修订已在独立 worktree 重跑五个原生脚本、debug/release、显式非 AI 构建/打包及双语 lint，通过后安装普通版 0.2.0 (3)。旧包已备份，签名核查通过，安装与验证可执行文件哈希一致。界面核查真实画面方向、1080p 输入及有电平的 Jemdo 音频，状态与增强标签开关关闭；这是本地开发部署。
+
 ## References / 参考
 
 - [Apple: runtime super-resolution configuration](https://developer.apple.com/documentation/videotoolbox/vtlowlatencysuperresolutionscalerconfiguration)

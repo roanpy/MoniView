@@ -71,6 +71,16 @@ Apple SDK builds, the native GPU smoke test and real Jemdo 720p AI / 1080p spati
 
 已执行 Apple SDK 构建、原生 GPU 测试、真实 Jemdo 720p AI 与 1080p 空间回退。具体覆盖与缺口见[验证记录](LOCAL_VALIDATION.md)。SDK 26+ 下可运行 `./Scripts/test-ai-gpu.sh`；不支持运行时会明确跳过，不计通过。画质收益、其他 Mac、长时间资源趋势和旧系统/工具链仍未验证。
 
+## API provenance and distribution / API 来源与发行
+
+The implementation uses Apple’s public VideoToolbox/Metal/Core Image interfaces and local SDK declarations, with no third-party runtime dependency or copied Lossless Scaling/OBS source. The scale-factor query uses the SDK’s public Swift overlay. Apple describes its low-latency super-resolution model as optimized for conferencing and compression artifacts; game-picture benefit is therefore an evaluation question, not a guarantee. Native 1080p capture is the recommended starting point when available.
+
+实现使用 Apple 公开接口及本机 SDK 声明，没有第三方运行依赖或复制“小黄鸭”/OBS 源码，倍率查询使用公开 Swift 接口。Apple 的低延迟超分模型主要针对视频会议及压缩瑕疵，游戏画质收益仍需对照，支持时优先原生 1080p。
+
+Public APIs alone do not establish App Store readiness. The installed development bundle is ad-hoc signed; sandbox operation, distribution signing, privacy disclosures and review remain separate acceptance items.
+
+公开接口不等于已经具备上架资格；当前安装的是临时签名开发包，沙盒运行、发行签名、隐私披露及审核仍须单独验收。
+
 ## References / 参考
 
 - Apple WWDC25, Enhance your app with machine-learning-based video effects: https://developer.apple.com/videos/play/wwdc2025/300/
