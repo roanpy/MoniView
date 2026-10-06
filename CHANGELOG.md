@@ -2,6 +2,11 @@
 
 ## Unreleased / 未发布
 
+- Fix native AI black output, swapped channels and upside-down rows; retain render resources through GPU completion and wake retries without new frames. / 修复 AI 黑屏、红蓝交换与上下颠倒，保活渲染资源，并让静止输入也能重试。
+- Add optional 1080p processing target, separate enhancement-label visibility and hidden-by-default status. / 新增 1080p 处理目标，增强标签独立显示开关，状态默认隐藏。
+- Validate precise format priority, non-USB discovery fallback, output pixel formats after negotiation, and rollback a failed audio switch. / 核对精确格式优先级、非 USB 默认选择、协商后像素格式，并回滚失败的音频切换。
+- Add native audio fault injection and GPU color/orientation tests; clean up a finished temporary recording on commit failure. / 新增原生录音故障注入与 GPU 色彩方向测试，提交失败时清理临时录制文件。
+
 - Add a media-duration-bounded recording audio FIFO with oldest-first eviction, drop accounting and bounded tail draining. / 录制音频增加按媒体时长限制的 FIFO、丢最旧计数与有界尾音排空。
 - Add File > Save Current Frame and Command-S for source-resolution PNG export with current color and sharpening. / 新增文件菜单与 ⌘S 保存当前画面为源分辨率 PNG，包含当前色彩与锐化。
 - Add a persistent Always on Top preference for the main preview window. / 新增主预览窗口置顶偏好并持久化。
@@ -11,6 +16,8 @@
 - Correct fractional-rate selection, actual buffer-format labels, localized engine names and long-edge/display wording. / 修正分数帧率选中状态、实际缓冲格式、引擎本地化和长边/屏幕说明。
 - Synchronize capture configuration revisions and reject superseded format-error callbacks. / 同步采集配置代次并拦截过期格式错误回调。
 - Add executable pure Swift regression tests and a hardware-validation/local-AI handoff guide; no new hardware benchmark is claimed. / 增加可执行纯 Swift 回归测试与真机验收/本地 AI 接手说明，不声称新增硬件基准结果。
+- Fix AI super-resolution never engaging: the frame pool forced BGRA while the system scaler only accepts bi-planar YUV at supported sizes, so setup always fell back to MetalFX; frames now convert through a private BGRA intermediate and a Metal compute kernel to video-range BT.709 420v. / 修复 AI 超分始终不生效：缓冲池强制 BGRA，而系统超分在支持尺寸内仅接受双平面 YUV，导致始终回退 MetalFX；现经私有 BGRA 中间纹理与 Metal 计算内核转换为视频范围 BT.709 420v。
+- Fix resolution/format selection not taking effect: writing output videoSettings renegotiates the capture session and reverts the device format, and starting the session re-selects the preset format; output settings are now written only when the pixel format changes and before selecting the format, and the chosen format is re-asserted after the session starts. / 修复分辨率/格式切换不生效：写输出 videoSettings 会触发会话重新协商并回退设备格式，且启动会话时按预设重选格式；现仅在像素格式变化时写输出设置并先于选定格式写入，会话启动后重新应用所选格式。
 
 - Optional AI super-resolution upscaling via Apple's low-latency ML scaler on macOS 26+, with MetalFX fallback while the model loads. / macOS 26+ 可选 AI 超分放大（Apple 低延迟机器学习超分），模型加载期间自动回退 MetalFX。
 - Align enhancement switches with the panel's right edge; simplify their labels. / 画质面板开关统一右对齐，简化说明。

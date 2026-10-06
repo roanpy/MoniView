@@ -61,3 +61,11 @@ open build/MoniView.app
 ### Pull request
 
 说明行为变化、验证所用的设备与格式、执行的命令和剩余缺口。用户可见的行为、快捷键或限制变化时，请同步更新中英文 README。没有构建或未经硬件验证的改动必须明确标注，不得把语法解析说成 SDK 构建通过。
+
+## Additional native checks / 补充原生检查
+
+- `./Scripts/test-recorder-faults.sh`: forced readiness stalls through the actual AVAssetWriter; uses synthetic media, not a real capture card. / 用真实 writer 注入不就绪，媒体为合成样本。
+- `./Scripts/test-capture-compatibility.sh`: production rate/target rules; not physical hardware coverage. / 验证生产代码的帧率与目标规则，不代表设备实测。
+- `./Scripts/test-ai-gpu.sh`: SDK 26+ native GPU color/orientation/lifetime smoke; unsupported runtime is a skip. / 原生 GPU 色彩、方向与生命周期冒烟测试，不支持时明确跳过。
+
+See [LOCAL_VALIDATION.md](docs/LOCAL_VALIDATION.md) before claiming acceptance or performance improvements. / 声称验收或性能提升前，核对实际验证边界。

@@ -56,7 +56,7 @@ The bottom buttons are Record, Info, Quality, Color, and Settings. A click on th
 
 **Window > Always on Top** keeps the preview above normal windows and remembers the choice across launches. Native full screen temporarily uses the normal window level; leaving full screen restores the saved preference. It does not change Spaces behavior or raise save panels and other app windows.
 
-The brief status line shows the device name, the actual buffer resolution, and the measured FPS. In window mode it sits centered along the top; in full screen it moves to the top left. The detailed info card opens at the top right, and while it is open the brief line is hidden and restored when the card closes. Turn the brief line off with **显示设备状态** (Show device status) in settings.
+The brief status line shows the device name, the actual buffer resolution, and the measured FPS. In window mode it sits centered along the top; in full screen it moves to the top left. The detailed info card opens at the top right, and while it is open the brief line is hidden and restored when the card closes. The brief line defaults to hidden and can be enabled with **Show device status** in settings. The enhancement label is separately controlled by **Show enhancement status**, also off by default; existing preferences are preserved.
 
 **画面比例** (Aspect) sets how the image fills the window: **适应画面** (fit) shows the whole image, **填满窗口** (fill) keeps the ratio and crops the overflow, and **拉伸填满** (stretch) fills the window and may distort the ratio.
 
@@ -85,7 +85,7 @@ MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot cr
 - **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX/Lanczos while the model loads, when unsupported, or when no supported factor fits the processing-size cap. Check the actual engine in the info card.
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
 - **Lanczos** is the compatibility path, used automatically when the device does not support MetalFX or the requested scale exceeds its current limits.
-- Targets are original, 2K (long edge 2560), 4K (long edge 3840), and Match Display. Other aspect ratios keep their own ratio. Match Display uses the display's backing-store size; scaled desktop modes do not guarantee a one-to-one mapping to physical panel pixels.
+- Targets are original, 1080p (long edge 1920), 2K (long edge 2560), 4K (long edge 3840), and Match Display. Other aspect ratios keep their own ratio. Match Display uses the display's backing-store size; scaled desktop modes do not guarantee a one-to-one mapping to physical panel pixels.
 
 In low latency mode the target is an upper bound on processing size, additionally bounded by the visible image size. Thus 2K and 4K may resolve to the same processing size. The info card shows the size actually produced. With vsync off, tearing is possible; turning low latency off restores display synchronization and full target-size processing. Neither mode changes the capture input resolution.
 
@@ -130,3 +130,7 @@ The [engineering review](docs/REVIEW.md) separates submitted fixes from hardware
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Native validation
+
+See [the local validation record](docs/LOCAL_VALIDATION.md) for the tested Mac, capture device, build commands and remaining gaps. The device chooses from its advertised formats and precise rates; switching audio reasserts the requested video format. Compatibility with every UVC card is not certified. A 4K HDMI input specification is not proof of 4K USB capture; processing targets do not change capture resolution.
