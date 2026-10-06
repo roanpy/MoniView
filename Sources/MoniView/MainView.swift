@@ -70,6 +70,7 @@ struct MainView: View {
                             }
                     }
                     .scrollBounceBehavior(.basedOnSize)
+                    .scrollIndicators(.hidden)
                     .frame(width: activePanel == .settings ? 365 : 330)
                     .frame(height: min(panelContentHeight, min(activePanel == .clarity ? 560 : 700, max(120, geometry.size.height - bottom - 12))))
                     .background(Color(hex: 0x24201c).opacity(0.92), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -539,14 +540,21 @@ struct MainView: View {
                         get: { capture.picture.frameInterpolation },
                         set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
                         choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
-                    DisclosureGroup("更多选项") {
+                    DisclosureGroup {
                         VStack(alignment: .leading, spacing: 8) {
                             settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
                                 .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
                             settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
                                 .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
                         }.padding(.top, 6)
-                    }.font(.system(size: 11)).foregroundStyle(Color(hex: 0xb8afa5))
+                    } label: {
+                        Text(L10n.text("更多选项"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color(hex: 0xd9cfc6))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 5)
+                    }
                     HStack {
                         if let contentFPS = capture.detectedContentFPS {
                             Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d", contentFPS, contentFPS * 2))
