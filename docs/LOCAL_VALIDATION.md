@@ -178,3 +178,26 @@ An isolated fixture uses the public `spatialScaleFactor: 2` configuration and ph
 | `MTL_DEBUG_LAYER=1 MONIVIEW_JOINT_CASES=1920 ./Scripts/test-joint-interpolation-gpu.sh --async-diagnostic` | Same -19730 at 1920×1080→3840×2160; no generated output or GPU/presentation timing accepted. / 4K 输出实验同样失败。 |
 
 The configuration object reports spatial factor 2 and supported 420v, but the above processing did not succeed on this Mac/OS/SDK. The root cause remains unresolved; these observations do not prove an Apple bug, a hardware limitation or universal lack of support. They also do not invalidate the separately passing temporal-only fixture. The joint path is **not enabled in production**. / 根因未解决，不据此认定 Apple 缺陷、硬件限制或所有设备都不支持；不影响另行通过的纯插帧测试。联合路径未启用。
+
+## Real UVC interpolation acceptance, builds 14–15 — 2026-10-06 / 真实采集卡插帧验收
+
+Machine/环境: M5 Max, macOS 27.0.1, Swift 6.2.4, SDK 26.2, Jemdo Video UVC 1080p60 (420v, no color metadata), built-in XDR display switched to ProMotion (app reports 120 Hz link).
+
+**Passed on real input / 真实输入通过**
+
+- After the display was switched 60 Hz to ProMotion through the native UI, the app reported a 120 Hz link and 120 Hz cap. / 切换 ProMotion 后正确识别 120 Hz。
+- Smooth tier at 1080p60 input: interpolation ran continuously ("插帧运行中"), 45-58 generated FPS on the rolling counter, adaptive working size 960x540 to 854x480, midpoint cost 5.8-6.6 ms against the 8.33 ms slot, zero capture drops, live audio monitoring. / 流畅档真实运行，生成 45-58 FPS，预算内，无采集丢帧。
+- The status capsule now shows the real presented output ("插帧 X FPS" = presented sources + presented midpoints), hidden together with the engine badge via the 显示增强状态 setting. / 左上角状态条显示真实呈现帧数，可随增强状态设置一起隐藏。
+
+**Changes shipped in these builds / 本批改动**
+
+- Quality tier now steps its working size down under overload (floor 960 long edge) instead of refusing forever; native 1080p interpolation measured 14.5-18.2 ms versus the 7.5 ms admission budget on this machine. / 清晰档超预算时自适应降档，下限 960 长边；1080p 实测超出预算。
+- After sustained headroom (P95 midpoint at or below 55 percent of the slot for about 90 presented midpoints, at most one raise per 10 s), the working size climbs back one rung; a rung that fails right after a raise is blocked for the rest of the session. / 有余量时逐级回升，回升后失败的档位本轮不再尝试。
+- A CAMetalLayer that stops vending drawables (observed once as a stuck black preview with "呈现中断，重建预览" after the 60 Hz to ProMotion switch in fullscreen) now retires and rebuilds like a presentation failure. / 图层不再产出 drawable 时按呈现失败重建预览。
+
+**Failed or pending observations, honestly recorded / 如实记录的未通过项**
+
+- The stuck-preview recovery fix has not been re-verified against a real display-mode change; the Mac locked before that scenario could be rerun. / 刷新率切换恢复修复尚未实测复核。
+- With other video apps active (VTDecoderXPCService, Telegram playback), source-path GPU time rose to 15-23 ms and render rate dipped to 38 FPS; the policy stepped down and fell back as designed. Quiet-system readings were 1.8-3.1 ms GPU earlier; a same-conditions rerun is pending. / 系统繁忙时源帧 GPU 时间升高，策略按设计降级；待空闲环境复测。
+- 30 to 60 interpolation on real input and 4K target plus interpolation have not been exercised on this hardware yet. / 30 帧输入插帧与 4K 目标加插帧未实测。
+- Redeploying the ad-hoc-signed package invalidated the camera grant (8 stale TCC entries had accumulated for this bundle id). After a tccutil reset the system logged the new request as AUTHREQ_PROMPTING with "Delaying prompt"; the Mac locked before the prompt could be accepted, so builds 14-15 are not yet camera-authorized on this machine. / 重打包导致摄像头授权失效，弹窗延迟出现；锁屏前未能点击允许。
