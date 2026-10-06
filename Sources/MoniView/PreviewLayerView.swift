@@ -70,6 +70,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             metalLayer.colorspace = colorSpace
         }
         delegate = self
+        if #available(macOS 26.0, *) {
+            aiUpscaler?.onStateChange = { [weak self] in
+                self?.forceDraw = true
+                self?.requestRender()
+            }
+        }
         frames.setFrameHandler { [weak self] in self?.requestRender() }
     }
     required init(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
@@ -186,11 +192,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: workingScale, kCIInputAspectRatioKey: 1.0])
             }
         }
-        frames.setEnhancedSize(workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil)
+        let enhancedSize = workingScale > 1.01 ? "\(Int(image.extent.width.rounded()))×\(Int(image.extent.height.rounded()))" : nil
         // Native-size, MetalFX and AI previews match the recording; Lanczos scaling compensates more.
         let enhancementSharpening = usedMetalFX || usedAI || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
-        frames.setEngine(usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始"))))
+        let engine = usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始")))
         if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
         let scale = aspectMode == .fit ? min(size.width / output.width, size.height / output.height) : max(size.width / output.width, size.height / output.height)
@@ -217,7 +223,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             let succeeded = completed.status == .completed
             // Measure at the GPU completion callback, before waiting for the main thread.
             // LatestVideoFrame is lock-protected; parameter/resize redraws are not new video frames.
-            if succeeded && shouldMeasure { frameStore.markRendered(receivedAt: frameReceivedAt, gpuMS: gpuMS) }
+            if succeeded {
+                frameStore.setEngine(engine)
+                frameStore.setEnhancedSize(enhancedSize)
+                if shouldMeasure { frameStore.markRendered(receivedAt: frameReceivedAt, gpuMS: gpuMS) }
+            }
             // Semaphore release and render bookkeeping remain serialized with draw(in:).
             DispatchQueue.main.async {
                 guard let self else { semaphore.signal(); return }
