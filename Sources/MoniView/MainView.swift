@@ -280,17 +280,24 @@ struct MainView: View {
     }
 
     private var waitingForInput: some View {
-        VStack(spacing: 13) {
+        // A window source never involves the camera or an HDMI capture card, so the
+        // device wording would be misleading; describe that source instead.
+        let isWindow = capture.sourceKind == .macWindow
+        return VStack(spacing: 13) {
             ZStack {
                 Circle().fill(Color(hex: 0xe98921).opacity(0.13)).frame(width: 74, height: 74)
-                Image(systemName: capture.permissionDenied ? "video.slash" : "cable.connector")
+                Image(systemName: isWindow ? "macwindow" : (capture.permissionDenied ? "video.slash" : "cable.connector"))
                     .font(.system(size: 29, weight: .light))
                     .foregroundStyle(Color(hex: 0xf1a447))
             }
-            Text(L10n.text(capture.cameraPermissionPending ? "等待摄像头权限" : (capture.permissionDenied ? "需要摄像头权限" : (capture.videoOptions.isEmpty ? "连接 HDMI 采集卡" : (capture.selectedVideoID != nil ? "等待视频信号" : "选择视频输入")))))
+            Text(L10n.text(isWindow
+                ? (capture.selectedMacWindowID == nil ? "选择要显示的窗口" : "等待窗口画面")
+                : (capture.cameraPermissionPending ? "等待摄像头权限" : (capture.permissionDenied ? "需要摄像头权限" : (capture.videoOptions.isEmpty ? "连接 HDMI 采集卡" : (capture.selectedVideoID != nil ? "等待视频信号" : "选择视频输入"))))))
                 .font(.system(size: 19, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(hex: 0xf2eae2))
-            Text(L10n.text(capture.cameraPermissionPending ? "请在系统权限弹窗中允许访问摄像头。" : capture.permissionDenied
+            Text(L10n.text(isWindow
+                 ? (capture.macWindowStatus ?? "在设置 › 采集设置 中选择一个窗口；首次使用需允许屏幕录制。")
+                 : capture.cameraPermissionPending ? "请在系统权限弹窗中允许访问摄像头。" : capture.permissionDenied
                  ? "请在系统设置 › 隐私与安全性 › 摄像头中允许 MoniView。"
                  : (capture.selectedVideoID != nil && !capture.videoOptions.isEmpty
                     ? "采集卡已连接，请确认信号源已开机并输出画面。"
@@ -680,10 +687,14 @@ struct MainView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                labeledPicker("视频设备", fieldWidth: 195,
-                    selection: Binding(get: { capture.selectedVideoID }, set: { capture.selectVideoDevice(id: $0) }),
-                    choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
-                    .disabled(capture.isRecording || capture.sourceKind == .macWindow)
+                // A window source has no capture-device controls to show; hiding them
+                // keeps the panel honest instead of leaving dead pickers behind.
+                if capture.sourceKind == .device {
+                    labeledPicker("视频设备", fieldWidth: 195,
+                        selection: Binding(get: { capture.selectedVideoID }, set: { capture.selectVideoDevice(id: $0) }),
+                        choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
+                        .disabled(capture.isRecording)
+                }
                 labeledPicker("音频输入", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
                     choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
@@ -691,6 +702,7 @@ struct MainView: View {
 
                 audioMonitoringControls
 
+                if capture.sourceKind == .device {
                 labeledPicker("分辨率", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedFormatID }, set: { capture.selectFormat(id: $0) }),
                     choices: capture.formatOptions.map { PickerChoice(value: Optional($0.id), title: $0.title) })
@@ -747,6 +759,7 @@ struct MainView: View {
                 Text(L10n.text(capture.aspectMode == .stretch ? "铺满窗口，画面比例可能变形。" : (capture.aspectMode == .fill ? "保持比例，裁切超出窗口的部分。" : "保持比例，完整显示画面。")))
                     .font(.system(size: 10))
                     .foregroundStyle(Color(hex: 0x98908a))
+                }
             }
             .padding(12)
             .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
