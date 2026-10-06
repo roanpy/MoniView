@@ -171,3 +171,27 @@
 "AI 超分" = "AI Upscale";
 
 "1080p · 长边 1920 px" = "1080p · long edge 1920 px";
+
+// Optional preview frame interpolation
+"画面插帧" = "Frame interpolation";
+"流畅 · 720p" = "Smooth · 720p";
+"清晰 · 1080p" = "Clear · 1080p";
+"插帧不可用" = "Frame interpolation unavailable";
+"显示器刷新率不足，使用原始帧率" = "Display refresh is insufficient; using source frames";
+"等待稳定输入帧率" = "Waiting for a stable input frame rate";
+"处理超预算，暂用原始帧率" = "Processing over budget; temporarily using source frames";
+"插帧准备中" = "Preparing frame interpolation";
+"插帧运行中" = "Interpolation running";
+"生成 %d FPS · %@" = "Generated %d FPS · %@";
+"预览目标 2×（实验性）；按当前显示器刷新率和处理预算启用。可能增加延迟和运动瑕疵，插帧时使用空间放大，不改变采集或录制帧率。" = "Experimental 2× preview target, gated by current display refresh and processing budget. May add latency and motion artifacts. Uses spatial scaling while interpolating; capture and recording FPS stay unchanged.";
+"处理 %.1f ms / 时隙 %.1f ms · 预算 %.0f%%" = "Processing %.1f ms / slot %.1f ms · budget %.0f%%";
+"插帧预算 %.0f%% · %.1f ms" = "Interpolation budget %.0f%% · %.1f ms";
+
+"显示链路 %.0f Hz · 当前上限 %.0f Hz" = "Display link %.0f Hz · current maximum %.0f Hz";
+"显示器设置…" = "Display settings…";
+"呈现中断，重建预览" = "Presentation interrupted; rebuilding preview";
+"流畅 · 自适应" = "Smooth · Adaptive";
+
+"呈现节奏调整" = "Adjusting presentation cadence";
+
+"插帧处理 %@ · 生成 %d FPS" = "Interpolation %@ · generated %d FPS";

@@ -192,6 +192,7 @@ struct MainView: View {
             // Keep the preview alive across signal drops and fullscreen transitions so the GPU
             // pipeline is never rebuilt; overlays communicate state instead.
             PreviewLayerView(capture: capture)
+                .id(capture.previewRevision)
                 .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 17, style: .continuous))
                 .padding(isFullscreen ? 0 : 3)
             if !capture.isRunning { waitingForInput }
@@ -389,6 +390,15 @@ struct MainView: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
+            if capture.picture.frameInterpolation != .off {
+                Text(L10n.format("生成 %d FPS · %@", capture.generatedFPS, L10n.text(capture.interpolationStatus)))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Color(hex: 0xaaa199))
+            }
+            if capture.picture.frameInterpolation != .off, capture.interpolationBudgetMS > 0 {
+                Text(L10n.format("插帧预算 %.0f%% · %.1f ms", capture.interpolationCostMS / capture.interpolationBudgetMS * 100, capture.interpolationCostMS))
+                    .font(.system(size: 9, design: .monospaced))
+            }
             if expandedInformation {
                 Text(L10n.format("回调→GPU %.1f ms · P95 %.1f", capture.processingMilliseconds, capture.processingP95))
                 Text(L10n.format("等待/CPU %.1f ms", max(0, capture.processingMilliseconds - capture.gpuMilliseconds)))
@@ -457,9 +467,9 @@ struct MainView: View {
                 Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
                 labeledPicker("放大方式", selection: Binding(
-                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported) },
+                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
                     set: { capture.picture.upscaleMethod = $0 }),
-                    choices: UpscaleMethod.allCases.filter { $0 != .ai || AIUpscalerSupport.isSupported }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
+                    choices: UpscaleMethod.allCases.filter { $0 != .ai || (AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                     .disabled(!capture.picture.enhancementEnabled)
                 labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
                     choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
@@ -467,6 +477,34 @@ struct MainView: View {
                 Text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(hex: 0x98908a))
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider().overlay(Color.white.opacity(0.06))
+                labeledPicker("画面插帧", selection: $capture.picture.frameInterpolation,
+                    choices: FrameInterpolationMode.allCases.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
+                    .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported)
+                if capture.picture.frameInterpolation != .off {
+                    HStack {
+                        Text(L10n.format("显示链路 %.0f Hz · 当前上限 %.0f Hz", capture.displayObservedFPS, capture.displayMaximumFPS))
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                        Spacer(minLength: 4)
+                        Button("显示器设置…") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
+                        }.buttonStyle(.link).font(.system(size: 10))
+                    }
+                }
+                if capture.picture.frameInterpolation != .off, capture.interpolationBudgetMS > 0 {
+                    Text(L10n.format("处理 %.1f ms / 时隙 %.1f ms · 预算 %.0f%%", capture.interpolationCostMS, capture.interpolationBudgetMS, capture.interpolationCostMS / capture.interpolationBudgetMS * 100))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS * FrameInterpolationPolicy.budgetFraction ? Color.orange : Color(hex: 0x98908a))
+                }
+                if capture.picture.frameInterpolation != .off, let size = capture.interpolationWorkingSize {
+                    Text(L10n.format("插帧处理 %@ · 生成 %d FPS", size, capture.generatedFPS))
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+                }
+                Text(L10n.text(FrameInterpolatorSupport.isSupported ? capture.interpolationStatus : "插帧不可用"))
+                    .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                Text("预览目标 2×（实验性）；按当前显示器刷新率和处理预算启用。可能增加延迟和运动瑕疵，插帧时使用空间放大，不改变采集或录制帧率。")
+                    .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                     .fixedSize(horizontal: false, vertical: true)
                 if recordingFreezesColor {
                     Text("本次录制使用开始时的设置")

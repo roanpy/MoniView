@@ -85,16 +85,33 @@ struct PictureSettings: Equatable, Codable {
     var enhancementStrength = 0.35
     var upscaleTarget: UpscaleTarget = .native
     var upscaleMethod: UpscaleMethod = .metalFX
+    // Optional keeps old persisted settings decodable; absence means off.
+    var interpolationMode: FrameInterpolationMode?
+    var frameInterpolation: FrameInterpolationMode {
+        get { interpolationMode ?? .off }
+        set { interpolationMode = newValue == .off ? nil : newValue }
+    }
     var highlightRecovery = 0.0
     var colorParameters: [Double] { [brightness, contrast, saturation, vibrance, highlightRecovery] }
 }
 
-/// The renderer retains only the newest frame. Capture never waits for the GPU or SwiftUI.
+/// Latest-frame mailbox. Optional interpolation retains ONE preceding reference, never a queue.
 final class LatestVideoFrame {
     private let lock = NSLock()
     private var frameHandler: (() -> Void)?
     private var buffer: CVPixelBuffer?
     private var sequence: UInt64 = 0
+    private var streamEpoch: UInt64 = 0
+    private var pts: CMTime = .invalid
+    private var sourceIntervals: [Double] = []
+    private var historyEnabled = false
+    private var previous: (CVPixelBuffer, UInt64, CMTime)?
+    private var generated = 0
+    private var interpolationState = "关闭"
+    private var interpolationCostMS = 0.0
+    private var interpolationBudgetMS = 0.0
+    private var interpolationWorkingSize: String?
+    private var displayRates = (maximum: 0.0, observed: 0.0)
     private var captured = 0
     private var rendered = 0
     private var dropped = 0
@@ -106,8 +123,19 @@ final class LatestVideoFrame {
     private var timings: [Double] = []
     private var gpuTimings: [Double] = []
 
-    func put(_ pixelBuffer: CVPixelBuffer) {
+    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid) {
         lock.lock()
+        let sameSize = buffer.map { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pixelBuffer) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pixelBuffer) } ?? false
+        let interval = CMTimeGetSeconds(CMTimeSubtract(pts, self.pts))
+        if sameSize, self.pts.isNumeric, pts.isNumeric, interval.isFinite, interval >= 1 / 240.0, interval <= 0.1 {
+            if let last = sourceIntervals.last, abs(interval - last) > last * 0.1 { sourceIntervals.removeAll(keepingCapacity: true) }
+            sourceIntervals.append(interval); sourceIntervals = Array(sourceIntervals.suffix(12))
+        } else {
+            sourceIntervals.removeAll(keepingCapacity: true)
+            streamEpoch &+= 1
+        }
+        previous = historyEnabled && sameSize ? buffer.map { ($0, sequence, self.pts) } : nil
+        self.pts = pts
         buffer = pixelBuffer
         receivedAt = DispatchTime.now().uptimeNanoseconds
         sequence &+= 1
@@ -122,10 +150,56 @@ final class LatestVideoFrame {
         guard let buffer else { return nil }
         return (buffer, sequence, receivedAt)
     }
+    func latestSnapshot() -> (buffer: CVPixelBuffer, sequence: UInt64, receivedAt: UInt64, streamEpoch: UInt64)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let buffer else { return nil }
+        return (buffer, sequence, receivedAt, streamEpoch)
+    }
+    /// Actual media timestamps, not selected/rounded FPS or callback arrival jitter.
+    func sourceFrameRate() -> Double? {
+        lock.lock(); let intervals = sourceIntervals; lock.unlock()
+        guard intervals.count >= 8 else { return nil }
+        let sorted = intervals.sorted(), median = sorted[sorted.count / 2]
+        guard median > 0, sorted.allSatisfy({ abs($0 - median) <= median * 0.05 }) else { return nil }
+        return 1 / median
+    }
+    func streamGeneration() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }; return streamEpoch
+    }
+    func setInterpolationHistoryEnabled(_ enabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        historyEnabled = enabled
+        if !enabled { previous = nil }
+    }
+    func interpolationPair(sequence expected: UInt64) -> (CVPixelBuffer, UInt64, CMTime, CMTime)? {
+        lock.lock(); defer { lock.unlock() }
+        guard expected == sequence, let previous else { return nil }
+        return (previous.0, previous.1, previous.2, pts)
+    }
+    func setInterpolationState(_ value: String) { lock.lock(); interpolationState = value; lock.unlock() }
+    func setInterpolationCost(seconds: Double, budget: Double) {
+        lock.lock(); interpolationCostMS = seconds * 1000; interpolationBudgetMS = budget * 1000; lock.unlock()
+    }
+    func setInterpolationWorkingSize(_ value: String?) { lock.lock(); interpolationWorkingSize = value; lock.unlock() }
+    func currentInterpolationWorkingSize() -> String? { lock.lock(); defer { lock.unlock() }; return interpolationWorkingSize }
+    func interpolationCost() -> (Double, Double) {
+        lock.lock(); defer { lock.unlock() }; return (interpolationCostMS, interpolationBudgetMS)
+    }
+    func setDisplayRates(maximum: Double, observed: Double) {
+        lock.lock(); displayRates = (maximum, observed); lock.unlock()
+    }
+    func currentDisplayRates() -> (maximum: Double, observed: Double) {
+        lock.lock(); defer { lock.unlock() }; return displayRates
+    }
+    func currentInterpolationState() -> String { lock.lock(); defer { lock.unlock() }; return interpolationState }
+    func markGenerated() { lock.lock(); generated += 1; lock.unlock() }
+    func generatedStatistics() -> Int { lock.lock(); defer { lock.unlock() }; let n = generated; generated = 0; return n }
     func clear() {
         lock.lock(); defer { lock.unlock() }
         buffer = nil
+        previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
         sequence &+= 1
+        streamEpoch &+= 1
         level = 0
     }
     func markRendered(receivedAt: UInt64, gpuMS: Double) {
@@ -185,6 +259,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var showsEngineStatus = false { didSet { UserDefaults.standard.set(showsEngineStatus, forKey: "view.engineStatus") } }
     private var applyingPreset = false
     private var picturePersistWork: DispatchWorkItem?
+    @Published private(set) var generatedFPS = 0
+    @Published private(set) var interpolationStatus = "关闭"
+    @Published private(set) var interpolationCostMS = 0.0
+    @Published private(set) var interpolationBudgetMS = 0.0
+    @Published private(set) var interpolationWorkingSize: String?
+    @Published private(set) var displayMaximumFPS = 0.0
+    @Published private(set) var displayObservedFPS = 0.0
+    @Published private(set) var previewRevision: UInt64 = 0
+    func rebuildPreview() { previewRevision &+= 1 }
     @Published private(set) var deviceName = "未连接"
     @Published private(set) var resolution = "—"
     @Published private(set) var pixelFormat = "—"
@@ -815,7 +898,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            frames.put(buffer)
+            frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             recorder.append(sampleBuffer, video: true)
         } else if output === audioOutput {
             let power = connection.audioChannels.map(\.averagePowerLevel).max() ?? -160
@@ -872,6 +955,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             let stats = self.frames.statistics()
             self.measuredFPS = Int((Double(stats.0) / elapsed).rounded())
             self.renderedFPS = Int((Double(stats.1) / elapsed).rounded())
+            self.generatedFPS = Int((Double(self.frames.generatedStatistics()) / elapsed).rounded())
+            self.interpolationStatus = self.frames.currentInterpolationState()
+            let interpolationCost = self.frames.interpolationCost()
+            self.interpolationCostMS = interpolationCost.0; self.interpolationBudgetMS = interpolationCost.1
+            self.interpolationWorkingSize = self.frames.currentInterpolationWorkingSize()
+            let displayRates = self.frames.currentDisplayRates()
+            self.displayMaximumFPS = displayRates.maximum; self.displayObservedFPS = displayRates.observed
             self.droppedFrames = stats.2
             let times = self.frames.processingTimes()
             self.processingMilliseconds = times.0
@@ -917,11 +1007,24 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             payload["bufferWidth"] = CVPixelBufferGetWidth(buffer)
             payload["bufferHeight"] = CVPixelBufferGetHeight(buffer)
             payload["bufferPixelFormat"] = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
+            for (key, name) in [(kCVImageBufferYCbCrMatrixKey, "inputYCbCrMatrix"),
+                                (kCVImageBufferColorPrimariesKey, "inputColorPrimaries"),
+                                (kCVImageBufferTransferFunctionKey, "inputTransferFunction")] {
+                if let attachment = CVBufferCopyAttachment(buffer, key, nil) { payload[name] = String(describing: attachment) }
+            }
         }
         payload["softwareProcessingMS"] = processingMilliseconds
         payload["softwareP95MS"] = processingP95
         payload["gpuMS"] = gpuMilliseconds
         payload["lowLatency"] = picture.lowLatency
+        payload["interpolationMode"] = picture.frameInterpolation.rawValue
+        payload["interpolationStatus"] = interpolationStatus
+        payload["generatedFPS"] = generatedFPS
+        payload["interpolationCostMS"] = interpolationCostMS
+        payload["interpolationBudgetMS"] = interpolationBudgetMS
+        if let interpolationWorkingSize { payload["interpolationWorkingSize"] = interpolationWorkingSize }
+        payload["displayMaximumFPS"] = displayMaximumFPS
+        payload["displayObservedFPS"] = displayObservedFPS
         payload["enhancementEnabled"] = picture.enhancementEnabled
         payload["enhancementTarget"] = picture.upscaleTarget.rawValue
         payload["upscaleEngine"] = upscaleEngine
