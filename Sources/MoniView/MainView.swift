@@ -629,30 +629,61 @@ struct MainView: View {
         }
     }
 
+    /// One refresh action covers both sources: devices always, and the window list
+    /// whenever the Mac-window source is selected.
+    private var sourceRefreshButton: some View {
+        Button {
+            capture.refreshDevices()
+            capture.refreshMacWindows()
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(hex: 0xe9a24d))
+                .frame(width: 30, height: 30)
+                .background(Color.white.opacity(0.06), in: Circle())
+                .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("刷新来源")
+    }
+
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 panelHeading("采集设置", subtitle: "按采集卡支持的格式显示", icon: "gearshape")
-                Button {
-                    capture.refreshDevices()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color(hex: 0xe9a24d))
-                        .frame(width: 30, height: 30)
-                        .background(Color.white.opacity(0.06), in: Circle())
-                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("刷新采集设备")
+                sourceRefreshButton
             }
 
             VStack(alignment: .leading, spacing: 11) {
+                labeledPicker("画面来源", fieldWidth: 195,
+                    selection: $capture.sourceKind,
+                    choices: CaptureSourceKind.allCases.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
+                    .disabled(capture.isRecording)
+                if capture.sourceKind == .macWindow {
+                    HStack(alignment: .center, spacing: 8) {
+                        labeledPicker("Mac 窗口", fieldWidth: 195,
+                            selection: Binding(get: { capture.selectedMacWindowID }, set: { capture.selectedMacWindowID = $0 }),
+                            choices: capture.macWindowOptions.map { PickerChoice(value: Optional($0.id), title: $0.displayTitle) })
+                            .disabled(capture.isRecording || capture.macWindowOptions.isEmpty)
+                        sourceRefreshButton
+                    }
+                    if let status = capture.macWindowStatus {
+                        Text(L10n.text(status))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0x98908a))
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(L10n.text("捕获本机窗口，勾选系统录屏授权后生效。只显示窗口内容，不影响原程序。"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0x98908a))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 labeledPicker("视频设备", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedVideoID }, set: { capture.selectVideoDevice(id: $0) }),
                     choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
-                    .disabled(capture.isRecording)
+                    .disabled(capture.isRecording || capture.sourceKind == .macWindow)
                 labeledPicker("音频输入", fieldWidth: 195,
                     selection: Binding(get: { capture.selectedAudioID }, set: { capture.selectAudioDevice(id: $0, persist: true) }),
                     choices: [PickerChoice(value: Optional<String>.none, title: L10n.text("关闭音频输入"))] + capture.audioOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })

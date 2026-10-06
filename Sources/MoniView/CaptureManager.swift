@@ -9,6 +9,14 @@ struct CaptureInputOption: Identifiable, Hashable {
     let name: String
 }
 
+/// Where the preview's video comes from. Capture devices are the default; the Mac
+/// window source exists for games and software running on this same machine.
+enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable {
+    case device = "采集设备"
+    case macWindow = "Mac 窗口"
+    var id: String { rawValue }
+}
+
 struct CaptureFormatOption: Identifiable, Hashable {
     let id: Int
     let width: Int
@@ -330,6 +338,22 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     let session = AVCaptureSession()
     let frames = LatestVideoFrame()
     @Published private(set) var videoOptions: [CaptureInputOption] = []
+    @Published var sourceKind: CaptureSourceKind = .device {
+        didSet {
+            guard oldValue != sourceKind else { return }
+            UserDefaults.standard.set(sourceKind.rawValue, forKey: "source.kind")
+            applySourceKind()
+        }
+    }
+    @Published private(set) var macWindowOptions: [MacWindowOption] = []
+    @Published private(set) var macWindowStatus: String?
+    @Published var selectedMacWindowID: UInt32? {
+        didSet {
+            guard sourceKind == .macWindow, oldValue != selectedMacWindowID else { return }
+            UserDefaults.standard.set(Int(selectedMacWindowID ?? 0), forKey: "source.windowID")
+            restartMacWindowCapture()
+        }
+    }
     @Published private(set) var audioOptions: [CaptureInputOption] = []
     @Published private(set) var formatOptions: [CaptureFormatOption] = []
     @Published var selectedVideoID: String?
@@ -444,6 +468,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     // Never hold its lock while configuring a device, starting a session or publishing UI state.
     private let videoConfiguration = ConfigurationRevision()
     private let audioConfiguration = ConfigurationRevision()
+    private var macWindowCapture: MacWindowCapture?
+    /// Set while a Mac-window session owns the preview, so device paths stay inactive.
+    private var isMacWindowSourceActive = false
 
     override init() {
         super.init()
@@ -457,6 +484,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         if UserDefaults.standard.object(forKey: "view.engineStatus") != nil { showsEngineStatus = UserDefaults.standard.bool(forKey: "view.engineStatus") }
         if let raw = UserDefaults.standard.string(forKey: "view.aspect"), let saved = AspectMode(rawValue: raw) { aspectMode = saved }
         if UserDefaults.standard.object(forKey: "audio.volume") != nil { audioVolume = UserDefaults.standard.float(forKey: "audio.volume") }
+        if let raw = UserDefaults.standard.string(forKey: "source.kind"), let saved = CaptureSourceKind(rawValue: raw) { sourceKind = saved }
+        if UserDefaults.standard.object(forKey: "source.windowID") != nil {
+            let saved = UInt32(UserDefaults.standard.integer(forKey: "source.windowID"))
+            selectedMacWindowID = saved == 0 ? nil : saved
+        }
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
@@ -494,6 +526,138 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     private static func devices(_ media: AVMediaType) -> [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(deviceTypes: media == .video ? [.external, .builtInWideAngleCamera] : [.microphone], mediaType: media, position: .unspecified).devices
+    }
+
+    // MARK: - Source selection
+
+    /// Apply the stored source choice. Only one source may own the preview.
+    private func applySourceKind() {
+        switch sourceKind {
+        case .device:
+            stopMacWindowCapture()
+            selectedVideoID = selectedVideoID ?? UserDefaults.standard.string(forKey: "device.lastVideo")
+            selectVideoDevice(id: selectedVideoID)
+        case .macWindow:
+            // Release the device input so the UVC stream and the window stream never
+            // compete for the same GPU and frame handoff.
+            videoConfiguration.advance()
+            sessionQueue.async { [weak self] in
+                guard let self else { return }
+                self.session.beginConfiguration()
+                if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
+                self.selectedDevice = nil
+                self.session.commitConfiguration()
+                self.session.stopRunning()
+            }
+            refreshMacWindows()
+        }
+    }
+
+    func refreshMacWindows() {
+        guard sourceKind == .macWindow else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let options = try await MacWindowCapture.availableWindows(excludingBundleID: Bundle.main.bundleIdentifier)
+                self.macWindowOptions = options
+                self.macWindowStatus = options.isEmpty ? L10n.text("没有可选择的窗口") : nil
+                if self.selectedMacWindowID == nil || !options.contains(where: { $0.id == self.selectedMacWindowID }) {
+                    let saved = UInt32(UserDefaults.standard.integer(forKey: "source.windowID"))
+                    let restored = saved != 0 && options.contains(where: { $0.id == saved }) ? saved : options.first?.id
+                    // Assigning triggers restartMacWindowCapture through didSet.
+                    self.selectedMacWindowID = restored
+                    if restored == nil { self.stopMacWindowCapture() }
+                } else {
+                    self.restartMacWindowCapture()
+                }
+            } catch {
+                self.macWindowOptions = []
+                self.macWindowStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                self.stopMacWindowCapture()
+            }
+        }
+    }
+
+    private func restartMacWindowCapture() {
+        guard sourceKind == .macWindow, let windowID = selectedMacWindowID else {
+            stopMacWindowCapture()
+            return
+        }
+        let capture = macWindowCapture ?? MacWindowCapture(
+            frameSink: { [weak self] sample in
+                guard let self, let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                // Same handoff as the capture-device path: the preview keeps only the
+                // newest buffer and the recorder receives the original sample buffer.
+                self.frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample))
+                self.recorder.append(sample, video: true)
+            },
+            state: { [weak self] state in self?.handleMacWindowState(state) },
+            dropped: { [weak self] in self?.frames.markDropped() })
+        macWindowCapture = capture
+        isMacWindowSourceActive = true
+        frames.clear()
+        // The window stream replaces any device stream in the same preview pipeline.
+        capture.start(windowID: windowID)
+        let option = macWindowOptions.first { $0.id == windowID }
+        deviceName = option.map { $0.title.isEmpty ? $0.applicationName : $0.title } ?? L10n.text("Mac 窗口")
+        resolution = option.map { "\($0.width) × \($0.height)" } ?? "—"
+        pixelFormat = "BGRA"
+        formatOptions = []
+        selectedFormatID = nil
+        frameRateOptions = [0]
+        selectedFrameRate = 0
+        selectedFPS = 0
+        isRunning = true
+    }
+
+    private func handleMacWindowState(_ state: MacWindowCapture.State) {
+        guard sourceKind == .macWindow else { return }
+        switch state {
+        case .running:
+            macWindowStatus = nil
+            isRunning = true
+        case .starting:
+            macWindowStatus = L10n.text("正在连接窗口…")
+        case .failed(let message):
+            macWindowStatus = message
+            isRunning = false
+            // A closed window is expected during normal use; refresh the list instead
+            // of leaving a dead preview.
+            refreshMacWindows()
+        case .stopped, .idle:
+            isRunning = false
+        }
+    }
+
+    private func stopMacWindowCapture() {
+        macWindowCapture?.stop()
+        macWindowCapture = nil
+        isMacWindowSourceActive = false
+        macWindowStatus = nil
+        if sourceKind == .macWindow { isRunning = false }
+    }
+
+    /// Share the recording completion path with the capture-device flow.
+    private func startWindowRecording(url: URL, width: Int, height: Int, audio: AudioStreamBasicDescription?) {
+        recorder.start(url: url, width: max(2, width & ~1), height: max(2, height & ~1), fps: 60, audio: audio) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let drops = self.recorder.droppedSamples()
+                self.recordingVideoDrops = drops.video; self.recordingAudioDrops = drops.audio
+                self.isRecording = false
+                self.recordingStartedAt = nil
+                let warning = drops.video + drops.audio > 0 ? L10n.format(" · 录制丢弃视频 %d 帧 / 音频 %d 包", drops.video, drops.audio) : ""
+                self.recordingError = error?.localizedDescription
+                self.statusMessage = error.map { L10n.format("录制失败：%@", $0.localizedDescription) } ?? L10n.format("已保存到 %@%@", url.lastPathComponent, warning)
+                if error == nil && drops.video == 0 && drops.audio == 0 {
+                    let dismiss = DispatchWorkItem { [weak self] in self?.statusMessage = nil }
+                    self.statusDismissal = dismiss
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: dismiss)
+                }
+                self.recordingFinished?(); self.recordingFinished = nil
+            }
+        }
     }
 
     func refreshDevices(force: Bool = true) {
@@ -995,6 +1159,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         recordingVideoDrops = 0; recordingAudioDrops = 0
         statusMessage = "正在录制…"
         recorder.setPicture(recordIncludesPicture ? picture : nil)
+        if sourceKind == .macWindow {
+            // Window frames arrive as BGRA sample buffers, so the recorder uses the
+            // source size directly. No capture-device format is involved.
+            let size = macWindowCapture?.configuredPixelSize ?? CGSize(width: 1920, height: 1080)
+            let audioDesc = audioInput?.device.activeFormat.formatDescription
+            let asbd = audioDesc.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
+            startWindowRecording(url: url, width: Int(size.width), height: Int(size.height), audio: asbd)
+            return
+        }
         sessionQueue.async { [weak self] in
             guard let self else { return }
             guard let video = self.selectedDevice else {
