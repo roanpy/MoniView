@@ -269,3 +269,42 @@ Still pending: stable real UVC 60→120, strict stable pacing, game ghosting/blu
 - A trial aligning all requested times to the refresh grid and feeding presented times back into scheduling failed the same strict thresholds: 1/30 windows, mean10.136ms, P9516.667ms (exit133); many callbacks were one refresh late. The production app was stopped for this trial. Conditions differed from the earlier test, so this is not proof of a speed regression; it is no evidence of improvement. The trial was locally reverted and is not deployed.
 - Final policy checks increased to234 after regression coverage for retaining an active GPU-error cooldown across a Force-only change. Changing Force still clears budget-only cooldown; it does not bypass the GPU error guard. Audio FIFO and configuration-revision scripts also reran successfully.
 - Final normal bundle: build27, signed using the same local identity. Stable120 remains unresolved; detailed actual-presentation deadline tracing and bounded scheduling changes need separate acceptance before shipping.
+
+### 2026-10-06 — completion budgets, input ownership and a bounded 120 FPS pass (build29)
+
+Environment: Apple M5 Max, macOS27.0.1, Swift6.2.4, macOS SDK26.2, arm64. The production app was stopped for the strict synthetic-window runs below. No claim is made that all unrelated system GPU work was absent. / 环境如上；严格合成窗口运行时退出了产品预览，不声称整机没有其他后台工作。
+
+**Implemented / 已修改**
+
+- Matching native-size IOSurface source buffers can be retained directly when every known processor attribute, Rec.709, orientation and explicit Center top-field chroma requirement is satisfied. Unknown/conflicting chroma or SDK requirements retain conversion. The inputs are not mutated and all processing resources survive in-flight stop. / 满足全部条件的同尺寸输入省去两次源帧拷贝，未知或冲突信息保守回退，输入不修改且停止时仍保活。
+- Pair budgets now use the larger of CPU+GPU timestamps or encode-start→completion-callback elapsed for each command. This corrects undercounted processor/queue waits; it is not acceleration, GPU utilization or HDMI latency. Force still bypasses budget, not deadlines. A deadline fallback no longer leaves the prior running label unchanged. / 修正遗漏等待的计时及过期运行状态，不宣称统计修改等于提速。
+- Spatial-scaler failed-key pruning is periodic; per-key retry deadlines and two-entry resource ownership remain intact. / 减少每帧失败键清理，重试与保活规则不变。
+
+**Executed / 已执行**
+
+| Command or scenario / 命令或场景 | Actual result / 实际结果 |
+| --- | --- |
+| `swift --version`; `xcrun --sdk macosx --show-sdk-version`; `swift build`; release packaging via `Scripts/build-app.sh` | PASS, versions above; normal signed build29 produced |
+| Non-AI Swift build and `MONIVIEW_DISABLE_AI=1 ... Scripts/build-app.sh` | PASS, signed non-AI bundle29 produced and launched; no unsupported ML dependency required |
+| Audio FIFO, configuration revision, capture compatibility, exact-duplicate detector and interpolation policy scripts | PASS; policy248 checks and duplicate41 checks. These are not real UVC/audio stress acceptance |
+| `plutil -lint` on both localized strings | PASS |
+| `Scripts/test-frame-interpolator-gpu.sh` under Metal validation | PASS16 synthetic cases, including missing top chroma, missing both locations, conflicting bottom location, range/color/orientation/non-IOSurface fallback and native-input in-flight stop |
+| `Scripts/test-metal-upscaler-lru.sh --gpu` under Metal validation | PASS:20 alternating calls, two cached resources, evicted resource retained through readback |
+| Optimized `Scripts/test-interpolation-spatial-gpu.sh --gpu` | PASS10 compatible synthetic cases. Sources720p/1080p/4K; midpoint then spatial2K/4K output. Direct960→3840 exceeds the existing3× scaler guard and is explicitly excluded, not relabeled as PASS |
+| Strict1080p60 / Low / Force / MetalFX2K, native960×540-point window, low-latency target cap off, sharpening strength0 | **PASS30/30** acceptance windows: actual source59.97 + generated60.00 = output119.97 FPS, mean presented interval8.336ms, P958.333ms |
+| Repeat same strict configuration after explicit-chroma guard and synthetic metadata correction | **PASS30/30**: source59.97 + generated59.90 = output119.87 FPS, mean8.343ms, P958.333ms over30.000s. CAD callbacks120/sec are diagnostic only; acceptance uses actual positive drawable presented times |
+| Synthetic1080p30 / High / Force / MetalFX4K, target cap off, strength0.35 | PASS ordering/bound/disable/minimize-restore smoke,464 generated presentations,15 windows at >=85% generation target; steady samples output60. Not a strict120, real4K capture or game-quality result |
+| Synthetic1080p60 / High / Force off, native target, budget fallback allowed | PASS fallback/order/disable/minimize-restore smoke;616 generated presentations across the run but no >=85% target windows. Does not pass120 |
+| Strict1080p60 / High / Force / native target | **FAILED0/30**, source47.43 + generated28.20 = output75.63 FPS; mean13.224ms, P9525.000ms. The high-tier result must not inherit the low-tier PASS |
+| StrictHigh / Force / forced old source-copy path | **FAILED0/30**, native output60.00 FPS, generation0; the deadline prevented generation despite Force. Test-only comparison does not alter the product |
+| Low + screen target run interrupted by lock/occlusion | SKIP exit2; not a performance failure or PASS |
+
+Offscreen original/copy comparison used fresh adjacent420v synthetic buffers,2 warmups and20 measured commands per case. At1080p→2K the original path's mean CPU encode was0.140ms versus copy0.231ms, but completion wall means were10.973/11.339ms; at4K they were11.118/10.487ms respectively. This small sequential sample does **not** demonstrate a consistent total-path speedup. Original GPU timestamp spans near1ms omitted waits visible in completion wall time. The optimization removes copies; it is not advertised as a percentage throughput gain. / 离屏小样本只证明少做拷贝及 GPU 时间戳不能代表完整经过时间，不声称整条链路稳定提速。
+
+**Deployment and real input boundary / 部署及真实输入边界**
+
+Normal build0.2.0(29) was signed with the existing local identity, backed up the previous installed build27 and deployed to Applications. Strict codesign verification passed. Packaged and installed executable SHA256 both equal `967d1544a0093be9bebb649d57d94f1f3a665bba2b4b0a778f778ca0459eaf17`. The non-AI package was launched before restoring the normal package. Neither main nor a release was published, and workflow files were not changed. / 新版安装及签名、哈希一致性通过；旧版已备份，不合并main、不发release、不改手动构建策略。
+
+After launch, local diagnostics confirmed Jemdo1920×1080,420v, capture60 and the audio-monitoring path, with missing top/bottom chroma attachments. This actual device therefore uses conservative conversion rather than receiving invented Center metadata. The Mac relocked before visible packaged-app acceptance: presented output0 while locked is **not** a120 test or a black-image diagnosis. No audible audio, live game motion, packaged visual quality or true device120 claim is made from these diagnostics. / 真机可确认采集格式、60帧及监听路径；缺失色度附件不伪造。重新锁屏后的输出0不能用来判断黑屏原因，也不能替代可见窗口、可听音频或真实游戏验收。
+
+Pending: real Jemdo visible-window30/50/60 quality and pacing,120 with actual device metadata/conversion, full-screen game motion/blur, native4K UVC, other cards/Macs, older60Hz computers, joint neural spatial+temporal processing, long-term A/V recording/fault coverage, Thread Sanitizer and HDMI end-to-end latency. The existing standalone AI option remains present and paused during interpolation. No speculative scheduler/backend prototype was shipped. / 未覆盖项如上；独立 AI 超分保留但插帧期间暂停，未部署未验收的调度实验。

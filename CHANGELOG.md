@@ -2,6 +2,10 @@
 
 ## Unreleased / 未发布
 
+- Reuse conforming IOSurface interpolation inputs at native working size; reject unspecified/conflicting chroma locations instead of guessing. / 同尺寸插帧直接保活满足条件的 IOSurface 输入；未知或冲突的色度位置继续走转换。
+- Include encode-to-completion waits in interpolation budgets without adding elapsed time twice; clear stale running status on deadline fallback. / 插帧预算包含编码至完成回调的等待且不重复累加；呈现期限回退时清除过期运行状态。
+- Prune spatial-scaler failure keys periodically and add an optimized spatial/interpolation GPU matrix plus strict visible-window validation. / 周期清理空间放大失败键，新增优化编译的离屏兼容性矩阵与严格可见窗口验收。
+
 - Add experimental, off-by-default Apple GPU midpoint interpolation with adaptive sizing, display-link timing checks, measured budget fallback and bounded presentation recovery. / 新增默认关闭的实验性 Apple GPU 中间帧插帧，支持自适应处理尺寸、显示链路周期核查、预算回退和有界呈现恢复。
 - Keep spatial scaling available during interpolation; pause the standalone AI scaler and preserve its preference. Source recording and PNG FPS/dimensions remain unchanged. / 插帧时保留空间放大，暂停独立 AI 超分并保留偏好；源录制与 PNG 帧率、尺寸不变。
 - Reduce Smooth midpoint work with fast fallback input resampling and a single final resize; retain original source rendering and Clear quality. Keep the spatial status badge stable and explain the standalone AI pause. / 流畅档采用较轻的回退输入缩放和一次最终缩放，保留原帧渲染与清晰档质量；稳定空间处理标签，并说明独立 AI 暂停状态。
