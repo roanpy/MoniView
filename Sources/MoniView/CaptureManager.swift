@@ -755,6 +755,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var followsRealContentRate: Bool = UserDefaults.standard.bool(forKey: "capture.followRealRate") {
         didSet { UserDefaults.standard.set(followsRealContentRate, forKey: "capture.followRealRate") }
     }
+    private var heldDetectedContentFPS: Int?
+    private var lastDetectedContentFPSAt: Date = .distantPast
     private var lastRealRateSwitchAt: Date = .distantPast
     func selectFrameRate(_ fps: Int) { selectFrameRateValue(Double(fps)) }
     func selectFrameRateValue(_ fps: Double, fromFollow: Bool = false) {
@@ -1059,7 +1061,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.presentedSourceFPS = Int((Double(presentationStats.presentedSource) / elapsed).rounded())
             self.presentedOutputFPS = Int((Double(presentationStats.presentedSource + presentationStats.generated) / elapsed).rounded())
             self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
-            let detectedContentFPS = self.frames.currentMeasuredContentFPS().map { Int($0.rounded()) }
+            // Hold a lost detection briefly: content hovering at the duplicate threshold
+            // must not flap the UI. Budget math uses its own live window, unaffected.
+            let rawDetected = self.frames.currentMeasuredContentFPS().map { Int($0.rounded()) }
+            if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
+            let detectedContentFPS = rawDetected ?? (Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil)
             if let detectedContentFPS, detectedContentFPS == self.detectedContentFPS {
                 self.contentFPSStabilityStreak += 1
             } else {
