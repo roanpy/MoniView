@@ -202,3 +202,36 @@
 "输出 %d FPS（生成 %d）" = "Output %d FPS (generated %d)";
 "清晰档超预算，保留原始画面" = "Clear tier over budget; keeping original frames";
 "流畅档降低中间帧分辨率；清晰档保留最高1080p，超预算恢复原帧并自动重试。输出帧率按实际呈现统计，2×是目标。" = "The Smooth tier lowers midpoint resolution. The Clear tier keeps up to 1080p, restores original frames when over budget, and retries automatically. Output FPS reflects actual presentation; 2× is a target.";
+
+/* Interpolation controls: multiplier, quality and budget override. */
+"插帧倍率" = "Interpolation multiplier";
+"插帧质量" = "Interpolation quality";
+"低 · 自适应" = "Low · Adaptive";
+"中 · 最高720p" = "Medium · Up to 720p";
+"高 · 最高1080p" = "High · Up to 1080p";
+"强制尝试插帧" = "Force interpolation attempts";
+"强制插帧运行中" = "Forced interpolation running";
+"忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。" = "Ignore the performance budget and keep the selected quality. Display refresh, valid input, and presentation deadlines still apply. May increase latency and stutter.";
+"自动按处理预算保护原始画面，超预算后重试。" = "Automatically protect original frames based on the processing budget and retry after overload.";
+"2×目标 %.0f FPS · 屏幕上限 %.0f Hz" = "2× target %.0f FPS · Display limit %.0f Hz";
+"低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。" = "Low adaptively reduces midpoint resolution; Medium and High retain their respective limits. Output FPS reflects actual presentation; 2× is a target. 3× is not currently supported.";
+"GPU错误，保留原始画面" = "GPU error; keeping original frames";
+"跳过完全重复画面的插帧" = "Skip interpolation of identical frames";
+"预览不可见，暂停呈现" = "Preview hidden; presentation paused";
+"呈现间隔 P95 %.1f ms" = "Presentation interval P95 %.1f ms";
+"跳过重复插帧 %d 对/秒" = "Duplicate interpolation skipped: %d pairs/s";
+"当前输入帧率不支持2×，使用原始帧率" = "2× is unavailable at this input rate; using original frames";
+
+"AI 超分暂停，关闭插帧后恢复" = "AI upscaling paused; resumes when interpolation is off";
+
+"更多选项" = "More options";
+
+"跳过重复插帧" = "Skip duplicate pairs";
+
+"仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。" = "Only skips midpoint generation for identical images. Capture cadence is unchanged; this is not the game frame rate.";
+
+"目标 %.0f FPS · 屏幕 %.0f Hz" = "Target %.0f FPS · Display %.0f Hz";
+
+"屏幕 %.0f Hz" = "Display %.0f Hz";
+
+"处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。" = "Processing budget is not total GPU utilization. See Video Info for sizes and presentation statistics.";
