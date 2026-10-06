@@ -211,6 +211,7 @@
 "中 · 最高720p" = "Medium · Up to 720p";
 "高 · 最高1080p" = "High · Up to 1080p";
 "光流 Beta · 最高1080p" = "Flow Beta · Up to 1080p";
+"重复画面 · 跳过插帧" = "Duplicate input · interpolation skipped";
 "强制尝试插帧" = "Force interpolation attempts";
 "强制插帧运行中" = "Forced interpolation running";
 "忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。" = "Ignore the performance budget and keep the selected quality. Display refresh, valid input, and presentation deadlines still apply. May increase latency and stutter.";

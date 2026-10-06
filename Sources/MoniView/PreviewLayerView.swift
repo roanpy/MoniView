@@ -633,6 +633,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             lastSourceSequence = sequence
             lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
             frames.setPreviewState("dedup")
+            frames.setInterpolationState("重复画面 · 跳过插帧")
             inFlight.signal()
             return
         }

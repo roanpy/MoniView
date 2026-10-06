@@ -308,3 +308,29 @@ Normal build0.2.0(29) was signed with the existing local identity, backed up the
 After launch, local diagnostics confirmed Jemdo1920×1080,420v, capture60 and the audio-monitoring path, with missing top/bottom chroma attachments. This actual device therefore uses conservative conversion rather than receiving invented Center metadata. The Mac relocked before visible packaged-app acceptance: presented output0 while locked is **not** a120 test or a black-image diagnosis. No audible audio, live game motion, packaged visual quality or true device120 claim is made from these diagnostics. / 真机可确认采集格式、60帧及监听路径；缺失色度附件不伪造。重新锁屏后的输出0不能用来判断黑屏原因，也不能替代可见窗口、可听音频或真实游戏验收。
 
 Pending: real Jemdo visible-window30/50/60 quality and pacing,120 with actual device metadata/conversion, full-screen game motion/blur, native4K UVC, other cards/Macs, older60Hz computers, joint neural spatial+temporal processing, long-term A/V recording/fault coverage, Thread Sanitizer and HDMI end-to-end latency. The existing standalone AI option remains present and paused during interpolation. No speculative scheduler/backend prototype was shipped. / 未覆盖项如上；独立 AI 超分保留但插帧期间暂停，未部署未验收的调度实验。
+
+## Cadence unification and Flow Beta tier — 2026-10-07 / 节奏统一与光流 Beta 档
+
+Same Mac, same SDK as above. Deployed build 0.2.0(45), signed with the local identity; previous installed builds backed up. / 同机同 SDK；部署 0.2.0(45)，本地签名，旧版已备份。
+
+**Automated results / 自动化结果**
+
+| Check / 检查 | Result / 结果 |
+| --- | --- |
+| `swift build` | PASS |
+| `Scripts/test-frame-interpolation-policy.sh` | PASS 292 checks |
+| `Scripts/test-content-cadence-policy.sh` | PASS 18 checks (stability, fractional rates, unique PTS cadence, presentation qualification) |
+| `Scripts/test-video-frame-duplicates.sh` | PASS 41 checks |
+| `Scripts/test-capture-compatibility.sh` | PASS |
+| `Scripts/test-configuration-revision.sh` | PASS |
+| `Scripts/test-audio-buffer.sh` / `test-recorder-faults.sh` | PASS |
+| `MONIVIEW_TEST_FLOWBLEND=1 MONIVIEW_TEST_FPS=60 Scripts/test-preview-interpolation-display.sh` (120 Hz internal display, synthetic 1920x1080) | PASS: 60 source + 60 generated actually presented per second sustained across 15+ windows, pair P95 about 5 ms vs 15 ms pair budget, working size 1280x720, ordering/drawable-bound/disable/minimize-restore smoke all PASS |
+| `Scripts/test-flow-blend.sh` | Image checks PASS (BGRA and 420v moving block). The 4 ms p95 gate is an idle-GPU gate: it passes with an idle GPU (about 0.7 ms median) and misses (about 5-8 ms p95) while the preview app itself loads the GPU; the runtime admission machinery handles the loaded case by backing off. |
+
+**Real-device state / 真机状态**
+
+The packaged app was driven to select the 光流 Beta tier with the real Jemdo 1080p60 420v input. Engine selection, tier persistence and the dedup path verified live: with static Switch output all 60 adjacent pairs per second deduplicate, no new presentation is produced, and the status reads "重复画面 · 跳过插帧" instead of the previous stale labels. Two stale-state bugs found by real observation and fixed: a permanently stuck "gpu-busy" preview state when all frames deduplicate, and the interpolation status never refreshing during full dedup (it could show a launch-time "refresh insufficient" forever). The "插帧运行中" label now reflects steadily presented midpoint+endpoint pairs; the stricter deadline check remains only the adaptive step-up gate after observing that sub-vsync phase made it permanently false at 8.3 ms slots despite perfect presented cadence. / 真机 420v 输入下光流档选择、持久化与去重路径已核实；静态画面下全帧去重、无新呈现、状态正确。修复两个真实观察到的过期状态问题。
+
+**Not verified here / 未验证**
+
+Real game motion quality of the Flow Beta tier (motion edges, dissolve fallbacks) still needs a gameplay session; the synthetic fixture validates throughput and presentation, not perceived quality. RIFE Core ML/MLX route remains shelved on measured cost (about 168 ms at 854x480 per pair on this M5 Max), not licensing (MIT). Flow Beta currently shares the macOS 26+ interpolation-section gate even though the engine is plain Metal. / 光流档真实游戏画质待游戏会话验收；RIFE 因实测成本搁置（MIT 许可无阻碍）；光流档暂随 macOS 26+ 插帧区门槛。
