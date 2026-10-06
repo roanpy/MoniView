@@ -2,6 +2,9 @@
 
 ## Unreleased / 未发布
 
+- Add experimental, off-by-default Apple GPU midpoint interpolation with adaptive sizing, display-link timing checks, measured budget fallback and bounded presentation recovery. / 新增默认关闭的实验性 Apple GPU 中间帧插帧，支持自适应处理尺寸、显示链路周期核查、预算回退和有界呈现恢复。
+- Keep spatial scaling available during interpolation; pause the standalone AI scaler and preserve its preference. Source recording and PNG FPS/dimensions remain unchanged. / 插帧时保留空间放大，暂停独立 AI 超分并保留偏好；源录制与 PNG 帧率、尺寸不变。
+
 - Fix native AI black output, swapped channels and upside-down rows; retain render resources through GPU completion and wake retries without new frames. / 修复 AI 黑屏、红蓝交换与上下颠倒，保活渲染资源，并让静止输入也能重试。
 - Add optional 1080p processing target, separate enhancement-label visibility and hidden-by-default status. / 新增 1080p 处理目标，增强标签独立显示开关，状态默认隐藏。
 - Validate precise format priority, non-USB discovery fallback, output pixel formats after negotiation, and rollback a failed audio switch. / 核对精确格式优先级、非 USB 默认选择、协商后像素格式，并回滚失败的音频切换。

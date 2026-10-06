@@ -80,7 +80,7 @@ See [performance notes](docs/PERFORMANCE.md) for the pipeline, observed device s
 
 ## Honest upscaling
 
-MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. This version has no frame interpolation.
+MetalFX is a spatial upscaler that needs no multi-frame history, so it cannot create detail the capture signal never contained. The optional AI method uses Apple's on-device low-latency super-resolution model (macOS 26+); it reconstructs plausible detail per frame, but it is still not the capture's true resolution. Experimental interpolation is a separate, off-by-default preview feature; see the interpolation section below.
 
 - **AI super-resolution** uses Apple's VTLowLatencySuperResolutionScaler on macOS 26 or later, falling back to MetalFX/Lanczos while the model loads, when unsupported, or when no supported factor fits the processing-size cap. Check the actual engine in the info card.
 - **MetalFX** uses the system spatial upscaler on supported GPUs.
@@ -134,3 +134,7 @@ MIT. See [LICENSE](LICENSE).
 ### Native validation
 
 See [the local validation record](docs/LOCAL_VALIDATION.md) for the tested Mac, capture device, build commands and remaining gaps. The device chooses from its advertised formats and precise rates; switching audio reasserts the requested video format. Compatibility with every UVC card is not certified. A 4K HDMI input specification is not proof of 4K USB capture; processing targets do not change capture resolution.
+
+### Experimental frame interpolation
+
+Off by default on supported macOS 26+ hardware. Smooth/Clear tiers target 2× preview FPS and remain gated by actual display cadence and processing cost. MetalFX/Lanczos scaling remains available; standalone AI upscaling is suspended while interpolating. Capture/recording FPS is unchanged. See [dimension, latency, resource and validation boundaries](docs/FRAME_INTERPOLATION.md).

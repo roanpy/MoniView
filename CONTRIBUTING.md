@@ -69,3 +69,7 @@ open build/MoniView.app
 - `./Scripts/test-ai-gpu.sh`: SDK 26+ native GPU color/orientation/lifetime smoke; unsupported runtime is a skip. / 原生 GPU 色彩、方向与生命周期冒烟测试，不支持时明确跳过。
 
 See [LOCAL_VALIDATION.md](docs/LOCAL_VALIDATION.md) before claiming acceptance or performance improvements. / 声称验收或性能提升前，核对实际验证边界。
+
+Interpolation policy, GPU and native display fixtures are documented in [FRAME_INTERPOLATION.md](docs/FRAME_INTERPOLATION.md). Generated presentations and capture FPS have different meanings; do not equate a target multiplier with sustained FPS. / 插帧策略、GPU 与原生显示测试见该文档；实际生成呈现与采集帧率口径不同，目标倍率不能当作持续帧率。
+
+`MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60 ./Scripts/test-preview-interpolation-display.sh` requires an unlocked, visible 120 Hz display. It checks actual presented intervals and counts in a synthetic native window, not capture-card throughput or image quality. `MONIVIEW_TEST_PRESENTATION_FAILURE=1 MONIVIEW_TEST_CLEAR_INPUT=1` checks recovery after both callback loss and input clearing. / strict 120 测试需要解锁、可见的 120 Hz 显示器，检查合成原生窗口的真实呈现间隔与计数；故障变量覆盖回调失联及输入清空，不等于采集卡或画质验收。

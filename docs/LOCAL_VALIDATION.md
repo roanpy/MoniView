@@ -98,3 +98,41 @@ At the integrated revision, all five native scripts, debug/release builds, expli
 - [Apple: runtime super-resolution configuration](https://developer.apple.com/documentation/videotoolbox/vtlowlatencysuperresolutionscalerconfiguration)
 - [Apple: available video pixel formats](https://developer.apple.com/documentation/avfoundation/avcapturevideodataoutput/availablevideopixelformattypes)
 - [Apple: machine-learning video effects](https://developer.apple.com/videos/play/wwdc2025/300/)
+
+
+## Experimental interpolation follow-up — 2026-10-06 / 实验性插帧补充
+
+Hardware remained Apple M5 Max; macOS 27.0.1 (26A434), Apple Swift 6.2.4, macOS SDK 26.2. The built-in display was configured to ProMotion and the native fixture reported a current 120 Hz limit. / 同一 M5 Max，内屏设为 ProMotion，测试时当前上限为 120 Hz。
+
+### Measured native window / 原生窗口测量
+
+A 39-second run of `MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60 ./Scripts/test-preview-interpolation-display.sh` used synthetic SDR Rec.709 420v 1920×1080 input, a 960×540-point native window with 1920×1080 drawable, Smooth mode, no extra sharpening and original output target. The 30 one-second acceptance windows all had at least 57 distinct source and 57 generated presentations. Actual presented spacing averaged **8.396 ms**, P95 **8.333 ms**. Drawable acquisition P95 was **0.071 ms**, maximum **2.726 ms**. Processing adapted down to **640×360**; source endpoints stayed 1920×1080. This is a narrower result than native-1080p interpolation or real UVC game acceptance.
+
+39 秒测试使用合成 SDR 输入及真实窗口；30 个一秒验收窗口均达到每秒至少 57 张不同原帧及 57 张实际生成呈现。呈现间隔均值 **8.396 ms**、P95 **8.333 ms**；获取 drawable 的 P95 **0.071 ms**、最大 **2.726 ms**。中间帧自适应降为 **640×360**，原帧仍为 1080p，不能说成原生 1080p 插帧或真实 UVC 游戏验收。
+
+Earlier strict runs failed the cadence checks; a 20%-per-slot margin repeatedly triggered a two-second cooldown despite inexpensive native endpoints. The revised policy keeps a 10% single-slot deadline margin and 20% for the entire midpoint-plus-endpoint cycle. The same strict check then passed. Timing-scope changes alone are not an end-to-end latency improvement. Subsequent review fixes preserve a successful midpoint's endpoint during soft overload and run callback-loss recovery before the latest-input guard; input-cleared fault recovery passed. The above strict run preceded those two boundary fixes; its numbers are not an assertion of a second strict run at the final commit.
+
+早期 strict 测试失败；原帧较轻时，单槽固定 20% 余量反复触发冷却。改为单槽保留 10%、完整配对周期保留 20% 后，原验收条件通过。统计口径调整不等于总延迟改善。随后审查修复软超预算保留配对端点、无输入时仍检查回调失联；清空输入的故障测试通过。上述 strict 数字产生于这两项边界修复之前，不伪称最终提交已再跑一轮 strict。
+
+### Executed regression / 实际回归
+
+- Pure policy: **177 checks passed**, including fractional cadence, portrait/even sizing, adaptive limits and pair-cost rejection.
+- Capture compatibility/history, audio FIFO and configuration revision tests passed.
+- All **11** native writer fault scenarios passed again, including forced not-ready, sustained overflow, tail draining, replacement protection and commit failure.
+- Native interpolation GPU fixture passed all **10** color/range/metadata/orientation paths and warmup cancellation/retained-resource checks under Metal API Validation.
+- Spatial scaler GPU fixture passed **20 alternating calls with exactly two resource entries**, plus pending-evicted-entry readback under Metal API Validation.
+- Native AI spatial fixture passed **three** color/orientation cycles under Metal API Validation.
+- Lost-presented-callback tests passed with input stopped and again with input cleared; old layers retire without recycling outstanding tokens.
+- Apple SDK debug/release and explicit non-AI debug/package builds passed; both localized strings linted successfully.
+
+原生窗口的普通 smoke（包含最小化／恢复）与 strict 120 分支不同；strict 分支不执行最小化／恢复，不能用其通过结果代替该项验收。
+
+### Remaining acceptance / 剩余验收
+
+The Mac locked during final bundle UI acceptance. The new bundle was observed waiting for camera authorization before lock. Real UVC 1080p60→120, final-commit strict rerun, 720p/physical 4K temporal inputs, combined 2K/4K/Match Display throughput, moving game artifacts, long-term thermal/memory behavior and cross-display refresh are not accepted by these results. Prior base-branch UVC/AI observations above remain base-version evidence. / 最终界面验收途中锁屏，新包此前在等摄像头授权；上述缺口不计通过，之前稳定版本的真机结果不能挪作新插帧版证明。
+
+The feature remains experimental and off by default. Source recording/PNG do not include generated temporal frames; independent AI spatial enhancement is suspended during interpolation while its preference is retained. Lowest interactive latency still means interpolation off. / 功能默认关闭、保持实验性；录制／PNG 不含生成时间帧，插帧时暂停独立 AI 超分并保留偏好，最低交互延迟仍应关闭插帧。
+
+### Follow-up deployment / 本轮部署
+
+The ordinary AI-capable arm64 development bundle **0.2.0 (10)** was installed in Applications after preserving the previous bundle. Strict codesign verification passed and the installed/packaged executable SHA-256 matched (`2ed671eaecdcc0530f350e2219e4b441438c224628a373ff3701a328363fef5e`). The Mac remained locked, so the installed bundle has not received final UI/UVC acceptance. / 普通 AI 版已备份后安装，签名和可执行文件哈希核对通过；锁屏限制下，安装后的最终界面与 UVC 验收仍未完成。这是本地开发部署，不是商店或公开 release。
