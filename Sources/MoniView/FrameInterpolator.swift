@@ -278,7 +278,12 @@ final class FrameInterpolator {
         guard let session, session.key == requested, previousTime.isNumeric, currentTime.isNumeric, currentTime > previousTime else { return nil }
         let width = session.key.width, height = session.key.height
         var buffers: [CVPixelBuffer] = []
-        if let previousBuffer, let currentBuffer,
+        #if MONIVIEW_FRAME_INTERPOLATOR_TESTING || MONIVIEW_PREVIEW_TESTING
+        let allowOriginalInputs = ProcessInfo.processInfo.environment["MONIVIEW_TEST_FORCE_INPUT_COPY"] != "1"
+        #else
+        let allowOriginalInputs = true
+        #endif
+        if allowOriginalInputs, let previousBuffer, let currentBuffer,
            CVPixelBufferGetWidth(previousBuffer) == width, CVPixelBufferGetHeight(previousBuffer) == height,
            CVPixelBufferGetWidth(currentBuffer) == width, CVPixelBufferGetHeight(currentBuffer) == height,
            isDirectInput(previousBuffer, image: previous), isDirectInput(currentBuffer, image: current),
