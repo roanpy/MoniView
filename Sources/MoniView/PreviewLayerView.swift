@@ -105,6 +105,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var retiringForPresentationFailure = false
     var onPresentationRecovery: (() -> Void)?
     private var lastPresentationTime = 0.0 // includes generated and native frames, across epochs
+    private var lastGeneratedPresentationTime = 0.0
     #if MONIVIEW_PREVIEW_TESTING
     var onPresentation: ((UInt64, Bool, Double) -> Void)?
     private(set) var peakOutstandingPresentations = 0
@@ -221,6 +222,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             frames.setInterpolationWorkingSize(nil)
             adaptiveLongEdge = nil; interpolationDimensions = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
+            lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
             cooldownUntil = failureCooldown; cooldownReason = failureReason; lastSourceSequence = nil; awaitingSourcePresentation = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
@@ -308,6 +310,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
+        lastUniqueSource = nil; lastGeneratedPresentationTime = 0
         pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
         duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
@@ -492,12 +495,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         var (buffer, sequence, receivedAt) = (initial.buffer, initial.sequence, initial.receivedAt)
         var sourcePTS = initial.pts
         var sourceIsUniqueContent = true
+        // Cleared when this frame's first-copy timing is unknown; it may still
+        // present natively, but must not become the next pair's timing reference.
+        var uniqueReferenceEligible = true
         let streamEpoch = initial.streamEpoch
         if streamEpoch != sourceStreamEpoch {
             sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
             adaptiveLongEdge = nil; interpolationDimensions = nil
             pendingSource = nil; presentedMidpoint = nil; lastSourceSequence = nil
-            lastUniqueSource = nil
+            lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
@@ -613,11 +619,30 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let displayFPS = min(observedDisplayFPS, Double(window.screen?.maximumFramesPerSecond ?? 60))
         // Measure true content cadence even before admission: 30 FPS games duplicated
         // into a 60 Hz signal should still admit 2x on 60 Hz displays.
-        if endpointPresentation == nil,
-           let cadencePair = frames.interpolationPair(sequence: sequence),
-           let isDuplicate = observeDuplicateCadence(previous: cadencePair.0, current: buffer,
-               sequence: sequence, previousSequence: cadencePair.1, streamEpoch: streamEpoch) {
-            sourceIsUniqueContent = !isDuplicate
+        if endpointPresentation == nil {
+            let cadencePair = frames.interpolationPair(sequence: sequence)
+            let isDuplicate = cadencePair.flatMap {
+                observeDuplicateCadence(previous: $0.0, current: buffer,
+                    sequence: sequence, previousSequence: $0.1, streamEpoch: streamEpoch)
+            }
+            // A duplicate of the newest capture is not necessarily a duplicate of the
+            // last displayed content: GPU work may have missed that content's first copy.
+            sourceIsUniqueContent = !(isDuplicate ?? false)
+            if settings.skipsExactDuplicateInterpolation, let previous = lastUniqueSource,
+               previous.streamEpoch == streamEpoch {
+                sourceIsUniqueContent = !isDuplicatePair(previous: previous.buffer, current: buffer,
+                    sequence: sequence, previousSequence: previous.sequence, streamEpoch: streamEpoch)
+                if isDuplicate == true && sourceIsUniqueContent, let cadencePair,
+                   cadencePair.2.isNumeric, CMTimeCompare(cadencePair.2, previous.pts) > 0,
+                   CMTimeCompare(cadencePair.2, sourcePTS) < 0 {
+                    sourcePTS = cadencePair.2 // Recover the first copy's original timestamp.
+                } else if cadencePair == nil && sourceIsUniqueContent {
+                    // The capture advanced after our snapshot. Present native content;
+                    // its first-copy PTS is unknown, so do not synthesize this pair.
+                    skipInterpolation = true
+                    uniqueReferenceEligible = false
+                }
+            }
         }
         let contentFPS = sourceFPS / pairBudgetMultiplier()
         frames.setMeasuredContentFPS(pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
@@ -625,7 +650,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
         // the display already holds the identical previous drawable. Skipping the whole
         // spatial pipeline here saves GPU for midpoint quality on the unique frames.
-        if interpolationRequested, admitted, !forced, !skipInterpolation, endpointPresentation == nil,
+        if interpolationRequested, admitted, !sourceIsUniqueContent, !forced, !skipInterpolation, endpointPresentation == nil,
            pendingSource == nil, CACurrentMediaTime() >= cooldownUntil,
            let duplicatePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == duplicatePair.1,
            isDuplicatePair(previous: duplicatePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch) {
@@ -633,7 +658,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             lastSourceSequence = sequence
             lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
             frames.setPreviewState("dedup")
-            frames.setInterpolationState("重复画面 · 跳过插帧")
+            if CACurrentMediaTime() - lastGeneratedPresentationTime > 0.25 {
+                frames.setInterpolationState("重复画面 · 跳过插帧")
+            }
             inFlight.signal()
             return
         }
@@ -651,6 +678,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     !isDuplicatePair(previous: pair.previousBuffer, current: buffer, sequence: sequence,
                         previousSequence: pair.previousSequence, streamEpoch: streamEpoch),
                     let interpolator = interpolationEngine {
+                #if MONIVIEW_PREVIEW_TESTING
+                trace("PAIR seq=\(sequence) previous=\(pair.previousSequence) ticks=\(pair.period * sourceFPS) contentFPS=\(contentFPS)")
+                #endif
                 if interpolationDimensions != dimensions {
                     interpolationDimensions = dimensions
                     midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
@@ -732,6 +762,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let workingHeight = Int((source.height * workingScale).rounded())
         var usedMetalFX = false
         var usedAI = false
+        var aiStatus = ""
+        if settings.upscaleMethod == .ai {
+            if interpolationRequested { aiStatus = "AI 超分暂停，关闭插帧后恢复" }
+            else if !settings.enhancementEnabled { aiStatus = "画质增强已关闭" }
+            else if workingScale <= 1.01 { aiStatus = "当前目标无需放大" }
+            else if #available(macOS 26.0, *),
+                    !AIUpscaler.hasSupportedScaleFactor(sourceWidth: Int(source.width.rounded()), sourceHeight: Int(source.height.rounded())) {
+                aiStatus = "系统 AI 超分不支持此输入尺寸，使用空间放大"
+            }
+            else { aiStatus = "当前尺寸无可用 AI 倍率；提高目标或关闭低延迟模式" }
+        }
         if settings.enhancementEnabled, workingScale > 1.01, settings.upscaleMethod == .ai, !interpolationRequested {
             let sourceWidth = Int(source.width.rounded())
             let sourceHeight = Int(source.height.rounded())
@@ -739,12 +780,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                let factor = AIUpscaler.scaleFactor(for: sourceWidth, sourceHeight: sourceHeight, requested: workingScale) {
                 // Session warmup happens off the draw path; frames fall back until the model is ready.
                 ai.prepare(sourceWidth: sourceWidth, sourceHeight: sourceHeight, factor: factor, colorSpace: colorSpace)
+                aiStatus = ai.preparationFailed ? "AI 超分加载失败，使用空间放大并重试" : "AI 超分准备中，暂用空间放大"
                 if ai.isReady, let scaled = ai.upscale(image, context: ciContext, command: command, colorSpace: colorSpace) {
                     image = scaled
                     usedAI = true
+                    aiStatus = "AI 超分运行中"
                 }
             } else { stopAIUpscaler() }
         } else { stopAIUpscaler() }
+        frames.setAIUpscaleStatus(aiStatus)
         if settings.enhancementEnabled, workingScale > 1.01, !usedAI {
             if settings.upscaleMethod != .lanczos, let scaled = upscaler?.upscale(image, width: workingWidth, height: workingHeight, context: ciContext, command: command, colorSpace: colorSpace) {
                 image = scaled; usedMetalFX = true
@@ -789,7 +833,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let period = activePairPeriod > 0 ? activePairPeriod / 2 : (sourceFPS > 0 ? 0.5 / sourceFPS : 0)
         let sourceBufferForPresentation = buffer
         let sourcePTSForPresentation = sourcePTS
-        let sourceWasUniqueForPresentation = sourceIsUniqueContent
+        let sourceWasUniqueForPresentation = sourceIsUniqueContent && uniqueReferenceEligible
         #if MONIVIEW_PREVIEW_TESTING
         let suppressPresentation = suppressPresentedCallbacks
         #endif
@@ -815,14 +859,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 #endif
                 if self.awaitingSourcePresentation?.sequence == presentedSequence && !wasGenerated { self.awaitingSourcePresentation = nil }
                 guard self.presentationEpoch == epoch else { self.requestRenderIfStateChanged(); return }
-                if !wasGenerated, sourceWasUniqueForPresentation, sourcePTSForPresentation.isNumeric,
-                   self.sourceStreamEpoch == streamEpoch,
-                   self.lastUniqueSource.map({ $0.streamEpoch < streamEpoch ||
-                       ($0.streamEpoch == streamEpoch && $0.sequence < presentedSequence) }) ?? true {
-                    self.lastUniqueSource = UniqueSource(buffer: sourceBufferForPresentation,
-                        sequence: presentedSequence, streamEpoch: streamEpoch, pts: sourcePTSForPresentation)
+                if wasGenerated {
+                    self.lastGeneratedPresentationTime = time
+                    self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time)
                 }
-                if wasGenerated { self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time) }
                 else {
                     if wasEndpoint, let midpoint = self.presentedMidpoint,
                        midpoint.sequence == presentedSequence {
@@ -867,7 +907,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let shouldMeasure = !generatedMidpoint && frameSequence != lastMeasuredSequence
         let wasMidpoint = generatedMidpoint
         let wasCalibration = calibratedMidpoint
-        let measuredSlot = activePairPeriod > 0 ? activePairPeriod / 2 : (sourceFPS > 0 ? 0.5 / sourceFPS : 0)
+        // Native fallbacks must not overwrite the content-pair budget with the faster
+        // capture slot (30-in-60 otherwise oscillates between 30 and 15 ms budgets).
+        let measuredSlot = activePairPeriod > 0 ? activePairPeriod / 2 : (contentFPS > 0 ? 0.5 / contentFPS : 0)
         let measuredBudgetSlot = measuredSlot
         let expectedSettings = settings
         let measuredDimensions = interpolationDimensions
@@ -905,6 +947,16 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 if succeeded { self.outstandingPresentations[token]?.gpuCompleted = true }
                 if succeeded && shouldMeasure { self.lastMeasuredSequence = frameSequence }
                 if succeeded && !wasMidpoint && self.presentationEpoch == epoch { self.lastSourceSequence = frameSequence }
+                if succeeded && !wasMidpoint && self.presentationEpoch == epoch,
+                   self.sourceStreamEpoch == streamEpoch,
+                   sourceWasUniqueForPresentation, sourcePTSForPresentation.isNumeric,
+                   self.lastUniqueSource.map({ $0.sequence < frameSequence }) ?? true {
+                    // The ordered endpoint is submitted before another pair can encode.
+                    // A delayed presentation callback must not force the next pair to
+                    // use an older reference and discard every second unique frame.
+                    self.lastUniqueSource = UniqueSource(buffer: sourceBufferForPresentation,
+                        sequence: frameSequence, streamEpoch: streamEpoch, pts: sourcePTSForPresentation)
+                }
                 if self.presentationEpoch == epoch && self.settings == expectedSettings && interpolationRequested {
                     // Model cold-start commands are measured and shown, but two hidden
                     // native-only warmups are separate from the steady-state P95 budget.
