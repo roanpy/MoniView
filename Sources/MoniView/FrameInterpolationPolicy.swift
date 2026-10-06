@@ -85,9 +85,15 @@ enum FrameInterpolationPolicy {
         // Higher input cadence halves the useful inference budget. A smaller working
         // frame keeps Smooth inexpensive; runtime measurements still gate admission.
         if mode == .efficient, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 960) }
-        // Flow-blend analysis is far cheaper per pixel than the ML processor; above 40 FPS
-        // it still halves the slot, so hold the working frame at the measured 720p rung.
-        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 1280) }
+        // Flow-blend analysis is far cheaper per pixel than the ML processor. Above 40 FPS
+        // the slot halves, so larger sources step down to the measured 720p rung; a source
+        // that already fits the tier ceiling is kept intact, because the Core Image rescale
+        // needed to shrink it costs more than the smaller search saves (measured on
+        // 1080p: native 0.29 ms vs 1280x720 0.48 ms GPU p95, and the native midpoint is
+        // sharper as well).
+        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40, max(width, height) > 1920 {
+            cap = min(cap, 1280)
+        }
         if let maximumLongEdge { guard maximumLongEdge >= 2 else { return nil }; cap = min(cap, maximumLongEdge) }
         let scale = min(1, Double(cap) / Double(max(width, height)))
         let targetWidth = Int((Double(width) * scale / 2).rounded(.down)) * 2

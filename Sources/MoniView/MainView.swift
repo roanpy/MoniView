@@ -512,11 +512,54 @@ struct MainView: View {
     private var clarityPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             panelHeading("画质增强", subtitle: "实时预览处理", icon: "sparkles.tv")
+            // Presets first: picking one is the whole flow for most sessions.
+            HStack(spacing: 7) {
+                ForEach(CaptureManager.qualityPresets, id: \.name) { preset in
+                    qualityPresetButton(preset.name)
+                }
+            }
+            .padding(4)
+            .background(Color.black.opacity(0.2), in: Capsule())
+            Text(L10n.text(capture.selectedQualityPreset == nil
+                ? "已自定义：下列选项可继续调整。"
+                : "选预设即可，下面可继续微调。"))
+                .font(.system(size: 10))
+                .foregroundStyle(Color(hex: 0x98908a))
+            VStack(alignment: .leading, spacing: 9) {
+                settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
+                settingsToggle("插帧加倍", isOn: Binding(
+                    get: { capture.picture.frameInterpolation != .off },
+                    set: { capture.picture.setInterpolationEnabled($0) }))
+                    .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported(capture.picture.preferredInterpolationQuality ?? .balanced))
+                    .help(L10n.text("在两张原帧之间生成一张中间帧，目标 2×。需要屏幕刷新率至少是内容帧率的两倍。"))
+                // Everything set once and left alone lives behind one disclosure, so the
+                // panel opens at a predictable height instead of a long column.
+                qualityAdvancedSettings
+                if capture.picture.frameInterpolation != .off {
+                    interpolationReadout
+                }
+                if capture.picture.frameInterpolation != .off || !FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation) {
+                    Text(L10n.text(FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation) ? capture.interpolationStatus : "插帧不可用"))
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if recordingFreezesColor {
+                    Text("本次录制使用开始时的设置")
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+                }
+            }
+            .padding(12)
+            .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    /// Advanced enhancement settings. Collapsed by default; no control is removed, so
+    /// every previous option stays reachable from this same panel.
+    private var qualityAdvancedSettings: some View {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: 9) {
                 settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
                     .help(L10n.text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。"))
-                settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
-                Divider().overlay(Color.white.opacity(0.06))
                 labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
                 labeledPicker("放大方式", selection: Binding(
                     get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
@@ -535,73 +578,61 @@ struct MainView: View {
                         .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                 }
                 Divider().overlay(Color.white.opacity(0.06))
-                labeledPicker("插帧倍率", selection: Binding(
-                    get: { capture.picture.frameInterpolation != .off },
-                    set: { capture.picture.setInterpolationEnabled($0) }),
-                    choices: [PickerChoice(value: false, title: L10n.text("关闭")), PickerChoice(value: true, title: "2×")])
-                    .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported)
-                    .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。"))
-                if capture.picture.frameInterpolation != .off {
-                    labeledPicker("插帧质量", selection: Binding(
-                        get: { capture.picture.frameInterpolation },
-                        set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
-                        choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
-                    DisclosureGroup {
-                        VStack(alignment: .leading, spacing: 8) {
-                            settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
-                                .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
-                            settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
-                                .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
-                        }.padding(.top, 6)
-                    } label: {
-                        Text(L10n.text("更多选项"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color(hex: 0xd9cfc6))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .padding(.vertical, 5)
-                    }
-                    HStack {
-                        if let contentFPS = capture.detectedContentFPS {
-                            Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
-                                             Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
-                        } else if let sourceFPS = capture.frames.sourceFrameRate(), let nominal = FrameInterpolationPolicy.nominalInputFPS(sourceFPS) {
-                            Text(L10n.format("目标 %.0f FPS · 屏幕 %.0f Hz", nominal * 2, capture.displayMaximumFPS))
-                        } else {
-                            Text(L10n.format("屏幕 %.0f Hz", capture.displayMaximumFPS))
-                        }
-                        Spacer(minLength: 4)
-                        Button {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
-                        } label: {
-                            Image(systemName: "display")
-                                .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.link).help("显示器设置…")
-                    }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
-                    Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color(hex: 0xe9a24d))
-                    if capture.interpolationBudgetMS > 0 {
-                        Text(L10n.format("插帧预算 %.0f%% · %.1f ms", capture.interpolationCostMS / capture.interpolationBudgetMS * 100, capture.interpolationCostMS))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS ? Color.orange : Color(hex: 0x98908a))
-                            .help(L10n.text("处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。"))
-                    }
-                }
-                if capture.picture.frameInterpolation != .off || !FrameInterpolatorSupport.isSupported {
-                    Text(L10n.text(FrameInterpolatorSupport.isSupported ? capture.interpolationStatus : "插帧不可用"))
-                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if recordingFreezesColor {
-                    Text("本次录制使用开始时的设置")
-                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                }
+                labeledPicker("插帧质量", selection: Binding(
+                    get: { capture.picture.frameInterpolation },
+                    set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
+                    choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
+                    .disabled(!capture.picture.enhancementEnabled)
+                    .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
+                settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
+                    .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
+                settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
+                    .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
             }
-            .padding(12)
-            .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.top, 6)
+        } label: {
+            Text(L10n.text("画质与插帧设置"))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(hex: 0xd9cfc6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(.vertical, 5)
+        }
+    }
+
+    /// Live interpolation readout, shown only while interpolation is on.
+    private var interpolationReadout: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().overlay(Color.white.opacity(0.06))
+            HStack {
+                if let contentFPS = capture.detectedContentFPS {
+                    Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
+                                     Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+                } else {
+                    // The capture signal rate is not the content rate: a 30 FPS game in a
+                    // 60 Hz signal can only reach 60, so an undetected cadence must not
+                    // claim the signal's doubled rate as the target.
+                    Text(L10n.format("目标取决于内容帧率 · 屏幕 %.0f Hz", capture.displayMaximumFPS))
+                }
+                Spacer(minLength: 4)
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
+                } label: {
+                    Image(systemName: "display")
+                        .frame(width: iconButtonHitTarget, height: iconButtonHitTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.link).help("显示器设置…")
+            }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Color(hex: 0x98908a))
+            Text(L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color(hex: 0xe9a24d))
+            if capture.interpolationBudgetMS > 0 {
+                Text(L10n.format("插帧预算 %.0f%% · %.1f ms", capture.interpolationCostMS / capture.interpolationBudgetMS * 100, capture.interpolationCostMS))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(capture.interpolationCostMS > capture.interpolationBudgetMS ? Color.orange : Color(hex: 0x98908a))
+                    .help(L10n.text("处理预算不是整机 GPU 占用率；详细尺寸与呈现统计见画面信息。"))
+            }
         }
     }
 
@@ -903,6 +934,25 @@ struct MainView: View {
         let selected = capture.selectedColorPreset == title
         return Button {
             capture.applyPreset(title)
+        } label: {
+            Text(L10n.text(title))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(selected ? Color(hex: 0x2d1b0b) : Color(hex: 0xf2e9df))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selected ? Color(hex: 0xf2a340) : Color.white.opacity(0.055), in: Capsule())
+                .overlay(Capsule().stroke(selected ? Color(hex: 0xffc36a) : Color.clear, lineWidth: 0.7))
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(L10n.text(selected ? "已选中" : "未选中"))
+    }
+
+    /// Quality presets use the same visual language as the colour presets, so the
+    /// panel reads as "pick a starting point, then fine-tune if you want".
+    private func qualityPresetButton(_ title: String) -> some View {
+        let selected = capture.selectedQualityPreset == title
+        return Button {
+            capture.applyQualityPreset(title)
         } label: {
             Text(L10n.text(title))
                 .font(.system(size: 11, weight: .semibold))
