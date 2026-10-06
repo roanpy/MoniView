@@ -159,7 +159,7 @@ struct MainView: View {
             Text(actualBufferResolution).fixedSize()
             Text("·")
             Text("\(capture.measuredFPS) FPS").fixedSize()
-            if capture.picture.enhancementEnabled {
+            if capture.picture.enhancementEnabled && capture.showsEngineStatus {
                 Text("·")
                 Text(enhancementSummary)
                     .fixedSize()
@@ -575,6 +575,7 @@ struct MainView: View {
                 settingsToggle("录制预览色彩和锐化", isOn: $capture.recordIncludesPicture)
                     .disabled(capture.isRecording)
                 settingsToggle("显示设备状态", isOn: $capture.showsStatusBar)
+                settingsToggle("显示增强状态", isOn: $capture.showsEngineStatus)
             }
             .padding(.horizontal, 12)
             HStack(spacing: 8) {

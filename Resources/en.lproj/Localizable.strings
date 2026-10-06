@@ -100,6 +100,7 @@
 "保持比例，完整显示画面。" = "Keeps the aspect ratio and shows the whole image.";
 "录制预览色彩和锐化" = "Record color and sharpening";
 "显示设备状态" = "Show device status";
+"显示增强状态" = "Show enhancement status";
 "分辨率和帧率受采集卡硬件限制。" = "Resolution and frame rate are limited by the capture device.";
 
 /* Audio panel */

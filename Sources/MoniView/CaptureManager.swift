@@ -181,7 +181,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         didSet { schedulePicturePersistence() }
     }
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
-    @Published var showsStatusBar = true { didSet { UserDefaults.standard.set(showsStatusBar, forKey: "view.statusBar") } }
+    @Published var showsStatusBar = false { didSet { UserDefaults.standard.set(showsStatusBar, forKey: "view.statusBar") } }
+    @Published var showsEngineStatus = false { didSet { UserDefaults.standard.set(showsEngineStatus, forKey: "view.engineStatus") } }
     private var applyingPreset = false
     private var picturePersistWork: DispatchWorkItem?
     @Published private(set) var deviceName = "未连接"
@@ -256,6 +257,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         if UserDefaults.standard.object(forKey: "record.picture") != nil { recordIncludesPicture = UserDefaults.standard.bool(forKey: "record.picture") }
         if UserDefaults.standard.object(forKey: "view.statusBar") != nil { showsStatusBar = UserDefaults.standard.bool(forKey: "view.statusBar") }
+        if UserDefaults.standard.object(forKey: "view.engineStatus") != nil { showsEngineStatus = UserDefaults.standard.bool(forKey: "view.engineStatus") }
         if let raw = UserDefaults.standard.string(forKey: "view.aspect"), let saved = AspectMode(rawValue: raw) { aspectMode = saved }
         if UserDefaults.standard.object(forKey: "audio.volume") != nil { audioVolume = UserDefaults.standard.float(forKey: "audio.volume") }
         videoOutput.alwaysDiscardsLateVideoFrames = true
