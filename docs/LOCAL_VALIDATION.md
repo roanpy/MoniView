@@ -162,3 +162,18 @@ The optimized build 12 opened but waited for camera authorization after its ad-h
 ### Optimized deployment / 优化版部署
 
 The same production code was packaged as the ordinary AI-capable arm64 **0.2.0 (13)** and installed in Applications after backing up build 10. Strict signature verification passed; packaged and installed executable SHA-256 matched (`cc331ce9f1c631444b6c99e04dc377eaff0e583d471d934cf864f971b7fd3e9b`). Because the Mac remained locked, the new installation has not been launched or accepted on real UVC. The last UI benchmark selections (Smooth, original target, Natural and strength 0) have not been restored through the UI. / 普通 AI 版 build 13 已备份旧包后安装，签名与哈希一致。锁屏下未启动或完成真实采集验收；上次界面测试的流畅、原始目标、自然和强度 0 设置还未通过界面恢复。
+
+## Joint temporal/spatial API experiment — 2026-10-06 / 联合时间与空间接口实验
+
+An isolated fixture uses the public `spatialScaleFactor: 2` configuration and phase 0.5, fresh immutable 420v Rec.709 inputs with continuous PTS, and separate scaled-current/midpoint destinations. Processor and configuration remain alive through completion and `endSession()`. It does not change the deployed renderer.
+
+隔离夹具采用公开 2× 空间配置和中点相位，逐帧更新不可变输入、连续 PTS，保活处理器与配置，分别读回放大原帧和中间帧；部署版不使用这条路径。
+
+| Executed command / 已执行命令 | Result / 结果 |
+| --- | --- |
+| `./Scripts/test-joint-interpolation-gpu.sh --compile-only` | SDK 26.2 compilation passed; no GPU claim. / 编译通过。 |
+| `./Scripts/test-joint-interpolation-gpu.sh --gpu` | Failed at 640×360→1280×720 readback: both destination planes were zero, while input colors/positions were correct. Earlier repeated-input variant also lacked a valid GPU timestamp; no throughput numbers accepted. / 两张输出为空，不能计通过。 |
+| `MTL_DEBUG_LAYER=1 MONIVIEW_JOINT_CASES=960 ./Scripts/test-joint-interpolation-gpu.sh --async-diagnostic` | Failed: `VTFrameProcessorErrorDomain -19730`, “Processor is not initialized”, despite successful session startup. Repeating with configuration strongly retained through completion did not fix it. / 保活配置后仍未初始化。 |
+| `MTL_DEBUG_LAYER=1 MONIVIEW_JOINT_CASES=1920 ./Scripts/test-joint-interpolation-gpu.sh --async-diagnostic` | Same -19730 at 1920×1080→3840×2160; no generated output or GPU/presentation timing accepted. / 4K 输出实验同样失败。 |
+
+The configuration object reports spatial factor 2 and supported 420v, but the above processing did not succeed on this Mac/OS/SDK. The root cause remains unresolved; these observations do not prove an Apple bug, a hardware limitation or universal lack of support. They also do not invalidate the separately passing temporal-only fixture. The joint path is **not enabled in production**. / 根因未解决，不据此认定 Apple 缺陷、硬件限制或所有设备都不支持；不影响另行通过的纯插帧测试。联合路径未启用。
