@@ -29,7 +29,9 @@ preview.settings.enhancementEnabled = true
 preview.settings.enhancementStrength = 0
 preview.settings.upscaleTarget = UpscaleTarget(rawValue: environment["MONIVIEW_TEST_TARGET"] ?? "") ?? .native
 preview.settings.lowLatency = environment["MONIVIEW_TEST_UNCAPPED"] != "1"
-preview.settings.interpolationMode = environment["MONIVIEW_TEST_QUALITY"] == "1" ? .quality : .efficient
+preview.settings.interpolationMode = environment["MONIVIEW_TEST_QUALITY"] == "1" ? .quality : (environment["MONIVIEW_TEST_BALANCED"] == "1" ? .balanced : .efficient)
+preview.settings.forceFrameInterpolation = environment["MONIVIEW_TEST_FORCE"] == "1"
+preview.settings.skipsExactDuplicateInterpolation = environment["MONIVIEW_TEST_DUPLICATES"] == "1"
 var events: [(sequence: UInt64, generated: Bool, time: Double)] = []
 preview.onPresentation = { events.append(($0, $1, $2)) }
 var recovered = false
@@ -37,6 +39,10 @@ preview.onPresentationRecovery = { recovered = true }
 preview.suppressPresentedCallbacks = fault
 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 540), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 window.title = "MoniView — synthetic interpolation validation"
+// Keep the validation surface visible when the production app is in another
+// fullscreen Space; otherwise occlusion zeros are not throughput evidence.
+window.level = .floating
+window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 window.contentView = preview
 window.center(); window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
@@ -61,7 +67,8 @@ input.setEventHandler {
     }
     let y = CVPixelBufferGetBaseAddressOfPlane(buffer,0)!.assumingMemoryBound(to: UInt8.self)
     let row = CVPixelBufferGetBytesPerRowOfPlane(buffer,0)
-    let offset = Int(sequence * 8) % (width - 160)
+    let motionSequence = environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? sequence / 2 : sequence
+    let offset = Int(motionSequence * 8) % (width - 160)
     for h in (height / 3)..<(height * 2 / 3) { memset(y + h * row + offset, 220, 160) }
     CVPixelBufferUnlockBaseAddress(buffer, [])
     frames.put(buffer, pts: CMTime(value: sequence, timescale: CMTimeScale(fps)))
@@ -77,7 +84,7 @@ if fault {
         preview.requestRender()
     }
 }
-var tick = 0, total = 0, steady = 0, eventOffset = 0, strictWindows = 0
+var tick = 0, total = 0, steady = 0, eventOffset = 0, strictWindows = 0, totalDuplicateSkips = 0
 var stableEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
 var countedSources = Set<UInt64>()
 let stats = DispatchSource.makeTimerSource(queue: .main)
@@ -86,9 +93,14 @@ stats.setEventHandler {
     tick += 1
     let counts = frames.statistics(), presented = frames.presentationStatistics(), cost = frames.interpolationCost()
     let gen = presented.generated
+    let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if environment["MONIVIEW_TEST_QUALITY"] == "1", let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!
         precondition(work == "\(expected.width)×\(expected.height)", "Clear silently reduced its working resolution")
+    }
+    if environment["MONIVIEW_TEST_BALANCED"] == "1", let work = frames.currentInterpolationWorkingSize() {
+        let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .balanced)!
+        precondition(work == "\(expected.width)×\(expected.height)", "Medium silently reduced its working resolution")
     }
     let newEvents = events.dropFirst(eventOffset); eventOffset = events.count
     let sourcePresentations = newEvents.filter { !$0.generated && countedSources.insert($0.sequence).inserted }.count
@@ -112,6 +124,7 @@ stats.setEventHandler {
     if tick == 14 && !require120 { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil) }
     if tick == stopAt { preview.settings.frameInterpolation = .off; preview.configureInterpolation(); preview.requestRender() }
     if tick == finishAt {
+        if environment["MONIVIEW_TEST_DUPLICATES"] == "1" { precondition(totalDuplicateSkips > 0, "identical pairs were not skipped") }
         precondition(gen == 0 && !recovered, "disable/recovery failure")
         precondition(preview.peakOutstandingPresentations <= presentationLimit, "unpresented drawable bound")
         let sorted = events.sorted { $0.time < $1.time }

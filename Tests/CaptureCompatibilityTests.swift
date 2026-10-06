@@ -95,8 +95,33 @@ struct CaptureCompatibilityTests {
         precondition(abs(rate - expected) < 0.001, "\(context) FPS was \(rate), expected \(expected)")
     }
 
+    private static func testPresentationIntervalsAndDuplicateSkips() {
+        let frames = LatestVideoFrame()
+        frames.put(pixelBuffer(), pts: .zero)
+        let snapshot = frames.latestSnapshot()!
+        frames.markPresentedSource(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch, presentedTime: 1)
+        frames.markGenerated(streamEpoch: snapshot.streamEpoch, presentedTime: 1 + 1/120.0)
+        frames.markPresentedSource(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch, presentedTime: 1.1)
+        precondition(abs(frames.presentationP95() - 1000/120.0) < 0.001, "same-source redraw must not inflate intervals")
+        frames.markDuplicateSkipped(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch)
+        frames.markDuplicateSkipped(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch)
+        precondition(frames.takeDuplicateSkips() == 1 && frames.takeDuplicateSkips() == 0, "duplicate skip count deduplicates repeated draws")
+        frames.setPreviewState("hidden")
+        precondition(frames.presentationP95() == 0, "hidden preview resets presentation interval baseline")
+        frames.clear()
+        frames.markDuplicateSkipped(sequence: snapshot.sequence + 1, streamEpoch: snapshot.streamEpoch)
+        precondition(frames.takeDuplicateSkips() == 0, "retired stream skip ignored")
+    }
+
     private static func testOldPictureSettingsJSON() {
+        var newSettings = PictureSettings()
+        newSettings.frameInterpolation = .balanced
+        newSettings.preferredInterpolationQuality = .balanced
+        newSettings.forceFrameInterpolation = true
+        let restored = try! JSONDecoder().decode(PictureSettings.self, from: JSONEncoder().encode(newSettings))
+        precondition(restored == newSettings && restored.forceFrameInterpolation, "new force/quality settings persist")
         // This is the persisted shape before interpolationMode was added.
+        precondition(!PictureSettings().forceFrameInterpolation, "force defaults off")
         let oldJSON = #"{"brightness":0.12,"contrast":1.08,"saturation":0.91,"sharpness":0.2,"vibrance":0.15,"lowLatency":true,"enhancementEnabled":true,"enhancementStrength":0.35,"upscaleTarget":"原始","upscaleMethod":"MetalFX","highlightRecovery":0.05}"#
         let decoded: PictureSettings
         do {
@@ -104,6 +129,11 @@ struct CaptureCompatibilityTests {
         } catch {
             preconditionFailure("legacy PictureSettings JSON did not decode: \(error)")
         }
+        precondition(!decoded.forceFrameInterpolation && decoded.preferredInterpolationQuality == nil, "legacy additions default to off/unset")
+        var prior = try! JSONSerialization.jsonObject(with: Data(oldJSON.utf8)) as! [String: Any]
+        prior["interpolationMode"] = FrameInterpolationMode.quality.rawValue
+        let priorDecoded = try! JSONDecoder().decode(PictureSettings.self, from: JSONSerialization.data(withJSONObject: prior))
+        precondition(priorDecoded.frameInterpolation == .quality && !priorDecoded.forceFrameInterpolation && priorDecoded.preferredInterpolationQuality == nil, "previous interpolation settings preserve quality with override off")
         precondition(decoded.interpolationMode == nil, "missing persisted interpolation mode should stay unset")
         precondition(decoded.frameInterpolation == .off, "missing persisted interpolation mode should default to off")
         precondition(decoded.brightness == 0.12 && decoded.upscaleTarget == .native && decoded.upscaleMethod == .metalFX,
@@ -211,6 +241,7 @@ struct CaptureCompatibilityTests {
     }
 
     static func main() {
+        testPresentationIntervalsAndDuplicateSkips()
         testOldPictureSettingsJSON()
         testInterpolationHistory()
         testStableSourceFrameRatesAndResets()

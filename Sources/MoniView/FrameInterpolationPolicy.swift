@@ -3,6 +3,7 @@ import Foundation
 enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
     case off = "关闭"
     case efficient = "流畅 · 720p"
+    case balanced = "均衡 · 720p"
     case quality = "清晰 · 1080p"
 
     var id: String { rawValue }
@@ -10,14 +11,15 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .off: return rawValue
-        case .efficient: return "流畅 · 自适应"
-        case .quality: return "清晰 · 最高1080p"
+        case .efficient: return "低 · 自适应"
+        case .balanced: return "中 · 最高720p"
+        case .quality: return "高 · 最高1080p"
         }
     }
     var longEdgeCap: Int? {
         switch self {
         case .off: return nil
-        case .efficient: return 1280
+        case .efficient, .balanced: return 1280
         case .quality: return 1920
         }
     }
@@ -41,6 +43,21 @@ enum FrameInterpolationPolicy {
               midpoint >= 0, source >= 0, slot > 0 else { return false }
         return midpoint <= slot * midpointBudgetFraction && source <= slot * budgetFraction &&
             midpoint + source <= 2 * slot * pairBudgetFraction
+    }
+
+    /// Force ignores measured budget only. A finite measurement and a feasible
+    /// presentation deadline are still required; display/input eligibility is separate.
+    static func allowsMeasuredPair(midpoint: Double, source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
+        guard deadlineFits, midpoint.isFinite, source.isFinite, slot.isFinite,
+              midpoint >= 0, source >= 0, slot > 0 else { return false }
+        return force || costsFit(midpoint: midpoint, source: source, slot: slot)
+    }
+
+    /// Force can retry a budget failure immediately, but cannot clear an active
+    /// GPU failure cooldown. A real mode/session change has its own reset lifecycle.
+    static func preserveFailureCooldown(forceChanged: Bool, modeChanged: Bool, failureActive: Bool, until: Double, now: Double) -> Double {
+        guard forceChanged, !modeChanged, failureActive, until.isFinite, now.isFinite, until > now else { return 0 }
+        return until
     }
 
     struct Dimensions: Equatable {

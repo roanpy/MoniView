@@ -87,6 +87,18 @@ struct PictureSettings: Equatable, Codable {
     var upscaleMethod: UpscaleMethod = .metalFX
     // Optional keeps old persisted settings decodable; absence means off.
     var interpolationMode: FrameInterpolationMode?
+    var preferredInterpolationQuality: FrameInterpolationMode?
+    // Optional additions preserve previously saved settings.
+    var interpolationForce: Bool?
+    var interpolationSkipDuplicates: Bool?
+    var skipsExactDuplicateInterpolation: Bool {
+        get { interpolationSkipDuplicates ?? false }
+        set { interpolationSkipDuplicates = newValue }
+    }
+    var forceFrameInterpolation: Bool {
+        get { interpolationForce ?? false }
+        set { interpolationForce = newValue }
+    }
     var frameInterpolation: FrameInterpolationMode {
         get { interpolationMode ?? .off }
         set { interpolationMode = newValue == .off ? nil : newValue }
@@ -108,6 +120,34 @@ final class LatestVideoFrame {
     private var previous: (CVPixelBuffer, UInt64, CMTime)?
     private var generated = 0
     private var presentedSource = 0
+    private var skippedDuplicatePairs = 0
+    private var lastSkippedDuplicate: (sequence: UInt64, epoch: UInt64)?
+    private var lastPresentationTime: Double?
+    private var presentationIntervals: [Double] = []
+    func markDuplicateSkipped(sequence: UInt64, streamEpoch: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        guard streamEpoch == self.streamEpoch else { return }
+        if let lastSkippedDuplicate, lastSkippedDuplicate.epoch == streamEpoch, lastSkippedDuplicate.sequence >= sequence { return }
+        lastSkippedDuplicate = (sequence, streamEpoch); skippedDuplicatePairs += 1
+    }
+    func takeDuplicateSkips() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let count = skippedDuplicatePairs; skippedDuplicatePairs = 0; return count
+    }
+    private func recordPresentationTime(_ time: Double?) {
+        guard let time, time.isFinite, time > 0 else { return }
+        if let previous = lastPresentationTime, time > previous {
+            presentationIntervals.append((time - previous) * 1000)
+            presentationIntervals = Array(presentationIntervals.suffix(120))
+        }
+        if time > (lastPresentationTime ?? 0) { lastPresentationTime = time }
+    }
+    func presentationP95() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        let sorted = presentationIntervals.sorted()
+        guard !sorted.isEmpty else { return 0 }
+        return sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * 0.95))]
+    }
     private var lastPresentedSource: (sequence: UInt64, streamEpoch: UInt64)?
     private var interpolationState = "关闭"
     private var interpolationCostMS = 0.0
@@ -120,6 +160,13 @@ final class LatestVideoFrame {
     private var level: Float = 0
     private var receivedAt: UInt64 = 0
     private var processingMilliseconds = 0.0
+    private var previewState = "starting"
+    func setPreviewState(_ state: String) {
+        lock.lock()
+        if state == "hidden", previewState != state { lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true) }
+        previewState = state; lock.unlock()
+    }
+    func currentPreviewState() -> String { lock.lock(); defer { lock.unlock() }; return previewState }
     private var engine = "原始"
     private var enhancedSize: String?
     private var timings: [Double] = []
@@ -135,6 +182,7 @@ final class LatestVideoFrame {
         } else {
             sourceIntervals.removeAll(keepingCapacity: true)
             streamEpoch &+= 1
+            lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
         }
         previous = historyEnabled && sameSize ? buffer.map { ($0, sequence, self.pts) } : nil
         self.pts = pts
@@ -194,12 +242,12 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }; return displayRates
     }
     func currentInterpolationState() -> String { lock.lock(); defer { lock.unlock() }; return interpolationState }
-    func markGenerated(streamEpoch: UInt64) {
+    func markGenerated(streamEpoch: UInt64, presentedTime: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard streamEpoch == self.streamEpoch else { return }
-        generated += 1
+        generated += 1; recordPresentationTime(presentedTime)
     }
-    func markPresentedSource(sequence: UInt64, streamEpoch: UInt64) {
+    func markPresentedSource(sequence: UInt64, streamEpoch: UInt64, presentedTime: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard streamEpoch == self.streamEpoch else { return }
         if let lastPresentedSource {
@@ -207,7 +255,7 @@ final class LatestVideoFrame {
                     (streamEpoch == lastPresentedSource.streamEpoch && sequence > lastPresentedSource.sequence) else { return }
         }
         lastPresentedSource = (sequence, streamEpoch)
-        presentedSource += 1
+        presentedSource += 1; recordPresentationTime(presentedTime)
     }
     func presentationStatistics() -> (generated: Int, presentedSource: Int) {
         lock.lock(); defer { lock.unlock() }
@@ -221,7 +269,7 @@ final class LatestVideoFrame {
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
         sequence &+= 1
         streamEpoch &+= 1
-        level = 0
+        level = 0; lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
     }
     func markRendered(receivedAt: UInt64, gpuMS: Double) {
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - receivedAt) / 1_000_000
@@ -283,6 +331,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var generatedFPS = 0
     @Published private(set) var presentedSourceFPS = 0
     @Published private(set) var presentedOutputFPS = 0
+    @Published private(set) var skippedDuplicatePairsPerSecond = 0
+    @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
     var outputFPS: Int { presentedOutputFPS }
     @Published private(set) var interpolationStatus = "关闭"
@@ -984,7 +1034,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.generatedFPS = Int((Double(presentationStats.generated) / elapsed).rounded())
             self.presentedSourceFPS = Int((Double(presentationStats.presentedSource) / elapsed).rounded())
             self.presentedOutputFPS = Int((Double(presentationStats.presentedSource + presentationStats.generated) / elapsed).rounded())
-            self.interpolationStatus = self.frames.currentInterpolationState()
+            self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
+            self.presentationIntervalP95MS = self.frames.presentationP95()
+            self.interpolationStatus = self.frames.currentPreviewState() == "hidden" ? "预览不可见，暂停呈现" : self.frames.currentInterpolationState()
             let interpolationCost = self.frames.interpolationCost()
             self.interpolationCostMS = interpolationCost.0; self.interpolationBudgetMS = interpolationCost.1
             self.interpolationWorkingSize = self.frames.currentInterpolationWorkingSize()
@@ -1045,7 +1097,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["softwareP95MS"] = processingP95
         payload["gpuMS"] = gpuMilliseconds
         payload["lowLatency"] = picture.lowLatency
+        payload["previewState"] = frames.currentPreviewState()
         payload["interpolationMode"] = picture.frameInterpolation.rawValue
+        payload["interpolationForce"] = picture.forceFrameInterpolation
+        payload["interpolationSkipDuplicates"] = picture.skipsExactDuplicateInterpolation
+        payload["skippedDuplicatePairsPerSecond"] = skippedDuplicatePairsPerSecond
+        payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
         payload["generatedFPS"] = generatedFPS
         payload["presentedSourceFPS"] = presentedSourceFPS

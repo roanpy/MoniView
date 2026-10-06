@@ -24,6 +24,15 @@ struct FrameInterpolationPolicyTests {
         check(!P.costsFit(midpoint: 0.0145, source: 0.0023, slot: 1/120), "Inference lead and pair overload remain bounded")
         check(!P.costsFit(midpoint: 0.011, source: 0.005, slot: 1/120), "Whole-pair overload rejected")
         check(P.costsFit(midpoint: 0.0145, source: 0.0023, slot: 1/60), "Same 1080p work fits 30-to-60 cadence")
+        check(P.preserveFailureCooldown(forceChanged: true, modeChanged: false, failureActive: true, until: 12, now: 10) == 12, "Force retains active GPU failure cooldown")
+        check(P.preserveFailureCooldown(forceChanged: true, modeChanged: false, failureActive: false, until: 12, now: 10) == 0, "Force clears budget-only cooldown")
+        check(P.preserveFailureCooldown(forceChanged: true, modeChanged: false, failureActive: true, until: 9, now: 10) == 0, "Expired failure cooldown does not persist")
+        check(P.preserveFailureCooldown(forceChanged: true, modeChanged: true, failureActive: true, until: 12, now: 10) == 0, "Actual session change resets lifecycle")
+        check(P.preserveFailureCooldown(forceChanged: false, modeChanged: false, failureActive: true, until: .nan, now: 10) == 0, "Invalid cooldown cannot persist")
+        check(P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: true, deadlineFits: true), "Force ignores measured overload")
+        check(!P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: false, deadlineFits: true), "Automatic protects whole pair budget")
+        check(!P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: true, deadlineFits: false), "Force cannot present an expired pair")
+        check(!P.allowsMeasuredPair(midpoint: .nan, source: 0.003, slot: 1/120, force: true, deadlineFits: true), "Force rejects invalid measurement")
         for invalid in [-1.0, .nan, .infinity] {
             check(!P.costsFit(midpoint: invalid, source: 0.001, slot: 1/120), "Invalid inference cost")
             check(!P.costsFit(midpoint: 0.001, source: invalid, slot: 1/120), "Invalid endpoint cost")
@@ -32,7 +41,7 @@ struct FrameInterpolationPolicyTests {
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, inputFPS: 60, maximumLongEdge: 854) == P.Dimensions(width: 854, height: 480), "Adaptive size respects aspect and even rounding")
         check(P.targetDimensions(width: 1920, height: 1080, mode: .efficient, maximumLongEdge: 1) == nil, "Invalid adaptive cap")
         check(P.reducedLongEdge(after: 960) == 854 && P.reducedLongEdge(after: 854) == nil, "No excessive soft-midpoint downscaling")
-        check(FrameInterpolationMode.allCases.count == 3, "Off plus two cost tiers")
+        check(FrameInterpolationMode.allCases.count == 4, "Off plus three cost tiers")
         for mode in FrameInterpolationMode.allCases {
             let data = try JSONEncoder().encode(mode)
             let decoded = try JSONDecoder().decode(FrameInterpolationMode.self, from: data)
@@ -55,6 +64,9 @@ struct FrameInterpolationPolicyTests {
             check(!admitted(30, invalid), "Invalid display never admitted")
         }
         check(admitted(30, 60), "Local 30 to 60 case")
+        check(!admitted(45, 60) && !admitted(50, 60), "45/50 source cannot double on a 60 Hz display")
+        check(admitted(50, 120), "50 to 100 fits 120 Hz display")
+        check(P.targetDimensions(width: 1920, height: 1080, mode: .balanced, inputFPS: 60) == P.Dimensions(width: 1280, height: 720), "Balanced keeps 720p at high cadence")
         check(!admitted(60, 60), "Local display cannot enable 60 to 120")
         check(admitted(29.97, 59.94), "Fractional 30 to 60")
         check(admitted(59.94, 119.88), "Fractional 60 to 120")
@@ -80,7 +92,7 @@ struct FrameInterpolationPolicyTests {
         }
         check(P.targetDimensions(width: Int.max, height: 2, mode: .quality) == nil, "Extreme aspect safely rejected")
         for (width, height) in [(2, 2), (640, 480), (641, 481), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (4096, 2160), (2160, 3840), (3440, 1440)] {
-            for mode in [FrameInterpolationMode.efficient, .quality] {
+            for mode in [FrameInterpolationMode.efficient, .balanced, .quality] {
                 let result = P.targetDimensions(width: width, height: height, mode: mode)!
                 check(result.width % 2 == 0 && result.height % 2 == 0, "Both planes even")
                 check(result.width <= width && result.height <= height, "No upscaling")
