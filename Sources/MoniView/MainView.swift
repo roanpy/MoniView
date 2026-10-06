@@ -703,6 +703,11 @@ struct MainView: View {
                         .font(.system(size: 10))
                         .foregroundStyle(Color(hex: 0x98908a))
                         .frame(maxWidth: .infinity, alignment: .trailing)
+                } else if capture.followsRealContentRate, capture.isRunning {
+                    Text(L10n.text("内容已达采集上限 · 无重复帧"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
                 labeledPicker("帧率档位", fieldWidth: 195,

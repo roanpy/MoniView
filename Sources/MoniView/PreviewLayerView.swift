@@ -314,7 +314,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let uniques = duplicatePairWindow.reduce(0) { $0 + ($1 ? 0 : 1) }
         let uniqueRatio = Double(uniques) / Double(duplicatePairWindow.count)
         guard uniqueRatio > 0, uniqueRatio <= 0.75 else { return 1 }
-        return min(1 / uniqueRatio, 2.5)
+        return min(1 / uniqueRatio, 3.0) // 20 FPS content in a 60 Hz signal needs 3x
     }
 
     private func endpointIsFresh(_ pending: PendingSource, target: Double? = nil) -> Bool {
