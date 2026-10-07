@@ -106,9 +106,16 @@ enum FrameInterpolationPolicy {
     /// Force ignores measured budget only. A finite measurement and a feasible
     /// presentation deadline are still required; display/input eligibility is separate.
     static func allowsMeasuredPair(midpoint: Double, source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
-        guard deadlineFits, midpoint.isFinite, source.isFinite, slot.isFinite,
-              midpoint >= 0, source >= 0, slot > 0 else { return false }
-        return force || costsFit(midpoint: midpoint, source: source, slot: slot)
+        allowsMeasuredPair(midpoints: [midpoint], source: source, slot: slot, force: force, deadlineFits: deadlineFits)
+    }
+
+    /// Multi-phase variant: force still bypasses the budget, but a real GPU failure or a
+    /// missed deadline is never overridden, and every midpoint in the period is counted.
+    static func allowsMeasuredPair(midpoints: [Double], source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
+        guard deadlineFits, !midpoints.isEmpty, source.isFinite, slot.isFinite,
+              source >= 0, slot > 0,
+              midpoints.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return false }
+        return force || costsFit(midpoints: midpoints, source: source, slot: slot)
     }
 
     /// Force can retry a budget failure immediately, but cannot clear an active

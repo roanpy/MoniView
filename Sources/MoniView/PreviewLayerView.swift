@@ -641,6 +641,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 // Preserve a live GPU-error guard; otherwise this is only a
                 // settings/resize cooldown, not a newly failed GPU command.
                 if cooldownReason == nil { cooldownUntil = now + FrameInterpolationPolicy.overloadCooldownSeconds }
+            } else if (now - Double(queued.receivedAt) / 1_000_000_000) > 3 * queued.sourcePeriod {
+                // A queued frame older than three source periods is stale: its moment has passed.
+                // Rebasing it would push a picture the source has already moved past into the
+                // future, so drop the queue and fall back to live capture for this draw.
+                queuedFrames.removeAll()
+                comfortableMidpoints = 0
+                frames.setInterpolationState("呈现节奏调整")
             } else {
                 // Peek only. The entry is removed after this draw is accepted for submission:
                 // removing it here lost the frame whenever the GPU was busy or no drawable
@@ -741,7 +748,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                previous.streamEpoch == streamEpoch {
                 sourceIsUniqueContent = !isDuplicatePair(previous: previous.buffer, current: buffer,
                     sequence: sequence, previousSequence: previous.sequence, streamEpoch: streamEpoch)
-                if isDuplicate == true && sourceIsUniqueContent, let cadencePair,
+                // Recovering the first copy's timestamp changes the pair's timing, so it needs
+                // exact repeat evidence. Two genuinely different pictures can differ by only a
+                // few bytes, and the tolerant judge calls those repeats; adopting the older PTS
+                // on that basis would pair the frame with the wrong period and phase.
+                if isExactDuplicate == true && sourceIsUniqueContent, let cadencePair,
                    cadencePair.2.isNumeric, CMTimeCompare(cadencePair.2, previous.pts) > 0,
                    CMTimeCompare(cadencePair.2, sourcePTS) < 0 {
                     sourcePTS = cadencePair.2 // Recover the first copy's original timestamp.
@@ -842,8 +853,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     let deadlineFits = displayTargetTime > 0 && target <= CACurrentMediaTime() + 1.5 * pair.period
                     // A hidden calibration pass shares the native frame's command buffer. It
                     // never increments generated counts or advertises interpolation as active.
+                    // Admission must judge the work the pair will actually do. A multi-phase
+                    // pair spends several midpoint commands inside the same period, so testing
+                    // one midpoint against the individual cap would admit a pair that overruns.
                     let mayGenerate = midCost.flatMap { mid in sourceCost.map {
-                        FrameInterpolationPolicy.allowsMeasuredPair(midpoint: mid, source: $0, slot: budgetSlot,
+                        FrameInterpolationPolicy.allowsMeasuredPair(midpoints: Array(repeating: mid, count: phases.count),
+                            source: $0, slot: budgetSlot,
                             force: settings.forceFrameInterpolation, deadlineFits: deadlineFits)
                     } } ?? false
                     if midCost == nil || mayGenerate {
@@ -1164,7 +1179,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // Wait for enough steady-state samples before judging cost: the commands
                     // right after a switch carry warm-up and must not trigger cooldown.
                     let measuredCost = (wasMidpoint || wasCalibration) ? self.admissionCost(self.midpointCosts) : self.admissionCost(self.nativeCosts)
-                    let pairOverBudget = self.admissionCost(self.midpointCosts).flatMap { mid in self.admissionCost(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredBudgetSlot) } } ?? false
+                    // The pair's cost is judged on the frames it generates, matching how the
+                    // work was admitted. Comparing one midpoint against the individual cap here
+                    // let a multi-phase pair pass admission and then be judged by a laxer rule.
+                    let pairOverBudget = self.admissionCost(self.midpointCosts).flatMap { mid in
+                        self.admissionCost(self.nativeCosts).map {
+                            !FrameInterpolationPolicy.costsFit(midpoints: Array(repeating: mid, count: activeMidpointCount),
+                                                              source: $0, slot: measuredBudgetSlot)
+                        }
+                    } ?? false
                     let individualLimit = measuredBudgetSlot * ((wasMidpoint || wasCalibration) ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
                     if !succeeded || (!expectedSettings.forceFrameInterpolation && !warming && (wasMidpoint || wasCalibration || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
                         // A successful midpoint already owns a fixed endpoint. Complete

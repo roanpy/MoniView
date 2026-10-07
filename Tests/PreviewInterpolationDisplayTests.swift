@@ -19,6 +19,13 @@ let require120 = environment["MONIVIEW_REQUIRE_120"] == "1"
 let requireCadence = environment["MONIVIEW_REQUIRE_2X"] == "1"
 let repeatDivisor = Int(environment["MONIVIEW_TEST_REPEAT"] ?? (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? "2" : "1")) ?? 1
 let expectedContentFPS = Double(fps) / Double(max(1, repeatDivisor))
+// The renderer targets 60 FPS by the smallest whole step, using the flow tier for a third phase.
+let expectedMultiplier: Double = {
+    let content = expectedContentFPS
+    if content * 2 >= 60 - 0.5 { return 2 }
+    if content * 3 >= 60 - 0.5, content < 25 { return 3 }
+    return 2
+}()
 let stopAt = require120 ? 36 : 16
 let testRestart = environment["MONIVIEW_TEST_RESTART"] == "1"
 precondition(!testRestart || !require120, "Restart test uses the non-strict fixture")
@@ -277,7 +284,11 @@ stats.setEventHandler {
         cadenceWindows += 1
         cadenceSources += sourcePresentations; cadenceGenerated += gen
         cadenceElapsed += cadWindowDuration
-        if Double(gen) / cadWindowDuration >= expectedContentFPS * 0.9 &&
+        // Acceptance is against the interpolation target, not the content rate: a 20 FPS
+        // source is expected to produce about 40 generated frames, and a gate that only
+        // asked for 20 would pass a run where the third phase never happened.
+        let expectedGenerated = expectedContentFPS * (expectedMultiplier - 1)
+        if Double(gen) / cadWindowDuration >= expectedGenerated * 0.9 &&
            Double(sourcePresentations) / cadWindowDuration >= expectedContentFPS * 0.9 {
             cadencePassWindows += 1
         }
