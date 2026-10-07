@@ -41,13 +41,23 @@ struct PreviewLayerView: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: CapturePreviewNSView, context: Context) {
+        // A colour or sharpness change does not need a redraw of its own: the next
+        // presented frame already carries it. Forcing a draw here added a frame outside
+        // the interpolation schedule, which showed up as a flash on every preset change.
+        let previousSettings = view.settings
+        let layoutAffectingChange = previousSettings.upscaleTarget != capture.picture.upscaleTarget
+            || previousSettings.upscaleMethod != capture.picture.upscaleMethod
+            || previousSettings.lowLatency != capture.picture.lowLatency
+            || previousSettings.enhancementEnabled != capture.picture.enhancementEnabled
+            || previousSettings.frameInterpolation != capture.picture.frameInterpolation
+            || previousSettings.forceFrameInterpolation != capture.picture.forceFrameInterpolation
         view.settings = capture.picture
         view.aspectMode = capture.effectiveAspectMode
         view.contentCadenceMeasurementEnabled = capture.followsRealContentRate
         view.configureInterpolation()
         (view.layer as? CAMetalLayer)?.displaySyncEnabled = (capture.picture.enhancementEnabled && capture.picture.frameInterpolation != .off && FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation)) || !capture.picture.lowLatency
         if capture.picture.upscaleMethod != .ai || !capture.picture.enhancementEnabled || capture.picture.upscaleTarget == .native { view.stopAIUpscaler() }
-        view.requestRender()
+        if layoutAffectingChange { view.requestRender() }
     }
 }
 
@@ -283,6 +293,18 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func p95(_ values: [Double]) -> Double? {
         guard !values.isEmpty else { return nil }
         let sorted = values.sorted(); return sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
+    }
+
+    /// Cost samples worth acting on. The first commands after a switch carry session
+    /// warm-up; acting on one of them put the pipeline straight into a cooldown.
+    private static let minimumCostSamples = 6
+
+    /// Median while the sample set is still small, so one warm-up outlier cannot decide
+    /// admission and stall interpolation for the whole cooldown window.
+    private func admissionCost(_ values: [Double]) -> Double? {
+        guard values.count >= Self.minimumCostSamples else { return nil }
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     private func recordComfortablePresentedPair(slot: Double) {
@@ -980,22 +1002,24 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationCost(seconds: cost + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: cost + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             frameStore.setInterpolationState("插帧准备中")
                         } else if wasMidpoint || wasCalibration {
                             self.midpointCosts.append(cost); self.midpointCosts = Array(self.midpointCosts.suffix(32))
                             self.midpointGPUCosts.append(gpuMS); self.midpointGPUCosts = Array(self.midpointGPUCosts.suffix(32))
                             if let gpuP95 = self.p95(self.midpointGPUCosts) { frameStore.setInterpolationGPUCost(milliseconds: gpuP95) }
-                            frameStore.setInterpolationCost(seconds: (self.p95(self.midpointCosts) ?? cost) + (self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: (self.admissionCost(self.midpointCosts) ?? self.p95(self.midpointCosts) ?? cost) + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                         } else {
                             self.nativeCosts.append(cost); self.nativeCosts = Array(self.nativeCosts.suffix(32))
                             if let mid = self.p95(self.midpointCosts) {
-                                frameStore.setInterpolationCost(seconds: mid + (self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                                frameStore.setInterpolationCost(seconds: mid + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             }
                         }
                     }
-                    let measuredCost = (wasMidpoint || wasCalibration) ? self.p95(self.midpointCosts) : self.p95(self.nativeCosts)
-                    let pairOverBudget = self.p95(self.midpointCosts).flatMap { mid in self.p95(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredBudgetSlot) } } ?? false
+                    // Wait for enough steady-state samples before judging cost: the commands
+                    // right after a switch carry warm-up and must not trigger cooldown.
+                    let measuredCost = (wasMidpoint || wasCalibration) ? self.admissionCost(self.midpointCosts) : self.admissionCost(self.nativeCosts)
+                    let pairOverBudget = self.admissionCost(self.midpointCosts).flatMap { mid in self.admissionCost(self.nativeCosts).map { !FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: measuredBudgetSlot) } } ?? false
                     let individualLimit = measuredBudgetSlot * ((wasMidpoint || wasCalibration) ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
                     if !succeeded || (!expectedSettings.forceFrameInterpolation && !warming && (wasMidpoint || wasCalibration || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
                         // A successful midpoint already owns a fixed endpoint. Complete

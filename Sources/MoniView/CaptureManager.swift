@@ -111,6 +111,13 @@ struct PictureSettings: Equatable, Codable {
         get { interpolationMode ?? .off }
         set { interpolationMode = newValue == .off ? nil : newValue }
     }
+    /// The force flag only applies while interpolation runs. Leaving it set with
+    /// interpolation off looked like the app ignoring every performance limit, and
+    /// that state cannot mean anything.
+    mutating func normalizeForceFlag() {
+        if frameInterpolation == .off, forceFrameInterpolation { forceFrameInterpolation = false }
+    }
+
     mutating func setInterpolationEnabled(_ enabled: Bool) {
         if enabled {
             let preferred = preferredInterpolationQuality ?? .balanced
@@ -378,6 +385,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var picture = PictureSettings() {
         didSet {
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
+            if !applyingPreset { picture.normalizeForceFlag() }
             if !applyingPreset, let current = selectedQualityPreset,
                let preset = Self.qualityPresets.first(where: { $0.name == current }),
                qualitySignature(lowLatency: oldValue.lowLatency, strength: oldValue.enhancementStrength,
@@ -405,7 +413,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
     /// Quality presets mirror the colour presets: they set a starting combination
     /// once and never lock a control. Editing any covered value shows 自定义.
-    @Published private(set) var selectedQualityPreset: String? = "平衡" {
+    @Published private(set) var selectedQualityPreset: String? = "流畅优先" {
         didSet { schedulePicturePersistence() }
     }
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
@@ -505,7 +513,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         super.init()
         let savedPreset = UserDefaults.standard.string(forKey: "view.colorPreset")
         if let data = UserDefaults.standard.data(forKey: "view.picture"), let saved = try? JSONDecoder().decode(PictureSettings.self, from: data) {
-            applyingPreset = true; picture = saved; applyingPreset = false
+            // A stored force flag with interpolation off is not a reachable state; it came
+            // from an older build. Normalise it here so runtime always matches what the
+            // panel shows, whatever the preference cache returned.
+            var loaded = saved
+            loaded.normalizeForceFlag()
+            if loaded != saved { UserDefaults.standard.set(try? JSONEncoder().encode(loaded), forKey: "view.picture") }
+            applyingPreset = true; picture = loaded; applyingPreset = false
             selectedColorPreset = savedPreset == "自定义" ? nil : (savedPreset ?? "自然")
         }
         if UserDefaults.standard.object(forKey: "record.picture") != nil { recordIncludesPicture = UserDefaults.standard.bool(forKey: "record.picture") }
@@ -1203,20 +1217,28 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let interpolation: FrameInterpolationMode
     }
 
+    /// Three starting points covering the two axes users actually choose between:
+    /// how smooth the motion is (temporal) and how sharp the picture is (spatial).
+    /// Low Latency stays on in every preset: it only avoids processing pixels the
+    /// window cannot show, so switching it off spends GPU on nothing visible.
     static let qualityPresets: [QualityPreset] = [
-        // Lowest latency: no temporal work, screen-sized processing cap.
-        QualityPreset(name: "低延迟", lowLatency: true, enhancementStrength: 0.25,
-                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .off),
-        // The shipped default: 2× interpolation sized to keep a real 120 Hz cadence.
-        QualityPreset(name: "平衡", lowLatency: true, enhancementStrength: 0.35,
+        // Smoothest motion: 2x interpolation at the source's own size. This is the
+        // tier that reaches 120 on a 1080p60 source.
+        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.30,
                       upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .flowBlend),
-        // Highest spatial quality with 2× temporal work; needs a fast GPU.
-        QualityPreset(name: "画质优先", lowLatency: false, enhancementStrength: 0.45,
-                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality)
+        // Sharper picture: still interpolated, but the midpoint and endpoints are
+        // scaled up to the display. Costs more; useful when detail matters more
+        // than the last few frames.
+        QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.45,
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality),
+        // Lowest input delay: no interpolation at all, so the newest frame is
+        // presented as soon as it arrives. For input-sensitive play.
+        QualityPreset(name: "低延迟", lowLatency: true, enhancementStrength: 0.25,
+                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .off)
     ]
 
     func applyQualityPreset(_ name: String) {
-        guard let preset = Self.qualityPresets.first(where: { $0.name == name }) ?? Self.qualityPresets.first(where: { $0.name == "平衡" }) else { return }
+        guard let preset = Self.qualityPresets.first(where: { $0.name == name }) ?? Self.qualityPresets.first else { return }
         applyingPreset = true
         defer { applyingPreset = false }
         var next = picture

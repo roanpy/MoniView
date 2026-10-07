@@ -75,7 +75,9 @@ struct MainView: View {
                     }
                     .scrollBounceBehavior(.basedOnSize)
                     .scrollIndicators(.hidden)
-                    .frame(width: activePanel == .settings ? 365 : 330)
+                    // One width for every panel: switching between them no longer makes the
+                    // card jump size and reflow its controls.
+                    .frame(width: 365)
                     // Let a panel use whatever vertical room the window actually has. The
                     // previous fixed 560pt cap for the enhancement panel forced a scrollbar
                     // on a normal-size window even with every section collapsed.
@@ -564,50 +566,47 @@ struct MainView: View {
         }
     }
 
-    /// Advanced enhancement settings. Collapsed by default; no control is removed, so
-    /// every previous option stays reachable from this same panel.
+    /// Enhancement settings shown directly. The panel opens on the presets and every
+    /// control stays reachable without unfolding anything.
     private var qualityAdvancedSettings: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 9) {
-                settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
-                    .help(L10n.text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。"))
-                labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
-                labeledPicker("放大方式", selection: Binding(
-                    get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
-                    set: { capture.picture.upscaleMethod = $0 }),
-                    choices: UpscaleMethod.allCases.filter { $0 != .ai || (AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
-                    .disabled(!capture.picture.enhancementEnabled)
-                labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
-                    choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
-                    .disabled(!capture.picture.enhancementEnabled)
-                    .help(L10n.text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。"))
-                if capture.picture.frameInterpolation != .off, capture.picture.upscaleMethod == .ai {
-                    Text("AI 超分暂停，关闭插帧后恢复")
-                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                } else if capture.picture.upscaleMethod == .ai, !capture.aiUpscaleStatus.isEmpty {
-                    Text(L10n.text(capture.aiUpscaleStatus))
-                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
-                }
-                Divider().overlay(Color.white.opacity(0.06))
-                labeledPicker("插帧质量", selection: Binding(
-                    get: { capture.picture.frameInterpolation },
-                    set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
-                    choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
-                    .disabled(!capture.picture.enhancementEnabled)
-                    .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
-                settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
-                    .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
-                settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
-                    .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
+        VStack(alignment: .leading, spacing: 9) {
+            Divider().overlay(Color.white.opacity(0.06))
+
+            settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
+                .help(L10n.text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。"))
+            labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
+            labeledPicker("放大方式", selection: Binding(
+                get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
+                set: { capture.picture.upscaleMethod = $0 }),
+                choices: UpscaleMethod.allCases.filter { $0 != .ai || (AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) }.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
+                .disabled(!capture.picture.enhancementEnabled)
+            labeledPicker("放大目标", selection: $capture.picture.upscaleTarget,
+                choices: UpscaleTarget.allCases.map { PickerChoice(value: $0, title: L10n.text(upscaleTargetTitle($0))) })
+                .disabled(!capture.picture.enhancementEnabled)
+                .help(L10n.text("支持时可选 AI 超分，否则回退空间放大。匹配屏幕使用当前显示器的绘制像素尺寸，不保证与面板物理像素一一对应。不会改变采集输入分辨率。"))
+            if capture.picture.frameInterpolation != .off, capture.picture.upscaleMethod == .ai {
+                Text("AI 超分暂停，关闭插帧后恢复")
+                    .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
+            } else if capture.picture.upscaleMethod == .ai, !capture.aiUpscaleStatus.isEmpty {
+                Text(L10n.text(capture.aiUpscaleStatus))
+                    .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
             }
-            .padding(.top, 6)
-        } label: {
-            Text(L10n.text("画质与插帧设置"))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(hex: 0xd9cfc6))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .padding(.vertical, 5)
+            Divider().overlay(Color.white.opacity(0.06))
+            labeledPicker("插帧质量", selection: Binding(
+                get: { capture.picture.frameInterpolation },
+                set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
+                choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
+                .disabled(!capture.picture.enhancementEnabled)
+                .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
+            // These only mean something while interpolation is on. Leaving them
+            // operable with interpolation off let the force flag stay set on its own,
+            // which then looked like the app ignoring performance limits.
+            settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
+                .disabled(capture.picture.frameInterpolation == .off)
+                .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
+            settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
+                .disabled(capture.picture.frameInterpolation == .off)
+                .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
         }
     }
 
