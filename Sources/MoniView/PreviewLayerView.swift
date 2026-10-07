@@ -882,6 +882,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             if midCost == nil {
                                 calibratedMidpoint = true
                             } else {
+                                // Schedule and budget by what was actually produced. A phase that
+                                // failed to encode must not leave the pair claiming a slot it does
+                                // not fill, which would push later presentations out of position.
+                                let producedCount = producedImages.count
+                                activeMidpointCount = producedCount
+                                let producedSlot = pair.period / Double(producedCount + 1)
                                 generatedMidpoint = true; sourceImage = first
                                 presentationTime = target
                                 if producedImages.count > 1 {
@@ -889,19 +895,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                                         queuedFrames.append(QueuedFrame(image: producedImages[offset], buffer: buffer,
                                             receivedAt: receivedAt, sequence: sequence, settings: settings,
                                             size: size, aspect: aspectMode,
-                                            presentationTime: target + slot * Double(offset),
+                                            presentationTime: target + producedSlot * Double(offset),
                                             sourcePeriod: pair.period, sourcePTS: sourcePTS,
                                             isUniqueContent: sourceIsUniqueContent, isGenerated: true,
-                                            midpointCount: phases.count))
+                                            midpointCount: producedCount))
                                     }
                                 }
                                 queuedFrames.append(QueuedFrame(image: CIImage(cvPixelBuffer: buffer), buffer: buffer,
                                     receivedAt: receivedAt, sequence: sequence, settings: settings,
                                     size: size, aspect: aspectMode,
-                                    presentationTime: target + slot * Double(producedImages.count),
+                                    presentationTime: target + producedSlot * Double(producedImages.count),
                                     sourcePeriod: pair.period, sourcePTS: sourcePTS,
                                     isUniqueContent: sourceIsUniqueContent, isGenerated: false,
-                                    midpointCount: phases.count))
+                                    midpointCount: producedCount))
                             }
                         }
                     } else if !settings.forceFrameInterpolation && (!budgetFits || !sourceFits || !pairFits) {
