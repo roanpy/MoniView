@@ -184,9 +184,25 @@ final class LatestVideoFrame {
     private var interpolationBudgetMS = 0.0
     private var interpolationWorkingSize: String?
     private var measuredContentFPS: Double?
+    /// Set when a new estimate is published. The reader consumes the value once, so a
+    /// stored reading cannot be re-read every second and mistaken for fresh evidence:
+    /// the renderer only publishes while it draws, and a hidden or busy preview would
+    /// otherwise keep re-reporting its last number as if it were a new measurement.
+    private var measuredContentFPSUnread = false
     /// True content cadence behind a duplicated signal (30 FPS game in 60 Hz), if detected.
-    func setMeasuredContentFPS(_ value: Double?) { lock.lock(); measuredContentFPS = value; lock.unlock() }
-    func currentMeasuredContentFPS() -> Double? { lock.lock(); defer { lock.unlock() }; return measuredContentFPS }
+    func setMeasuredContentFPS(_ value: Double?) {
+        lock.lock()
+        measuredContentFPS = value
+        measuredContentFPSUnread = value != nil
+        lock.unlock()
+    }
+    /// Returns the pending estimate once and clears it; nil when nothing new arrived.
+    func takeMeasuredContentFPS() -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard measuredContentFPSUnread else { return nil }
+        measuredContentFPSUnread = false
+        return measuredContentFPS
+    }
     private var displayRates = (maximum: 0.0, observed: 0.0)
     private var captured = 0
     private var rendered = 0
@@ -1435,7 +1451,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // Snap the raw ratio onto a standard rate before it is used: the measurement can
             // land between two of them depending on capture timing, and a value that hops
             // between runs drags the temporal multiplier with it.
-            let rawDetected = ContentCadencePolicy.quantizedRate(self.frames.currentMeasuredContentFPS())
+            let rawDetected = ContentCadencePolicy.quantizedRate(self.frames.takeMeasuredContentFPS())
             if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
             let held = Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil
             let detectedContentFPS = rawDetected ?? held
