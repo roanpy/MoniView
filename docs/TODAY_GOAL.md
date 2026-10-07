@@ -82,3 +82,23 @@ Commit c70d3ad addresses the findings above; build 0.2.0 (101) is signed, packag
 Verified on this tree: `swift build`; `Scripts/test-localization.sh` (264 keys, 528 lookups); `test-capture-compatibility.sh`; `test-mac-window-capture.sh` (real ScreenCaptureKit, now 21 checks including the first-frame rule, the source list and a silent window); `test-window-capture-policy.sh`. The window-source source list dropped from 12 entries to 5 in a before/after probe, removing the wallpaper, Dock and notification-centre entries. / 本树验证：构建、本地化（264 键／528 次）、采集兼容、窗口采集（真实 SCK，21 项，含首帧规则、来源列表与静默窗口）与窗口策略套件通过；来源探测由 12 项降为 5 项。
 
 Still open on this build: the frozen 30→60 command has not been re-run since the change because the console stayed locked from 18:52 on (the fixture reports SKIP on an occluded console, which is not a pass); a queued launchd job `dev.moniview.frozenwatch` runs it twice on the next unlock and writes `/tmp/moniview-frozen/run{1,2}.log`. The frozen Smoothness + Natural real-game run, an interpolation-off baseline, moving-camera and menu coverage, the English-locale UI pass and the user verdict are likewise still open. / 仍未完成：改动后尚未重跑冻结命令（18:52 起控制台锁屏，夹具在遮挡时按设计 SKIP，不算通过）；临时 launchd 作业会在解锁后自动跑两次并写日志。冻结配置（流畅＋自然）实机运行、关闭插帧基线、镜头运动与菜单覆盖、英文界面验收与用户结论同样待补。
+
+## Build 103: acceptance on an unlocked console / 构建 103：解锁后的验收
+
+Commit 3e5e299 carries the second review round (atomic source ownership with ingest tokens, bounded blank-presentation retry with an independent deadline, and midpoint-only caption evidence). Build 0.2.0 (103) is signed and installed (binary SHA256 c7fce63784ced24f72f5de1476afcd45550c7479468bafa066b31a3e25addeb9, build 102 archived). / 提交 3e5e299 为第二轮复核结果（带 ingest token 的原子来源归属、带独立截止时间的有界清屏重试、只认中点证据的标题裁决）。构建 0.2.0 (103) 已签名安装（SHA256 c7fce6…deb9，102 已归档）。
+
+| Check / 检查 | Result / 结果 |
+| --- | --- |
+| Frozen 30→60 command / 冻结命令 | PASS twice: steady 7/7, restart 6/6, **caption non-preparing 6/6**, activity 120/120 with missing 0 and mismatch 0, complete pairs 179/209, interval P95 16.667 ms, stop/start restored. / 两次通过：稳态 7/7、重启 6/6、标题非准备 6/6、activity 120/120、完整帧对、间隔 P95 16.667 ms。 |
+| Follow toggle fixture / 跟随开关夹具 | PASS: 60 FPS unique input, multiplier 2.00, generated 60 FPS, source ordering and drawable bounds hold. / 通过：60 帧唯一输入、倍率 2.00、生成 60 帧。 |
+| Real game, frozen configuration / 真实游戏（冻结配置） | Smoothness + Natural on the installed build: 16 samples across 12 min 38 s (21:14:33–21:27:11 on 102 and 21:33:33–21:46:11 on 103, both runs sampled the same way and both held `插帧 30→60`), every sample on 103 read capture 60 FPS, interpolation 30→60 and output 60 FPS with 30 generated; no waiting, black frame or freeze; the scene showed the played game with moving characters. / 流畅＋自然：103 上 16 次采样跨 12 分 38 秒，每次均为采集 60、插帧 30→60、输出 60（生成 30），无待运行／黑屏／冻结，画面为正在游玩的游戏。 |
+| Source switching / 来源切换 | Live: 5 device→Mac-window→device rounds; the window source listed real windows only (the wallpaper and window-manager entries are gone), captured ChatGPT at 3024×1824, and every return to the device restored 30→60. The real ScreenCaptureKit fixture reports 26 checks. / 实机 5 轮双向切换：窗口来源只列真实窗口（墙纸／窗口管理器条目已消失），捕获 ChatGPT 3024×1824，每次切回采集设备都恢复 30→60；真实 SCK 夹具 26 项通过。 |
+| Recording / 录制 | 94.43 s file, h264 1920×1080 60 FPS, AAC 48 kHz stereo; audio verified non-silent (mean −28.7 dB, max −13.3 dB). / 94.43 秒，1080p60 + AAC 48 kHz 立体声，音轨非静音（均值 −28.7 dB）。 |
+| English UI / 英文界面 | Launched with `-AppleLanguages (en)`: capture, enhance and colour panels read correctly, presets and status are translated, no truncation or overlap; the CI localization script still passes at 264 keys and 528 lookups. / 以英文启动：采集、画质与色彩面板完整可读，预设与状态均已翻译，无截断；本地化脚本 264 键／528 次通过。 |
+
+Open items on this build / 本构建未闭合项:
+
+- `MONIVIEW_TEST_ENDPOINT_EVIDENCE=1` traps (exit 133) with no output at all, and `MONIVIEW_TEST_PRESENTATION_FAILURE=1` traps after retiring the layer; both are fixture modes added by the fix and are being debugged. / 两个新增夹具模式崩溃，正在修。
+- The preset label can stay on 已自定义 after a window re-creation even though every visible option equals the Smoothness preset; it under-claims rather than over-claims. / 窗口重建后预设名可能停在“已自定义”，属低估。
+- A heavy window source (3024×1824) presents 38–40 FPS and reads 插帧待运行 while the content rate already exceeds the target; the caption does not yet explain that case. / 重窗口来源（3024×1824）输出 38–40 并显示“插帧待运行”，标题尚未解释该情形。
+- The user verdict on motion quality is still outstanding. / 用户对运动画质的结论仍待补。
