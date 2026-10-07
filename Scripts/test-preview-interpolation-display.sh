@@ -50,6 +50,7 @@ swiftc -swift-version 5 -O -D MONIVIEW_PREVIEW_TESTING \
  "$ROOT/Sources/MoniView/FlowBlendInterpolator.swift" \
  "$ROOT/Sources/MoniView/MetalUpscaler.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" \
  "$ROOT/Sources/MoniView/CaptureRecorder.swift" "$ROOT/Sources/MoniView/VideoImageProcessor.swift" \
+ "$ROOT/Sources/MoniView/MacWindowCapture.swift" \
  "$ROOT/Sources/MoniView/DurationBoundedFIFO.swift" "$ROOT/Sources/MoniView/ConfigurationRevision.swift" \
  "$ROOT/Sources/MoniView/Localization.swift" "$WORK/main.swift" -o "$WORK/display-tests"
 case "${MONIVIEW_TEST_COMPILE_ONLY:-0}" in

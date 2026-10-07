@@ -592,12 +592,22 @@ struct MainView: View {
                     .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
             }
             Divider().overlay(Color.white.opacity(0.06))
+            // With interpolation off this control has no value to show, so it states that
+            // and greys out instead of presenting an empty box that still looks operable.
             labeledPicker("插帧质量", selection: Binding(
                 get: { capture.picture.frameInterpolation },
                 set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
                 choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
-                .disabled(!capture.picture.enhancementEnabled)
-                .help(L10n.text("低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
+                .disabled(!capture.picture.enhancementEnabled || capture.picture.frameInterpolation == .off)
+                .help(L10n.text(capture.picture.frameInterpolation == .off
+                    ? "插帧已关闭；打开「插帧加倍」后可选择质量档位。"
+                    : "低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
+            if capture.picture.frameInterpolation == .off {
+                Text(L10n.text("插帧关闭：以下质量与高级选项不生效。"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: 0x98908a))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // These only mean something while interpolation is on. Leaving them
             // operable with interpolation off let the force flag stay set on its own,
             // which then looked like the app ignoring performance limits.
@@ -752,21 +762,6 @@ struct MainView: View {
                     Spacer()
                     HStack(spacing: 2) {
                         fpsButton(0, title: "自动")
-                        if capture.frameRateOptions.contains(where: { $0 > 0 }) {
-                            Button {
-                                capture.followsRealContentRate.toggle()
-                            } label: {
-                                Text(L10n.text("跟随"))
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(capture.followsRealContentRate ? Color(hex: 0x2d1b0b) : Color(hex: 0xe9a24d))
-                                    .frame(minWidth: 32)
-                                    .padding(.vertical, 6)
-                                    .background(capture.followsRealContentRate ? Color(hex: 0xf2a340) : .clear, in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                            .help(L10n.text("开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
-                        }
                         ForEach(quickFrameRates, id: \.self) { fps in
                             fpsButton(fps, title: String(fps))
                         }
@@ -787,10 +782,30 @@ struct MainView: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
-                labeledPicker("帧率档位", fieldWidth: 195,
-                    selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
-                    choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
-                    .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                // The shortcut row above covers everyday use. The full advertised list and
+                // Follow live here so the first layer stays short, matching the quality
+                // panel, without removing either control.
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 11) {
+                        labeledPicker("完整帧率", fieldWidth: 195,
+                            selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
+                            choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
+                            .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                        if capture.frameRateOptions.contains(where: { $0 > 0 }) {
+                            settingsToggle("跟随内容帧率", isOn: $capture.followsRealContentRate)
+                                .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                                .help(L10n.text("采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text(L10n.text("帧率高级"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(hex: 0xd9cfc6))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 5)
+                }
                 labeledPicker("画面比例", fieldWidth: 195, selection: $capture.aspectMode,
                     choices: AspectMode.allCases.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
                 Text(L10n.text(capture.aspectMode == .stretch ? "铺满窗口，画面比例可能变形。" : (capture.aspectMode == .fill ? "保持比例，裁切超出窗口的部分。" : "保持比例，完整显示画面。")))

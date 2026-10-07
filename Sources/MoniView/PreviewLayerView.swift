@@ -44,20 +44,17 @@ struct PreviewLayerView: NSViewRepresentable {
         // A colour or sharpness change does not need a redraw of its own: the next
         // presented frame already carries it. Forcing a draw here added a frame outside
         // the interpolation schedule, which showed up as a flash on every preset change.
-        let previousSettings = view.settings
-        let layoutAffectingChange = previousSettings.upscaleTarget != capture.picture.upscaleTarget
-            || previousSettings.upscaleMethod != capture.picture.upscaleMethod
-            || previousSettings.lowLatency != capture.picture.lowLatency
-            || previousSettings.enhancementEnabled != capture.picture.enhancementEnabled
-            || previousSettings.frameInterpolation != capture.picture.frameInterpolation
-            || previousSettings.forceFrameInterpolation != capture.picture.forceFrameInterpolation
         view.settings = capture.picture
         view.aspectMode = capture.effectiveAspectMode
         view.contentCadenceMeasurementEnabled = capture.followsRealContentRate
         view.configureInterpolation()
         (view.layer as? CAMetalLayer)?.displaySyncEnabled = (capture.picture.enhancementEnabled && capture.picture.frameInterpolation != .off && FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation)) || !capture.picture.lowLatency
         if capture.picture.upscaleMethod != .ai || !capture.picture.enhancementEnabled || capture.picture.upscaleTarget == .native { view.stopAIUpscaler() }
-        if layoutAffectingChange { view.requestRender() }
+        // A redraw is always safe now: the frame pair that was already scheduled keeps its
+        // own timing settings, so it is no longer cancelled by a colour change. Without
+        // this, a static or paused source would not pick up a colour edit until new frames
+        // arrived, because the layer only draws on demand.
+        view.requestRender()
     }
 }
 
@@ -132,6 +129,21 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var scheduledSourceUntil = 0.0
     private var awaitingSourcePresentation: (sequence: UInt64, deadline: Double)?
     private var presentedMidpoint: (sequence: UInt64, time: Double, deadline: Double)?
+    /// Compares the fields that decide whether an already-scheduled frame pair is still
+    /// valid. Colour and sharpness are deliberately excluded: they change what the
+    /// endpoint looks like, not when it presents, so switching a preset must not cancel a
+    /// pair that is already in flight and drop interpolation into a cooldown.
+    private static func timingCompatible(_ lhs: PictureSettings, _ rhs: PictureSettings) -> Bool {
+        lhs.enhancementEnabled == rhs.enhancementEnabled
+            && lhs.enhancementStrength == rhs.enhancementStrength
+            && lhs.lowLatency == rhs.lowLatency
+            && lhs.upscaleTarget == rhs.upscaleTarget
+            && lhs.upscaleMethod == rhs.upscaleMethod
+            && lhs.frameInterpolation == rhs.frameInterpolation
+            && lhs.forceFrameInterpolation == rhs.forceFrameInterpolation
+            && lhs.skipsExactDuplicateInterpolation == rhs.skipsExactDuplicateInterpolation
+    }
+
     private struct PendingSource {
         // One bounded endpoint is necessary after its midpoint has been submitted.
         // The next incoming source still overwrites the ordinary latest-frame mailbox.
@@ -236,7 +248,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             adaptiveLongEdge = nil; interpolationDimensions = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-            pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+            pendingSource = nil; midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
             cooldownUntil = failureCooldown; cooldownReason = failureReason; lastSourceSequence = nil; awaitingSourcePresentation = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             previousMode = mode; previousInterpolationEnabled = enabled
@@ -298,13 +310,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Cost samples worth acting on. The first commands after a switch carry session
     /// warm-up; acting on one of them put the pipeline straight into a cooldown.
     private static let minimumCostSamples = 6
+    /// Past this many samples the estimate is considered steady and P95 takes over.
+    private static let steadyStateSamples = 16
 
     /// Median while the sample set is still small, so one warm-up outlier cannot decide
     /// admission and stall interpolation for the whole cooldown window.
     private func admissionCost(_ values: [Double]) -> Double? {
         guard values.count >= Self.minimumCostSamples else { return nil }
         let sorted = values.sorted()
-        return sorted[sorted.count / 2]
+        // Median only while the set is small, where one warm-up outlier would otherwise
+        // decide. Once enough samples exist the tail is real information, so switch to
+        // P95 exactly like the displayed figure.
+        guard values.count >= Self.steadyStateSamples else { return sorted[sorted.count / 2] }
+        return sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
     }
 
     private func recordComfortablePresentedPair(slot: Double) {
@@ -328,7 +346,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 adaptiveLongEdge = target
                 lastRaiseAt = now
                 lastRaisedToLongEdge = targetEdge
-                midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
+                midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2
             }
         }
     }
@@ -336,7 +354,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-        pendingSource = nil; midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+        pendingSource = nil; midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
         duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
         observedDisplayFPS = 0; displayTargetTime = 0; lastSourceSequence = nil
@@ -532,7 +550,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             adaptiveLongEdge = nil; interpolationDimensions = nil
             pendingSource = nil; presentedMidpoint = nil; lastSourceSequence = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-            midpointCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
+            midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
         }
@@ -560,7 +578,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         var endpointPresentation: Double?
         var activePairPeriod = 0.0
         if let pending = pendingSource {
-            if pending.settings != settings || pending.size != size || pending.aspect != aspectMode ||
+            if !Self.timingCompatible(pending.settings, settings) || pending.size != size || pending.aspect != aspectMode ||
                 CVPixelBufferGetWidth(pending.buffer) != CVPixelBufferGetWidth(buffer) ||
                 CVPixelBufferGetHeight(pending.buffer) != CVPixelBufferGetHeight(buffer) {
                 pendingSource = nil // Latest source/settings always replace, never queue behind an obsolete pair.
@@ -711,12 +729,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 #endif
                 if interpolationDimensions != dimensions {
                     interpolationDimensions = dimensions
-                    midpointCosts.removeAll(); calibrationWarmupsRemaining = 2
+                    midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2
                 }
                 interpolator.prepare(width: dimensions.width, height: dimensions.height)
                 if !interpolator.isReady { frames.setInterpolationState("插帧准备中") }
                 if interpolator.isReady {
-                    let midCost = p95(midpointCosts), sourceCost = p95(nativeCosts)
+                    // Admission uses the sample-gated estimate, not P95: right after a preset
+                    // or size change the history is empty and a single warm-up sample would
+                    // otherwise be enough to reject the pair and start a cooldown, which then
+                    // keeps clearing the history it needs. P95 still drives the display so a
+                    // long tail stays visible to the user.
+                    let midCost = admissionCost(midpointCosts), sourceCost = admissionCost(nativeCosts)
                     let slot = pair.period / 2
                     activePairPeriod = pair.period
                     let budgetSlot = slot
@@ -786,7 +809,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // Smooth midpoints use their measured working size and one final resize.
         // Otherwise a reduced midpoint can fall through the >3x spatial wrapper
         // guard into expensive Lanczos, undoing the purpose of the lighter tier.
-        let smoothMidpoint = generatedMidpoint && settings.frameInterpolation == .efficient
+        // A generated midpoint is a blended frame: it carries less real detail than a
+        // source frame by construction. Running it through the full spatial enlargement
+        // therefore spends the biggest part of the pair budget on pixels the blend cannot
+        // justify. Both cheap tiers keep the lightweight final resize instead, which is
+        // what lets 30->60 hold its slot; only the explicitly sharp tier scales a midpoint.
+        let smoothMidpoint = generatedMidpoint
+            && (settings.frameInterpolation == .efficient || settings.frameInterpolation == .flowBlend)
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())

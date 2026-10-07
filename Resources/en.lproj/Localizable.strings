@@ -227,6 +227,8 @@
 "所选窗口已关闭" = "The selected window closed";
 "窗口捕获失败：%@" = "Window capture failed: %@";
 "正在连接窗口…" = "Connecting to window…";
+"插帧关闭：以下质量与高级选项不生效。" = "Interpolation is off; the quality and advanced options below have no effect.";
+"插帧已关闭；打开「插帧加倍」后可选择质量档位。" = "Interpolation is off. Turn on Interpolation to choose a quality tier.";
 "选择要显示的窗口" = "Choose a window to show";
 "等待窗口画面" = "Waiting for window content";
 "在设置 › 采集设置 中选择一个窗口；首次使用需允许屏幕录制。" = "Pick a window in Settings › Capture. Screen Recording permission is required the first time.";

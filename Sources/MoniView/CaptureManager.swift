@@ -447,6 +447,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var resolution = "—"
     @Published private(set) var pixelFormat = "—"
     @Published private(set) var measuredFPS = 0
+    /// What the stored picture contained at launch, before any normalisation. Published so
+    /// a mismatch between the saved setting and the running one can be identified directly.
+    private(set) var loadedInterpolationForce: Bool?
     @Published private(set) var renderedFPS = 0
     @Published private(set) var droppedFrames = 0
     @Published private(set) var processingMilliseconds = 0.0
@@ -519,6 +522,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // A stored force flag with interpolation off is not a reachable state; it came
             // from an older build. Normalise it here so runtime always matches what the
             // panel shows, whatever the preference cache returned.
+            loadedInterpolationForce = saved.interpolationForce
             var loaded = saved
             loaded.normalizeForceFlag()
             if loaded != saved { UserDefaults.standard.set(try? JSONEncoder().encode(loaded), forKey: "view.picture") }
@@ -1246,6 +1250,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         next.upscaleTarget = preset.upscaleTarget
         next.frameInterpolation = preset.interpolation
         next.preferredInterpolationQuality = preset.interpolation
+        // A preset describes a performance target, so it also clears the force override.
+        // Leaving it set meant switching presets kept interpolation ignoring its budget,
+        // and the previous overload flag followed the user into the new preset.
+        next.forceFrameInterpolation = false
         picture = next
         selectedQualityPreset = preset.name
     }
@@ -1408,8 +1416,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                let stable = self.stableContentFPS,
                Date().timeIntervalSince(self.lastRealRateSwitchAt) > 15,
                let target = ContentCadencePolicy.targetRate(contentFPS: stable, supportedRates: self.frameRateOptions),
+               ContentCadencePolicy.isAcceptableFollowTarget(contentFPS: stable, target: target),
                abs(self.selectedFrameRate - target) > 0.01 {
                 self.selectFrameRateValue(target, fromFollow: true)
+                // The stream rate just changed, so every cadence sample taken at the old
+                // rate describes a different signal. Keeping them let the next estimate
+                // build on the previous one and walk the capture rate down below the
+                // content it was meant to carry.
+                self.resetContentRateObservation()
+                self.lastRealRateSwitchAt = Date()
             }
             if let (buffer, _, _) = self.frames.latest() {
                 self.isPortraitSource = CVPixelBufferGetHeight(buffer) > CVPixelBufferGetWidth(buffer)
@@ -1485,6 +1500,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["previewState"] = frames.currentPreviewState()
         payload["interpolationMode"] = picture.frameInterpolation.rawValue
         payload["interpolationForce"] = picture.forceFrameInterpolation
+        payload["loadedInterpolationForce"] = loadedInterpolationForce as Any? ?? NSNull()
         payload["interpolationSkipDuplicates"] = picture.skipsExactDuplicateInterpolation
         payload["skippedDuplicatePairsPerSecond"] = skippedDuplicatePairsPerSecond
         payload["followsRealContentRate"] = followsRealContentRate

@@ -16,6 +16,15 @@ enum ContentCadencePolicy {
         return rate
     }
 
+    /// Follow must never choose a rate below the measured content rate: doing so would
+    /// deliberately drop content the source is producing, which is the opposite of what
+    /// following is for. A stale or drifting estimate that lands under the content rate
+    /// is rejected rather than applied.
+    static func isAcceptableFollowTarget(contentFPS: Double, target: Double) -> Bool {
+        guard contentFPS.isFinite, target.isFinite, contentFPS > 0, target > 0 else { return false }
+        return target >= contentFPS - frameRateTolerance
+    }
+
     static func targetRate(contentFPS: Double, supportedRates: [Double]) -> Double? {
         guard contentFPS.isFinite, contentFPS > 0 else { return nil }
         let rates = supportedRates.filter { $0.isFinite && $0 > 0 }.sorted()
