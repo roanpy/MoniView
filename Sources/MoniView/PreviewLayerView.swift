@@ -465,12 +465,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             if let last = lastDuplicateCheck,
                last.sequence == sequence, last.previousSequence == previousSequence,
                last.streamEpoch == streamEpoch {
-                if !last.recordedCadenceSample {
-                    duplicatePairWindow.append(last.result)
-                    duplicatePairWindow = Array(duplicatePairWindow.suffix(16))
-                    lastDuplicateCheck = (last.sequence, last.previousSequence, last.streamEpoch,
-                                          last.result, true)
-                }
+                // A cadence sample is appended when the entry is stored, so a hit here has
+                // already contributed and must not be counted twice.
                 return last.result
             }
         } else if let last = lastStrictCheck,
@@ -506,6 +502,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                                recordCadenceSample: true)
     }
 
+    /// Convenience for the dedup fast path, which only has the newest sequence number and
+    /// compares against the frame the capture stream delivered immediately before it.
     private func isDuplicatePair(previous: CVPixelBuffer, current: CVPixelBuffer,
                                  sequence: UInt64, streamEpoch: UInt64) -> Bool {
         guard settings.skipsExactDuplicateInterpolation else { return false }
@@ -832,7 +830,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // content that cannot get there by doubling earns the third phase.
                     let requested = FrameInterpolationPolicy.multiplier(
                         contentFPS: contentFPS, targetFPS: 60, displayFPS: displayFPS)
-                    let multiplier = engineMultipliers.contains(requested) ? requested : (engineMultipliers.first ?? 2)
+                    // Prefer the requested step, otherwise the lowest the engine declares.
+                    // Taking the first element assumed the arrays are ordered, so declaring a
+                    // wider set for an engine would silently change what a fallback means.
+                    let multiplier = engineMultipliers.contains(requested)
+                        ? requested
+                        : (engineMultipliers.min() ?? 2)
                     let phases = FrameInterpolationPolicy.midpointPhases(multiplier: multiplier)
                     guard !phases.isEmpty else {
                         // The GPU semaphore is already held here, so leaving without releasing it

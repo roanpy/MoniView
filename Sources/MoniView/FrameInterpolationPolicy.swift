@@ -41,9 +41,12 @@ enum FrameInterpolationPolicy {
     /// the display for more than it refreshes. The smallest multiplier that reaches the
     /// target wins, so 30 FPS content keeps its existing 2x path and only slower content
     /// pays for a third slot.
-    /// Below this the third phase is worth its cost: 2x cannot reach 60 from here.
-    /// At or above it, 2x already reaches the target, and the estimate is not reliable
-    /// enough to justify a heavier pipeline that behaves differently when the number moves.
+    /// Below this the third phase is worth its cost. The boundary is a deliberate tradeoff
+    /// rather than a claim that 2x reaches 60 at this point: content at 25 to 29.97 FPS
+    /// doubles to 50 to 59.94, which falls short of 60, but the estimate is not reliable
+    /// enough at that distance from a standard rate to justify a heavier pipeline whose
+    /// timing changes whenever the number moves. Below it the shortfall is large and the
+    /// third phase is the only way to reach the target.
     static let lowRateThreshold = 25.0
 
     static func multiplier(contentFPS: Double, targetFPS: Double, displayFPS: Double) -> Double {
