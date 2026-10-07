@@ -18,6 +18,7 @@ struct VideoFrameDuplicateDetectorTests {
         setbuf(stdout, nil)
         print("Running pixel equality cases")
         testIdenticalAndChangedPixels()
+        testCadenceTolerance()
         print("Running padding cases")
         testPaddingIsIgnored()
         print("Running format/dimension cases")
@@ -103,6 +104,47 @@ struct VideoFrameDuplicateDetectorTests {
         return (0..<planes).contains { plane in
             let stride = isBGRA ? CVPixelBufferGetBytesPerRow(buffer) : CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
             return stride > activeRowBytes(buffer, plane: plane)
+        }
+    }
+
+    /// The cadence judge tolerates a few differing bytes because a capture device resends one
+    /// picture with its own encoding noise. These cases pin the boundary: noise reads as a
+    /// repeat, real movement does not.
+    private static func testCadenceTolerance() {
+        for format in formats {
+            let previous = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(previous, seed: 91, padding: 0x11)
+
+            // Exact copies are equivalent.
+            let copy = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(copy, seed: 91, padding: 0x11)
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, copy),
+                  "identical buffers are equivalent: \(format.name)")
+
+            // A handful of bytes is within tolerance and counts as a repeat.
+            let noisy = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(noisy, seed: 91, padding: 0x11)
+            for offset in stride(from: 4, to: 40, by: 4) {
+                writeByte(noisy, plane: 0, row: 5, offset: offset, value: 200)
+            }
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, noisy),
+                  "a few differing bytes stay equivalent: \(format.name)")
+
+            // The exact judge must still reject that same pair.
+            check(!VideoFrameDuplicateDetector.areIdentical(previous, noisy),
+                  "the exact judge rejects the noisy copy: \(format.name)")
+
+            // A genuinely different picture is far outside tolerance.
+            let different = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(different, seed: 12, padding: 0x11)
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, different),
+                  "different content is not equivalent: \(format.name)")
+
+            // Zero tolerance degenerates to exactness.
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, noisy, allowedDifference: 0),
+                  "zero tolerance rejects any difference: \(format.name)")
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, copy, allowedDifference: 0),
+                  "zero tolerance still accepts identical buffers: \(format.name)")
         }
     }
 
