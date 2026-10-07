@@ -424,10 +424,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         return result
     }
 
+    /// Cadence measurement always runs while a preview is live. It only reads pixels and
+    /// publishes an estimate, so gating it on the interpolation switches meant a 30 FPS
+    /// game inside a 60 Hz signal was treated as 60 FPS content whenever those switches
+    /// were off, and the panel then aimed the interpolation at the wrong rate.
     private func observeDuplicateCadence(previous: CVPixelBuffer, current: CVPixelBuffer,
                                          sequence: UInt64, previousSequence: UInt64,
                                          streamEpoch: UInt64) -> Bool? {
-        guard contentCadenceMeasurementEnabled || settings.skipsExactDuplicateInterpolation else { return nil }
         return duplicateResult(previous: previous, current: current, sequence: sequence,
                                previousSequence: previousSequence, streamEpoch: streamEpoch,
                                recordCadenceSample: true)

@@ -90,7 +90,7 @@ struct PictureSettings: Equatable, Codable {
     var vibrance = 0.0
     var lowLatency = true
     var enhancementEnabled = true
-    var enhancementStrength = 0.35
+    var enhancementStrength = 0.40
     var upscaleTarget: UpscaleTarget = .native
     var upscaleMethod: UpscaleMethod = .metalFX
     // Optional keeps old persisted settings decodable; absence means off.
@@ -111,14 +111,18 @@ struct PictureSettings: Equatable, Codable {
         get { interpolationMode ?? .off }
         set { interpolationMode = newValue == .off ? nil : newValue }
     }
-    /// The force flag only applies while interpolation runs. Leaving it set with
-    /// interpolation off looked like the app ignoring every performance limit, and
-    /// that state cannot mean anything.
+    /// Force only has meaning while interpolation runs. Call this from a plain load or
+    /// setter path, never from picture.didSet: writing the flag inside the observer
+    /// re-enters it, which recursed until the stack ran out.
     mutating func normalizeForceFlag() {
         if frameInterpolation == .off, forceFrameInterpolation { forceFrameInterpolation = false }
     }
 
+    /// Force only has meaning while interpolation runs. This is cleared in the setter
+    /// below rather than from picture.didSet: writing the flag inside the observer
+    /// re-enters it, which recursed until the stack ran out.
     mutating func setInterpolationEnabled(_ enabled: Bool) {
+        if !enabled { forceFrameInterpolation = false }
         if enabled {
             let preferred = preferredInterpolationQuality ?? .balanced
             frameInterpolation = preferred == .off ? .balanced : preferred
@@ -385,7 +389,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var picture = PictureSettings() {
         didSet {
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
-            if !applyingPreset { picture.normalizeForceFlag() }
             if !applyingPreset, let current = selectedQualityPreset,
                let preset = Self.qualityPresets.first(where: { $0.name == current }),
                qualitySignature(lowLatency: oldValue.lowLatency, strength: oldValue.enhancementStrength,
@@ -1217,24 +1220,19 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let interpolation: FrameInterpolationMode
     }
 
-    /// Three starting points covering the two axes users actually choose between:
-    /// how smooth the motion is (temporal) and how sharp the picture is (spatial).
-    /// Low Latency stays on in every preset: it only avoids processing pixels the
-    /// window cannot show, so switching it off spends GPU on nothing visible.
+    /// Two starting points covering the axes a user actually chooses between: keep the
+    /// picture at the source's own size for the smoothest motion, or scale up to the
+    /// display for a sharper picture. Whether interpolation runs at all is the separate
+    /// 插帧加倍 switch, so a preset never overrides it.
     static let qualityPresets: [QualityPreset] = [
-        // Smoothest motion: 2x interpolation at the source's own size. This is the
-        // tier that reaches 120 on a 1080p60 source.
-        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.30,
+        // Source-sized: the midpoint stays at the capture resolution. This is the tier
+        // that holds 120 on a 1080p60 source.
+        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.38,
                       upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .flowBlend),
-        // Sharper picture: still interpolated, but the midpoint and endpoints are
-        // scaled up to the display. Costs more; useful when detail matters more
-        // than the last few frames.
-        QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.45,
-                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality),
-        // Lowest input delay: no interpolation at all, so the newest frame is
-        // presented as soon as it arrives. For input-sensitive play.
-        QualityPreset(name: "低延迟", lowLatency: true, enhancementStrength: 0.25,
-                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .off)
+        // Display-sized: midpoints and endpoints scale up to the window. Sharper, and it
+        // costs more, so the target rate may not hold on a busy GPU.
+        QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.50,
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality)
     ]
 
     func applyQualityPreset(_ name: String) {
