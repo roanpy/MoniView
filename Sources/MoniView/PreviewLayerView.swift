@@ -284,6 +284,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             let failureReason = failureCooldown > 0 ? cooldownReason : nil
             frames.setInterpolationCost(seconds: 0, budget: 0)
             frames.setInterpolationWorkingSize(nil)
+            // The published step described the old engine. An engine that declares a narrower
+            // set (flow 2x/3x to a VideoToolbox 2x tier) must not keep showing the wider step
+            // until the next pair happens to run, which may never happen under cooldown.
+            frames.setActiveMultiplier(nil)
             adaptiveLongEdge = nil; interpolationDimensions = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
@@ -392,6 +396,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
+        // The step belongs to the pair that published it. A display change resets the cadence
+        // window and the cost history, so leaving the last step in place would let the panel
+        // name a multiplier from a display this preview no longer draws into.
+        frames.setActiveMultiplier(nil)
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
         queuedFrames.removeAll(); midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
@@ -731,7 +739,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // estimate; the exact one decides whether this frame carries new content, because
             // treating a near-duplicate as a repeat here skips the whole spatial pipeline for a
             // frame that really is new.
-            let isDuplicate = cadencePair.flatMap {
+            // Only the side effect matters here: this call feeds the cadence window that
+            // pairBudgetMultiplier reads. The verdict itself is deliberately not reused
+            // for anything else, so a tolerant "repeat" can never suppress a frame.
+            _ = cadencePair.flatMap {
                 observeDuplicateCadence(previous: $0.0, current: buffer,
                     sequence: sequence, previousSequence: $0.1, streamEpoch: streamEpoch)
             }
@@ -789,15 +800,29 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             return
         }
         if interpolationRequested {
+            // The step is chosen from a tolerant cadence estimate; the pair period comes from
+            // measured PTS. Capture noise can read a 60 Hz pair as 20 FPS content and ask for
+            // three presentations where the display only has room for two. Hoisted here because
+            // both the pair's eligibility and its phases have to agree on the same request.
+            let requested = FrameInterpolationPolicy.multiplier(
+                contentFPS: contentFPS, targetFPS: 60, displayFPS: displayFPS)
             if !FrameInterpolatorSupport.isSupported(settings.frameInterpolation) { frames.setInterpolationState("插帧不可用") }
             else if !admitted {
                 frames.setInterpolationState(mediaFPS == nil ? "等待稳定输入帧率" :
-                    (sourceFPS == 0 ? "当前输入帧率不支持2×，使用原始帧率" : "显示器刷新率不足，使用原始帧率"))
+                    (sourceFPS == 0 ? "当前输入帧率不支持2×，使用原始帧率" :
+                        (displayFPS <= 0 ? "等待显示器刷新率" : "显示器刷新率不足，使用原始帧率")))
             }
             else if CACurrentMediaTime() < cooldownUntil { frames.setInterpolationState(cooldownReason ?? (settings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率")) }
             else if endpointPresentation == nil, !skipInterpolation,
                     let pair = interpolationPair(current: buffer, currentPTS: sourcePTS, sequence: sequence,
                         streamEpoch: streamEpoch, signalFPS: sourceFPS, currentIsDuplicate: !sourceIsUniqueContent),
+                    // The measured period decides whether a midpoint fits at all, not the cadence
+                    // estimate that picked the step: a duplicate-heavy 60 Hz signal can look like
+                    // 45 FPS content while its pairs are genuinely 33 ms apart and do hold two
+                    // presentations. A period with room for fewer than two has none, so the source
+                    // is presented natively rather than queued past its deadline. This is also what
+                    // keeps 60 FPS content on a 60 Hz panel from stalling the preview.
+                    FrameInterpolationPolicy.multiplierFittingPair(2, pairPeriod: pair.period, displayFPS: displayFPS) >= 2,
                     let dimensions = FrameInterpolationPolicy.targetDimensions(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mode: settings.frameInterpolation, inputFPS: contentFPS, maximumLongEdge: adaptiveLongEdge),
                     !isDuplicatePair(previous: pair.previousBuffer, current: buffer, sequence: sequence,
                         previousSequence: pair.previousSequence, streamEpoch: streamEpoch),
@@ -825,30 +850,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // processor only produces the midpoint, so it stays on 2x and the flow
                     // engine is the tier that can fill slower content up to the panel rate.
                     let engineMultipliers = interpolator.supportedMultipliers
-                    // Aim at the conventional smoothness target, not at the panel rate:
-                    // doubling 20 FPS content on a 120 Hz panel should reach 60, and only
-                    // content that cannot get there by doubling earns the third phase.
-                    let requested = FrameInterpolationPolicy.multiplier(
-                        contentFPS: contentFPS, targetFPS: 60, displayFPS: displayFPS)
                     // Prefer the requested step, otherwise the lowest the engine declares.
                     // Taking the first element assumed the arrays are ordered, so declaring a
                     // wider set for an engine would silently change what a fallback means.
                     let stated = engineMultipliers.contains(requested)
                         ? requested
                         : (engineMultipliers.min() ?? 2)
-                    // The step came from a tolerant cadence estimate; the period comes from
-                    // measured PTS. Capture noise can read a 60 Hz pair as 20 FPS content and
-                    // ask for three presentations where the display only has room for two, which
-                    // pushes the endpoint past its deadline. Hold the step to what this pair fits.
+                    // The guard above proved this pair's period holds at least two presentations.
+                    // Cap the step to what it actually holds: a 60 Hz pair read as 20 FPS content
+                    // asks for three where only two have a slot, and the extra one would push the
+                    // endpoint past its deadline.
                     let multiplier = FrameInterpolationPolicy.multiplierFittingPair(
                         stated, pairPeriod: pair.period, displayFPS: displayFPS)
                     let phases = FrameInterpolationPolicy.midpointPhases(multiplier: multiplier)
-                    guard !phases.isEmpty else {
-                        // The GPU semaphore is already held here, so leaving without releasing it
-                        // would stall the renderer permanently rather than skipping one pair.
-                        inFlight.signal()
-                        return
-                    }
                     activeMidpointCount = phases.count
                     let steps = Double(phases.count)
                     // The published step follows the phases actually produced; it is updated again

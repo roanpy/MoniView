@@ -465,9 +465,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let engine = picture.frameInterpolation
         let supported: [Double] = engine == .flowBlend || engine == .off ? [2, 3] : [2]
         let requested = FrameInterpolationPolicy.multiplier(contentFPS: content, targetFPS: 60, displayFPS: max(60, displayMaximumFPS))
+        // A step below 2 is not a step the renderer will run: its pair guard requires the
+        // measured period to hold at least two presentations, so content the policy cannot
+        // lift falls back to native. Reporting the engine's floor here claimed a multiplier
+        // and a target the preview would never produce, such as 60 FPS content on a 60 Hz panel.
+        guard requested >= 2 else { return 1 }
         return supported.contains(requested) ? requested : (supported.first ?? 2)
     }
-    /// Short label for the panel, e.g. "2×" or "3×"; interpolation off shows the target only.
+    /// Short label for the panel, e.g. "2×" or "3×"; 1x means no step is being generated.
     var activeMultiplierLabel: String {
         let value = activeMultiplier
         return value == value.rounded() ? String(format: "%.0f×", value) : String(format: "%.1f×", value)

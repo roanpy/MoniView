@@ -41,12 +41,15 @@ enum FrameInterpolationPolicy {
     /// the display for more than it refreshes. The smallest multiplier that reaches the
     /// target wins, so 30 FPS content keeps its existing 2x path and only slower content
     /// pays for a third slot.
-    /// Below this the third phase is worth its cost. The boundary is a deliberate tradeoff
-    /// rather than a claim that 2x reaches 60 at this point: content at 25 to 29.97 FPS
-    /// doubles to 50 to 59.94, which falls short of 60, but the estimate is not reliable
-    /// enough at that distance from a standard rate to justify a heavier pipeline whose
-    /// timing changes whenever the number moves. Below it the shortfall is large and the
-    /// third phase is the only way to reach the target.
+    /// Below this the third phase is worth its cost. Two ceilings meet here and the display
+    /// one binds first: three presentations of 25 FPS content need 75 Hz, so on a 60 Hz panel
+    /// the check above rejects 3x for everything at or above 20.17 FPS before this threshold
+    /// is ever consulted, and content at 25 to 29.97 FPS doubles to 50 to 59.94 instead. The
+    /// threshold therefore never changes a result below 74.5 Hz, the lowest refresh rate that
+    /// can hold three presentations of 25 FPS content. It is set here rather than at the
+    /// doubling boundary because the estimate is not reliable enough to justify a heavier
+    /// pipeline whose per-pair timing changes whenever the number moves; below it the shortfall
+    /// is large enough that only the third phase reaches the target.
     static let lowRateThreshold = 25.0
 
     static func multiplier(contentFPS: Double, targetFPS: Double, displayFPS: Double) -> Double {
@@ -74,12 +77,12 @@ enum FrameInterpolationPolicy {
         return (1..<steps).map { Float($0) / Float(steps) }
     }
 
-    /// Presentations the display can hold inside one pair period, capped at the engine's
-    /// stated multiplier. The step is chosen from a tolerant cadence estimate, while the
-    /// period comes from measured PTS, so the two can disagree: capture noise can read a
-    /// 60 Hz pair as 20 FPS content and ask for three presentations where only one has a
-    /// slot. Asking for more than the display can hold pushes the endpoint past its
-    /// deadline, so the step is reduced to what this pair actually fits.
+    /// Presentations the display can hold inside one pair period, capped at the engine's own
+    /// stated multiplier. The step is chosen from a tolerant cadence estimate while the period
+    /// comes from measured PTS, so the two can disagree: the same 60 Hz pair holds four
+    /// presentations on a 120 Hz panel, two on a 60 Hz panel, and a cadence that reads it as
+    /// 20 FPS content asks for three on both. Asking for more than the display can hold pushes
+    /// the endpoint past its deadline, so the step is reduced to what this pair actually fits.
     static func multiplierFittingPair(_ multiplier: Double, pairPeriod: Double, displayFPS: Double) -> Double {
         guard multiplier.isFinite, multiplier >= 1, pairPeriod.isFinite, pairPeriod > 0,
               displayFPS.isFinite, displayFPS > 0 else { return 1 }

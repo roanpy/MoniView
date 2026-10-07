@@ -147,6 +147,15 @@ struct FrameInterpolationPolicyTests {
         check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 60) == 3, "60 Hz display allows 20 to 60")
         check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 60.0 / 2) == 1, "Unreachable target falls back to no work")
         check(P.multiplier(contentFPS: 45, targetFPS: 60, displayFPS: 120) == 2, "45 FPS content still doubles when the display allows it")
+        // lowRateThreshold is documented as never changing a result below 74.5 Hz. Pin the
+        // boundary so the comment and the code cannot drift apart: 24.9 FPS still earns the
+        // third phase at 74.5 Hz, and 25.0 FPS is held back to 2x at exactly that rate.
+        check(P.multiplier(contentFPS: 24.9, targetFPS: 60, displayFPS: 74.5) == 3,
+              "Just under the threshold still takes the third phase at the boundary refresh rate")
+        check(P.multiplier(contentFPS: 25.0, targetFPS: 60, displayFPS: 74.5) == 2,
+              "The threshold itself is held to 2x even where the display could hold 3x")
+        check(P.multiplier(contentFPS: 25.0, targetFPS: 60, displayFPS: 74.4) == 2,
+              "Below 74.5 Hz the display rejects 3x before the threshold is consulted")
         for invalid in [0.0, -1, Double.nan, Double.infinity] {
             check(P.multiplier(contentFPS: invalid, targetFPS: 60, displayFPS: 120) == 1, "Invalid content rate")
         }
@@ -165,6 +174,17 @@ struct FrameInterpolationPolicyTests {
         check(P.multiplierFittingPair(2, pairPeriod: 1.0 / 30, displayFPS: 60) == 2, "30 FPS content keeps 2x on a 60 Hz display")
         check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 59.94, displayFPS: 60) == 1, "A 59.94 pair still leaves no slot on a 60 Hz grid")
         check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 29.97, displayFPS: 60) == 2, "A 29.97 pair fits 2x and not 3x")
+        // The renderer admits a pair only when the measured period holds two presentations, so
+        // every caller that gets past that guard reads 2 or 3 here. These pin the boundary the
+        // guard tests, including the PTS jitter window the cadence policy still accepts.
+        check(P.multiplierFittingPair(3, pairPeriod: 0.0294, displayFPS: 60) == 1,
+              "A jittery 2-tick pair at 29.4 ms holds no midpoint on a 60 Hz panel")
+        check(P.multiplierFittingPair(3, pairPeriod: 0.0331, displayFPS: 60) == 2,
+              "The same pair at 33.1 ms holds exactly one midpoint")
+        check(P.multiplierFittingPair(3, pairPeriod: 0.0147, displayFPS: 120) == 1,
+              "A 1-tick pair at 68 Hz content has no room even on a 120 Hz panel")
+        check(P.multiplierFittingPair(3, pairPeriod: 0.0334, displayFPS: 120) == 3,
+              "A 29.94 ms pair holds all three presentations on a 120 Hz panel")
         for invalid in [1.0, 0.0, -3, Double.nan] {
             check(P.multiplierFittingPair(invalid, pairPeriod: 1.0 / 20, displayFPS: 120) == 1, "Invalid multiplier yields no step")
         }

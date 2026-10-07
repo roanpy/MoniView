@@ -169,16 +169,16 @@ The implementation here is independently written with exact active-byte comparis
 
 ### What the input can tell us / 输入监测边界
 
-The current app accepts AVFoundation video devices. Device-advertised modes and sample PTS describe the stream delivered to the Mac, not the console's internal game rendering FPS. Exact repeats can also be static content; noisy repeats may differ. Selecting 30 FPS limits the capture stream and does not remotely set the console's HDMI output. This app has no EDID control, HDMI source telemetry or game process integration.
+The app accepts AVFoundation video devices and, as a separate source, a Mac window through ScreenCaptureKit. Device-advertised modes and sample PTS describe the stream delivered to the Mac, not the console's internal game rendering FPS. Exact repeats can also be static content; noisy repeats may differ. Selecting 30 FPS limits the capture stream and does not remotely set the console's HDMI output. This app has no EDID control, HDMI source telemetry or game process integration.
 
-当前只接入 AVFoundation 视频设备。设备上报格式与收到的时间戳描述 Mac 收到的流，不能确认游戏内部渲染帧率。相同画面也可能来自静止场景；重复画面经过压缩或噪声后也可能不完全相同。选择 30 FPS 限制采集流，不会远程改变主机 HDMI 输出。本程序没有 EDID 控制、HDMI 源遥测或游戏进程接口。
+输入接入 AVFoundation 视频设备，另有 Mac 窗口这一独立来源（ScreenCaptureKit）。设备上报格式与收到的时间戳描述 Mac 收到的流，不能确认游戏内部渲染帧率。相同画面也可能来自静止场景；重复画面经过压缩或噪声后也可能不完全相同。选择 30 FPS 限制采集流，不会远程改变主机 HDMI 输出。本程序没有 EDID 控制、HDMI 源遥测或游戏进程接口。
 
-A console connected directly to an ordinary Mac HDMI output cannot be captured through that output. Receiving another machine's video still needs capture hardware or a separate supported transport. Capturing games running on this same Mac through ScreenCaptureKit is a possible separate input backend, but is **not implemented** in this release. ScreenCaptureKit's requested capture interval would still not certify a game's own render FPS.
+A console connected directly to an ordinary Mac HDMI output cannot be captured through that output. Receiving another machine's video still needs capture hardware or a separate supported transport. Games running on this same Mac can be captured through the ScreenCaptureKit window source. ScreenCaptureKit's requested capture interval still does not certify a game's own render FPS.
 
-普通 Mac HDMI 输出口不能作为主机视频输入；其他机器的画面仍需采集硬件或另外支持的传输方案。本机游戏可考虑单独实现 ScreenCaptureKit 输入，但本版**未实现**，其采集间隔也不能认证游戏内部帧率。
+普通 Mac HDMI 输出口不能作为主机视频输入；其他机器的画面仍需采集硬件或另外支持的传输方案。本机游戏可用 ScreenCaptureKit 窗口来源采集；其采集间隔同样不能认证游戏内部帧率。
 
 References: [AVFoundation capture frame duration](https://developer.apple.com/documentation/avfoundation/avcapturedevice/activevideominframeduration), [ScreenCaptureKit capture interval](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/minimumframeinterval).
 
 ### Compact controls / 紧凑面板
 
-The primary enhancement panel keeps scaling, multiplier, quality and measured output together. Force and exact-duplicate skipping are under More options; long explanations are tooltips. Budget percentage is processing cost against the interpolation admission budget, not whole-system GPU usage. The panel is height-bounded and scrolls in small windows; detailed sizes and pacing remain in Video Info. / 主面板保留放大、倍率、质量与实测输出；强制和完全重复检测收进更多选项，长说明改成帮助提示。预算百分比不是整机 GPU 占用率；面板限制高度，小窗口可滚动，详细尺寸与呈现节奏在画面信息中。
+The enhancement panel leads with two presets and keeps the per-setting rows visible beneath them, so a preset is a starting point rather than a hidden mode. Force and exact-duplicate skipping sit with the other interpolation rows; long explanations are tooltips. Budget percentage is processing cost against the interpolation admission budget, not whole-system GPU usage. / 增强面板首层是两个预设，细项直接排在下方，预设只是起点而非隐藏模式；强制与完全重复检测与其他插帧项同层；长说明改成帮助提示。预算百分比不是整机 GPU 占用率。
