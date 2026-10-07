@@ -29,6 +29,25 @@ struct FrameInterpolationPolicyTests {
         check(P.preserveFailureCooldown(forceChanged: true, modeChanged: false, failureActive: true, until: 9, now: 10) == 0, "Expired failure cooldown does not persist")
         check(P.preserveFailureCooldown(forceChanged: true, modeChanged: true, failureActive: true, until: 12, now: 10) == 0, "Actual session change resets lifecycle")
         check(P.preserveFailureCooldown(forceChanged: false, modeChanged: false, failureActive: true, until: .nan, now: 10) == 0, "Invalid cooldown cannot persist")
+        // The multi-phase overload is what a 3x pair is admitted through, so its own
+        // boundaries need to be pinned: two midpoints cost twice as much as one.
+        check(P.allowsMeasuredPair(midpoints: [0.005, 0.005], source: 0.006, slot: 0.02, force: false, deadlineFits: true),
+              "A 3x pair whose two midpoints fit is admitted")
+        // Each midpoint stays under its individual cap (0.03) but their sum with the endpoint
+        // exceeds the period budget (3 x 0.02 x 0.9 = 0.054), which is the case a per-midpoint
+        // check would have wrongly admitted.
+        check(!P.allowsMeasuredPair(midpoints: [0.025, 0.025], source: 0.010, slot: 0.02, force: false, deadlineFits: true),
+              "Two midpoints that overrun the period budget are rejected")
+        check(P.allowsMeasuredPair(midpoints: [0.025, 0.025], source: 0.010, slot: 0.02, force: true, deadlineFits: true),
+              "Force still admits an overrun pair")
+        check(!P.allowsMeasuredPair(midpoints: [0.005, 0.005], source: 0.006, slot: 0.02, force: true, deadlineFits: false),
+              "Force cannot admit a missed deadline")
+        check(!P.allowsMeasuredPair(midpoints: [], source: 0.006, slot: 0.02, force: true, deadlineFits: true),
+              "An empty phase list is never admitted")
+        check(!P.allowsMeasuredPair(midpoints: [0.005, .nan], source: 0.006, slot: 0.02, force: true, deadlineFits: true),
+              "An invalid midpoint rejects the pair")
+        check(P.allowsMeasuredPair(midpoint: 0.005, source: 0.006, slot: 0.02, force: false, deadlineFits: true),
+              "The single-midpoint overload delegates to the same rule")
         check(P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: true, deadlineFits: true), "Force ignores measured overload")
         check(!P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: false, deadlineFits: true), "Automatic protects whole pair budget")
         check(!P.allowsMeasuredPair(midpoint: 0.030, source: 0.003, slot: 1/120, force: true, deadlineFits: false), "Force cannot present an expired pair")
