@@ -780,10 +780,11 @@ struct MainView: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
-                // Full advertised list and Follow on one line: the shortcut row above is
-                // for everyday use, and everything else stays visible rather than folded.
+                // The shortcut row above is the everyday control; this picker carries every
+                // advertised value, including fractional rates and high-rate modes, so nothing
+                // becomes unreachable. Follow is the mode switch beside it.
                 HStack(alignment: .center, spacing: 8) {
-                    labeledPicker("完整帧率", fieldWidth: 195,
+                    labeledPicker("完整帧率", fieldWidth: 150,
                         selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
                         choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
                         .disabled(capture.isRecording || capture.formatOptions.isEmpty)
