@@ -334,3 +334,58 @@ The packaged app was driven to select the 光流 Beta tier with the real Jemdo 1
 **Not verified here / 未验证**
 
 Real game motion quality of the Flow Beta tier (motion edges, dissolve fallbacks) still needs a gameplay session; the synthetic fixture validates throughput and presentation, not perceived quality. RIFE Core ML/MLX route remains shelved on measured cost (about 168 ms at 854x480 per pair on this M5 Max), not licensing (MIT). Flow Beta currently shares the macOS 26+ interpolation-section gate even though the engine is plain Metal. / 光流档真实游戏画质待游戏会话验收；RIFE 因实测成本搁置（MIT 许可无阻碍）；光流档暂随 macOS 26+ 插帧区门槛。
+
+
+## Earlier 2026-10-07 snapshot / 2026-10-07 早期快照：输入节奏与三相位
+
+These results precede the final 0.55 sharpening/Vivid/Follow matrix below; they do not certify the newer configuration. / 以下结果早于后述最终增强强度、鲜艳色彩及跟随组合，不能代替新配置验收。
+
+- InputContentCadence isolated CPU fixture: 1143 checks, including 20/30/40/60 updates, source epochs, PTS discontinuities, stale observations and reset/publication races. CaptureManager consumes this input-side observer; rendering no longer supplies the estimate.
+- Strict Flow Beta 1080p60→120, screen target 3024×1701, force ON, continuously visible near-fullscreen floating fixture: 30/30 eligible windows; source 59.73 FPS, generated 59.50, actual sum 119.23; mean interval 8.387 ms, P95 8.333 ms. Two fullscreen-Space attempts were inconclusive/failed presentation recovery and are not acceptance evidence.
+- Flow 60-sampled / repeated-three-times source (20 unique FPS), screen target, exact dedup, force ON: steady 7/7 and restart 6/6 windows; source ~20, generated ~40. Full three-presentation pair structure passed before and after restart. Not a claim of constant 60 for arbitrary 20–30 variation.
+- Flow image fixture: 235/235 checks passed. Separate performance sweeps are not general throughput or game-artifact certification.
+- Production window-source audio lifecycle and short recording: selected external audio delivered while preview muted, source switch and audio off/on recovered; actual video/audio time-range overlap 2.401 s and track start offset 1.437 ms. This does not establish audible monitoring or long-duration AV sync.
+- Real ScreenCaptureKit fixture after Retina/display/generation fixes: 16 checks; animated window 1600×1064 BGRA, increasing PTS, 280 frames in the observation; stop/restart and static identical content passed. Multi-display migration and real game input focus remain unaccepted.
+- Build 92 installed with a stable local development certificate. Native Chinese capture UI verified: shortcuts and content reading share one row; full-rate, resolution and other dropdowns share their left edge. Build 92 is a local development bundle, not an App Store submission. Later UI size/shortcut changes require their own native confirmation.
+- Required remaining acceptance: current real game moving scenes, all UI preset combinations after final build, arbitrary-cadence fixed-output resampling, optional original-window overlay/input behavior, sandbox/file permission runtime and App Store distribution signing.
+
+## Current build 100 preset and readout acceptance / 构建 100 预设与读数验收
+
+This section supersedes the build 96 preset behaviour below; the 60→120 results stay unchanged. / 本节替代下方构建 96 的预设结论；60→120 结果不变。
+
+| Check / 检查 | Result / 结果 |
+| --- | --- |
+| Preset completeness / 预设完整性 | PASS: CPU table over capability sets {flow, quality}, {flow} and {} crossed with every previous engine state. Smoothness and Quality set enhancement on, their engine, force on and content-follow on; Native enhancement turns interpolation off; a missing engine falls back to off without claiming availability. The panel caption follows the resolved engine, so a fallback or a disabled engine is no longer described as the preset's own combination. / 能力集与历史引擎交叉表驱动通过；面板说明按实际解析出的引擎显示，回退或关闭不再写成预设原组合。 |
+| Failure-path accounting / 失败路径 | PASS: a failed GPU command clears the queue, schedule, midpoint and published pair even when a colour edit changed the settings between encode and completion, and a late failure callback from an older stream or presentation epoch can no longer clear the state a newer generation published. / GPU 命令失败时即使中途改过色彩也会清理队列、排程、中点与已发布配对；旧代际迟到的失败回调不再清空新代际状态。 |
+| Interpolated-pair readout / 插帧读数 | PASS: synthetic 30→60 with Follow, Flow engine and Match Display; a 20 Hz probe over 6 s of steady output read the published pair 120/120 times with zero missing samples and zero mismatches in the checked 2x regime, and disabling interpolation cleared it immediately. A 60→20 three-phase run passed the same presence check; its step is covered by the phase-structure assertions because the low-rate estimate keeps moving while that queue fills. Fake-clock checks cover the 1.25 s window, renewal re-arming it, expiry after renewal, an older epoch failing to republish, fallback non-renewal, future timestamps and hard resets. / 2×稳定窗口120/120次有效且无缺失；3×只断言读数存在，其步长由相位结构用例覆盖；假时钟覆盖窗口、续期、过期、旧代际不可覆盖与硬重置。 |
+| 30→60 Flow switch/restart / 光流切换与重启 | PASS: switch 7/7 windows, restart 6/6 windows, source ≈30.0 + generated ≈30.0 FPS. Pair interval P95 measured 16.667–25.0 ms across runs at the Match Display target depending on GPU load, so uniform 60 Hz spacing is not certified. / 切换 7/7、重启 6/6；配对 P95 随 GPU 负载在 16.667–25.0 ms 之间波动，不代表均匀60帧间距。 |
+| GPU suites / GPU 套件 | PASS: flow image, frame interpolator, spatial interpolation and joint interpolation fixtures. / 光流图像、插帧、空间与联合夹具通过。 |
+| CPU suites / CPU 套件 | PASS: capture compatibility, frame-rate policy, configuration revision, content cadence, interpolation policy, input cadence, recorder faults, duplicate comparison, window audio, window policy, audio buffer, upscaler LRU. The real ScreenCaptureKit window fixture passed 16 checks; one earlier run hit a transient stop-time crash and passed on re-run, so a single green run is required per change. / 上述套件通过；窗口夹具 16 项通过，曾出现一次停止时的耦发崩溃，重跑通过。 |
+| Localization / 本地化 | PASS: 263 keys per language, 123 source references, 526 bundle lookups and 4 permission messages. / 字符串与引用检查通过。 |
+| Install and native smoke / 安装与实机烟雾 | Build 0.2.0 (100) signed, verified and installed over build 99; packaged and installed hashes both d1f2fea0baec3e4d424cef6ef45803a0fa6e252e19a237631c83a509856f008a. Selecting Quality enabled smooth interpolation, force and Follow with the high 1080p tier and a caption naming that engine; Smoothness switched to native-size Flow at 0.55; Native enhancement turned interpolation off at 1.00/Match Display. Real game motion on the capture card is still required before claiming the flicker fix for live gameplay. / 构建100签名安装、哈希一致；实机鼠标切换三个预设的开关组合与说明均正确，真实游戏运动画面仍需实机确认。 |
+
+## Current build 96 matrix / 当前构建 96 验证
+
+This section supersedes earlier performance claims for the configurations listed. All presentation fixtures use synthetic input on this Mac's 120 Hz display; they do not certify real game artifacts, controller/HDMI latency or other hardware. / 本节以所列配置的新结果替代历史性能结论。呈现测试使用本机120 Hz屏幕及合成源，不认证游戏伪影、操作／HDMI延迟或其他硬件。
+
+| Check / 检查 | Result / 结果 |
+| --- | --- |
+| Localization / 本地化 | PASS: 254 keys in each language, 36 format signatures, 125 UI references including dynamic preset names/tooltips, 8 language preference orders, 508 Foundation bundle lookups and 4 permission descriptions. / 资源、格式、动态预设、提示、读取与回退通过。 |
+| Input cadence / 输入节奏 | PASS: 1566 CPU checks; independent bounded worker, original PTS, stale/static/epoch resets. / 独立观察、原始时间戳、过期／静止及代次重置通过。 |
+| Frame policy / 插帧策略 | PASS: 372 CPU checks; no GPU acceptance implied. / 策略通过，不替代GPU验收。 |
+| Duplicate comparison / 重复帧比较 | PASS: 152 CPU checks, including tolerance early exit versus full-count reference at fractional boundaries, both 420 formats and BGRA. Strict equality is unchanged. / 容差超限早退与完整计数对照通过，严格去重不变。 |
+| Capture settings / 采集设置 | PASS: capability-aware preset restore, native enhancement 1.00/screen/interpolation off, preferred engine persistence, stream-epoch publisher rejection, independent audio/window recording gates. / 能力回退、预设与代次发布等兼容检查通过。 |
+| Flow image / 光流图像 | PASS: 289/289 GPU checks, including quarter/three-quarter correspondence. / 含非中点相位，图像检查通过。 |
+| 30→60 Flow engine switch / 光流引擎切换 | PASS: 0.55/screen/force/Follow; switch to high quality then restore Flow; steady 7/7 and restart 6/6, source and generated ~30 FPS each, pair interval P95 16.667ms. / 切换恢复与完整帧对通过。 |
+| 20→60 phases / 三相位 | PASS: 0.55/screen/force/Follow, steady 7/7 and restart 6/6; source 21.43 + generated 39.29 ≈60.72 FPS, full pair ordering verified. P95 25ms means this does not certify uniformly spaced constant60. / 三相位及恢复通过，帧距不计均匀恒60验收。 |
+| Follow off/on / 跟随关闭恢复 | PASS: capture remains 60; OFF reports actual 60×2 and generated 57–58 FPS, restore ON reports actual content 30×2; original engine/force/target choices preserved. First restored window generated 23 FPS, so this is transition acceptance, not instantaneous steady throughput. / 采集档位不变、配对恢复通过；恢复首秒不计稳定吞吐。 |
+| 60→120 screen pressure / 匹配屏幕压力 | FAIL: 0.55/Vivid/screen/Follow OFF, 26/30 strict windows (required ≥27), output 117.13 FPS. / 严格窗口数未达门槛。 |
+| 60→120 unique input + Follow / 真实60内容跟随 | FAIL: final 0.55/Vivid/native/Follow ON, 7/30 strict windows, source 47.47 + generated 46.97 = 94.43 FPS, mean interval 10.590ms, P95 16.667ms. / 最终组合未达稳定120，不能按通过交付。 |
+
+The adjacent-input pairing correction needs fresh same-epoch input cadence evidence. Unknown evidence still uses unique-content pairing; mailbox sequence gaps and extra comparison/GPU work remain suspected contributors to the Follow throughput loss, not proven sole causes. The bounded final retry stopped without relaxing the gate. / 相邻配对修正需新鲜同代次输入证据；未知时保留内容配对。观察丢样及比较／GPU负担仍是嫌疑，未证实单一根因；最后重测后停止，不降低门槛。
+
+No shared multi-phase batch API ships: the experimental implementation was withdrawn before production integration. Overlay, actual sandbox runtime, store distribution and iPad remain staged work in [NEXT_BETA.md](NEXT_BETA.md). Variable20–30→constant60 is not implemented by integer3×. / 同帧对批次原型未接生产，已撤回；窗口覆盖、沙盒、商店与iPad见阶段计划，整数3×不代表任意波动恒60。
+
+Build0.2.0(96) was installed with the existing local development certificate after protecting build92. Signature verification passed; packaged and installed executable SHA256 both equal `8b3a70b8cc820c257c604a19928586f9e952c984229688d01375755e12e3f7fa`. This is unsandboxed local development deployment, not store distribution. / 旧版已保护，构建96安装、签名与哈希一致；本地开发包未启用沙盒，不是商店分发。
+
+Native macOS per-app language was temporarily changed to English and restarted, then its override was removed and restarted back to system Simplified Chinese. Final native screenshots/AX confirmed translated single-line preset buttons and Auto, aligned capture dropdowns, visible compact audio, English color labels and localized Refresh help. Native1.00 selected screen processing3024×1701 with interpolation off; switching back preserved off and explicitly enabling restored force. Actual UVC preview resumed after restart, including a single119-FPS reading with Follow off; this snapshot is not sustained120 or game-motion acceptance. / 实际应用语言切换及系统中文恢复通过，临时覆盖已移除；英文漏译、按钮换行及刷新提示已修正。原生预设实测匹配屏幕且插帧关闭，切回保留关闭、重新开启恢复强制；真实采集预览恢复，单次119读数不计持续120验收。

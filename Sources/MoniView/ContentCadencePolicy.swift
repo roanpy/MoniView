@@ -1,6 +1,13 @@
 import Foundation
 
 enum ContentCadencePolicy {
+    /// Content updates cannot exceed delivered sampling cadence. Window-edge counts
+    /// can overshoot by one; preserve slower or nonstandard content estimates.
+    static func boundedObservedRate(_ rate: Double?, signalFPS: Double?) -> Double? {
+        guard let rate, rate.isFinite, rate > 0 else { return nil }
+        guard let signalFPS, signalFPS.isFinite, signalFPS > 0 else { return rate }
+        return min(rate, signalFPS)
+    }
     static let stabilityThreshold = 5
     static let frameRateTolerance = 0.01
 

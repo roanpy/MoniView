@@ -19,6 +19,7 @@ struct VideoFrameDuplicateDetectorTests {
         print("Running pixel equality cases")
         testIdenticalAndChangedPixels()
         testCadenceTolerance()
+        testCadenceEarlyExitMatchesFullCount()
         print("Running padding cases")
         testPaddingIsIgnored()
         print("Running format/dimension cases")
@@ -154,6 +155,43 @@ struct VideoFrameDuplicateDetectorTests {
                   "zero tolerance rejects any difference: \(format.name)")
             check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, copy, allowedDifference: 0),
                   "zero tolerance still accepts identical buffers: \(format.name)")
+        }
+    }
+
+    private static func testCadenceEarlyExitMatchesFullCount() {
+        for format in formats {
+            let previous = makeBuffer(width: 64, height: 32, format: format.type)
+            fill(previous, seed: 71)
+            for seed in [71, 72, 135] {
+                let current = makeBuffer(width: 64, height: 32, format: format.type)
+                fill(current, seed: seed)
+                if seed == 71 { writeByte(current, plane: 0, row: 31, offset: 0, value: 0) }
+                precondition(CVPixelBufferLockBaseAddress(previous, .readOnly) == kCVReturnSuccess)
+                precondition(CVPixelBufferLockBaseAddress(current, .readOnly) == kCVReturnSuccess)
+                let packed = format.type == kCVPixelFormatType_32BGRA
+                var differences = 0, total = 0
+                for plane in 0..<(packed ? 1 : CVPixelBufferGetPlaneCount(previous)) {
+                    let rows = packed ? CVPixelBufferGetHeight(previous) : CVPixelBufferGetHeightOfPlane(previous, plane)
+                    let strideA = packed ? CVPixelBufferGetBytesPerRow(previous) : CVPixelBufferGetBytesPerRowOfPlane(previous, plane)
+                    let strideB = packed ? CVPixelBufferGetBytesPerRow(current) : CVPixelBufferGetBytesPerRowOfPlane(current, plane)
+                    let a = (packed ? CVPixelBufferGetBaseAddress(previous) : CVPixelBufferGetBaseAddressOfPlane(previous, plane))!.assumingMemoryBound(to: UInt8.self)
+                    let b = (packed ? CVPixelBufferGetBaseAddress(current) : CVPixelBufferGetBaseAddressOfPlane(current, plane))!.assumingMemoryBound(to: UInt8.self)
+                    total += strideA * rows // Preserve the existing tolerance denominator.
+                    for row in 0..<rows {
+                        for byte in 0..<activeRowBytes(previous, plane: plane) where a[row * strideA + byte] != b[row * strideB + byte] {
+                            differences += 1
+                        }
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(current, .readOnly)
+                CVPixelBufferUnlockBaseAddress(previous, .readOnly)
+                let boundary = Double(differences) / Double(total)
+                for tolerance in [0, 0.002, 0.01, 1, -1, .nan, .infinity, boundary.nextDown, boundary, boundary.nextUp] {
+                    let expected = Double(differences) <= Double(total) * tolerance
+                    check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, current, allowedDifference: tolerance) == expected,
+                          "early exit matches full count: \(format.name), seed \(seed), tolerance \(tolerance)")
+                }
+            }
         }
     }
 

@@ -90,17 +90,17 @@ struct PictureSettings: Equatable, Codable {
     var vibrance = 0.0
     var lowLatency = true
     var enhancementEnabled = true
-    var enhancementStrength = 0.40
+    var enhancementStrength = 0.55
     var upscaleTarget: UpscaleTarget = .native
     var upscaleMethod: UpscaleMethod = .metalFX
     // Optional keeps old persisted settings decodable; absence means off.
     var interpolationMode: FrameInterpolationMode?
-    var preferredInterpolationQuality: FrameInterpolationMode?
+    var preferredInterpolationQuality: FrameInterpolationMode? = .flowBlend
     // Optional additions preserve previously saved settings.
     var interpolationForce: Bool?
     var interpolationSkipDuplicates: Bool?
     var skipsExactDuplicateInterpolation: Bool {
-        get { interpolationSkipDuplicates ?? false }
+        get { interpolationSkipDuplicates ?? true }
         set { interpolationSkipDuplicates = newValue }
     }
     var forceFrameInterpolation: Bool {
@@ -124,13 +124,22 @@ struct PictureSettings: Equatable, Codable {
     mutating func setInterpolationEnabled(_ enabled: Bool) {
         if !enabled { forceFrameInterpolation = false }
         if enabled {
-            let preferred = preferredInterpolationQuality ?? .balanced
-            frameInterpolation = preferred == .off ? .balanced : preferred
+            forceFrameInterpolation = true
+            let preferred = preferredInterpolationQuality ?? .flowBlend
+            frameInterpolation = preferred == .off ? .flowBlend : preferred
         } else {
             // A repeated off action must not destroy the last enabled quality.
             if frameInterpolation != .off { preferredInterpolationQuality = frameInterpolation }
             frameInterpolation = .off
         }
+    }
+
+    /// Update the quality a preset prefers without changing the independent on/off switch.
+    mutating func applyInterpolationPreset(_ quality: FrameInterpolationMode) {
+        let wasEnabled = frameInterpolation != .off
+        preferredInterpolationQuality = quality
+        frameInterpolation = wasEnabled ? quality : .off
+        if !wasEnabled { forceFrameInterpolation = false }
     }
     var highlightRecovery = 0.0
     var colorParameters: [Double] { [brightness, contrast, saturation, vibrance, highlightRecovery] }
@@ -139,6 +148,7 @@ struct PictureSettings: Equatable, Codable {
 /// Latest-frame mailbox. Optional interpolation retains ONE preceding reference, never a queue.
 final class LatestVideoFrame {
     private let lock = NSLock()
+    private let inputContentCadence = InputContentCadence()
     private var frameHandler: (() -> Void)?
     private var buffer: CVPixelBuffer?
     private var formatDescription: CMFormatDescription?
@@ -183,26 +193,6 @@ final class LatestVideoFrame {
     private var interpolationCostMS = 0.0
     private var interpolationBudgetMS = 0.0
     private var interpolationWorkingSize: String?
-    private var measuredContentFPS: Double?
-    /// Set when a new estimate is published. The reader consumes the value once, so a
-    /// stored reading cannot be re-read every second and mistaken for fresh evidence:
-    /// the renderer only publishes while it draws, and a hidden or busy preview would
-    /// otherwise keep re-reporting its last number as if it were a new measurement.
-    private var measuredContentFPSUnread = false
-    /// True content cadence behind a duplicated signal (30 FPS game in 60 Hz), if detected.
-    func setMeasuredContentFPS(_ value: Double?) {
-        lock.lock()
-        measuredContentFPS = value
-        measuredContentFPSUnread = value != nil
-        lock.unlock()
-    }
-    /// Returns the pending estimate once and clears it; nil when nothing new arrived.
-    func takeMeasuredContentFPS() -> Double? {
-        lock.lock(); defer { lock.unlock() }
-        guard measuredContentFPSUnread else { return nil }
-        measuredContentFPSUnread = false
-        return measuredContentFPS
-    }
     private var displayRates = (maximum: 0.0, observed: 0.0)
     private var captured = 0
     private var rendered = 0
@@ -232,6 +222,10 @@ final class LatestVideoFrame {
         } else {
             sourceIntervals.removeAll(keepingCapacity: true)
             streamEpoch &+= 1
+            publishedMultiplier = nil
+            publishedInterpolationBasisFPS = nil
+            publishedInterpolationAt = nil
+            inputContentCadence.reset(streamEpoch: streamEpoch)
             lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
         }
         previous = historyEnabled && sameSize ? buffer.map { ($0, sequence, self.pts) } : nil
@@ -242,8 +236,19 @@ final class LatestVideoFrame {
         sequence &+= 1
         captured += 1
         let callback = frameHandler
+        let inputSequence = sequence
+        let inputEpoch = streamEpoch
         lock.unlock()
+        inputContentCadence.submit(pixelBuffer, presentationTime: pts,
+                                   sequence: inputSequence, streamEpoch: inputEpoch)
         callback?()
+    }
+    /// Input-side measurement remains valid when rendering skips or pauses drawing.
+    func inputContentCadenceSnapshot() -> InputContentCadenceSnapshot? {
+        let value = inputContentCadence.snapshot()
+        lock.lock(); let currentEpoch = streamEpoch; let hasInput = buffer != nil; lock.unlock()
+        guard hasInput, value.streamEpoch == currentEpoch else { return nil }
+        return value
     }
     func setFrameHandler(_ handler: @escaping () -> Void) { lock.lock(); frameHandler = handler; lock.unlock() }
     func latest() -> (CVPixelBuffer, UInt64, UInt64)? {
@@ -299,8 +304,33 @@ final class LatestVideoFrame {
     /// renderer rather than recomputed here, so the panel cannot announce a different step
     /// than the engine is running.
     private var publishedMultiplier: Double?
-    func setActiveMultiplier(_ value: Double?) { lock.lock(); publishedMultiplier = value; lock.unlock() }
-    func currentActiveMultiplier() -> Double? { lock.lock(); defer { lock.unlock() }; return publishedMultiplier }
+    private var publishedInterpolationBasisFPS: Double?
+    private var publishedInterpolationAt: TimeInterval?
+    // HUD rates summarize a one-second window. A single native fallback must not
+    // erase a successful pair from that window; absence of new success still expires.
+    static let interpolationActivityLifetime: TimeInterval = 1.25
+    func setActiveMultiplier(_ value: Double?, inputFPS: Double? = nil, streamEpoch expectedEpoch: UInt64? = nil,
+                             at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        lock.lock(); defer { lock.unlock() }
+        if let expectedEpoch, expectedEpoch != streamEpoch { return }
+        if let value {
+            guard expectedEpoch != nil, buffer != nil, value.isFinite, value > 1,
+                  let inputFPS, inputFPS.isFinite, inputFPS > 0, now.isFinite else { return }
+        }
+        publishedMultiplier = value
+        publishedInterpolationBasisFPS = value == nil ? nil : inputFPS
+        publishedInterpolationAt = value == nil ? nil : now
+    }
+    func currentInterpolationActivity(at now: TimeInterval = ProcessInfo.processInfo.systemUptime)
+        -> (multiplier: Double, basisFPS: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let publishedInterpolationAt, now.isFinite, now >= publishedInterpolationAt,
+              now - publishedInterpolationAt <= Self.interpolationActivityLifetime,
+              let publishedMultiplier, let publishedInterpolationBasisFPS else { return nil }
+        return (publishedMultiplier, publishedInterpolationBasisFPS)
+    }
+    func currentActiveMultiplier() -> Double? { currentInterpolationActivity()?.multiplier }
+    func currentInterpolationBasisFPS() -> Double? { currentInterpolationActivity()?.basisFPS }
     func currentInterpolationWorkingSize() -> String? { lock.lock(); defer { lock.unlock() }; return interpolationWorkingSize }
     func interpolationCost() -> (Double, Double) {
         lock.lock(); defer { lock.unlock() }; return (interpolationCostMS, interpolationBudgetMS)
@@ -340,10 +370,13 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }
         buffer = nil
         formatDescription = nil
-        measuredContentFPS = nil
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
         sequence &+= 1
         streamEpoch &+= 1
+        publishedMultiplier = nil
+        publishedInterpolationBasisFPS = nil
+        publishedInterpolationAt = nil
+        inputContentCadence.reset(streamEpoch: streamEpoch)
         level = 0; lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
     }
     func markRendered(receivedAt: UInt64, gpuMS: Double) {
@@ -410,23 +443,21 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     var effectiveAspectMode: AspectMode { isPortraitSource && !userChoseAspect ? .stretch : aspectMode }
     @Published var picture = PictureSettings() {
         didSet {
+            if oldValue.enhancementEnabled != picture.enhancementEnabled ||
+                oldValue.frameInterpolation != picture.frameInterpolation ||
+                oldValue.forceFrameInterpolation != picture.forceFrameInterpolation ||
+                oldValue.skipsExactDuplicateInterpolation != picture.skipsExactDuplicateInterpolation ||
+                oldValue.enhancementStrength != picture.enhancementStrength ||
+                oldValue.lowLatency != picture.lowLatency ||
+                oldValue.upscaleTarget != picture.upscaleTarget ||
+                oldValue.upscaleMethod != picture.upscaleMethod {
+                frames.setActiveMultiplier(nil)
+            }
             if !applyingPreset && oldValue.colorParameters != picture.colorParameters { selectedColorPreset = nil }
             if !applyingPreset, let current = selectedQualityPreset,
                let preset = Self.qualityPresets.first(where: { $0.name == current }),
-               qualitySignature(lowLatency: oldValue.lowLatency, strength: oldValue.enhancementStrength,
-                                method: oldValue.upscaleMethod, target: oldValue.upscaleTarget,
-                                interpolation: oldValue.frameInterpolation) !=
-               qualitySignature(lowLatency: picture.lowLatency, strength: picture.enhancementStrength,
-                                method: picture.upscaleMethod, target: picture.upscaleTarget,
-                                interpolation: picture.frameInterpolation) {
-                // Only drop the label when the edit actually leaves the preset's values.
-                let stillMatches = qualitySignature(lowLatency: picture.lowLatency, strength: picture.enhancementStrength,
-                                                    method: picture.upscaleMethod, target: picture.upscaleTarget,
-                                                    interpolation: picture.frameInterpolation) ==
-                                   qualitySignature(lowLatency: preset.lowLatency, strength: preset.enhancementStrength,
-                                                    method: preset.upscaleMethod, target: preset.upscaleTarget,
-                                                    interpolation: preset.interpolation)
-                if !stillMatches { selectedQualityPreset = nil }
+               !matchesQualityPreset(preset, settings: picture) {
+                selectedQualityPreset = nil
             }
             recorder.setPicture(recordIncludesPicture ? picture : nil)
             // Slider drags fire dozens of times per second; persist once the value settles.
@@ -441,6 +472,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var selectedQualityPreset: String? = "流畅优先" {
         didSet { schedulePicturePersistence() }
     }
+    private var supportedInterpolationQualities: [FrameInterpolationMode]
     @Published var recordIncludesPicture = true { didSet { UserDefaults.standard.set(recordIncludesPicture, forKey: "record.picture") } }
     @Published var showsStatusBar = false { didSet { UserDefaults.standard.set(showsStatusBar, forKey: "view.statusBar") } }
     @Published var showsEngineStatus = false { didSet { UserDefaults.standard.set(showsEngineStatus, forKey: "view.engineStatus") } }
@@ -453,25 +485,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var detectedContentFPS: Double?
     @Published private(set) var stableContentFPS: Double?
     private var contentFPSStabilityStreak = 0
+    private var lastContentMeasurementIdentity: (epoch: UInt64, sequence: UInt64)?
     @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
     /// Temporal multiplier the renderer is using for the current content rate, derived with
     /// the same policy the scheduler applies so the panel cannot disagree with the engine.
-    var activeMultiplier: Double {
-        // What the renderer applied if it has reported one; otherwise the step the policy
-        // would choose, which is also what an idle or paused preview should show.
-        if let published = frames.currentActiveMultiplier() { return published }
-        guard let content = detectedContentFPS, content > 0 else { return 2 }
-        let engine = picture.frameInterpolation
-        let supported: [Double] = engine == .flowBlend || engine == .off ? [2, 3] : [2]
-        let requested = FrameInterpolationPolicy.multiplier(contentFPS: content, targetFPS: 60, displayFPS: max(60, displayMaximumFPS))
-        // A step below 2 is not a step the renderer will run: its pair guard requires the
-        // measured period to hold at least two presentations, so content the policy cannot
-        // lift falls back to native. Reporting the engine's floor here claimed a multiplier
-        // and a target the preview would never produce, such as 60 FPS content on a 60 Hz panel.
-        guard requested >= 2 else { return 1 }
-        return supported.contains(requested) ? requested : (supported.first ?? 2)
+    var interpolationActivity: (multiplier: Double, basisFPS: Double)? {
+        guard picture.enhancementEnabled, picture.frameInterpolation != .off else { return nil }
+        return frames.currentInterpolationActivity()
     }
+    var activeMultiplier: Double { interpolationActivity?.multiplier ?? 1 }
     /// Short label for the panel, e.g. "2×" or "3×"; 1x means no step is being generated.
     var activeMultiplierLabel: String {
         let value = activeMultiplier
@@ -479,8 +502,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
     /// Frame rate the current content rate and multiplier aim at.
     var interpolationTargetFPS: Double {
-        guard let content = detectedContentFPS, content > 0 else { return 0 }
-        return content * activeMultiplier
+        guard let activity = interpolationActivity else { return 0 }
+        return activity.basisFPS * activity.multiplier
+    }
+    var interpolationBasisFPS: Double? {
+        interpolationActivity?.basisFPS
     }
     var outputFPS: Int { presentedOutputFPS }
     @Published private(set) var interpolationStatus = "关闭"
@@ -529,6 +555,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private let videoOutput = AVCaptureVideoDataOutput()
     private let audioOutput = AVCaptureAudioDataOutput()
     private let audioPreview = AVCaptureAudioPreviewOutput()
+    #if MONIVIEW_CAPTURE_TESTING
+    // Installed before selecting audio; the fixture counts actual delegate deliveries.
+    var audioSampleObserverForTesting: ((CMSampleBuffer) -> Void)?
+    #endif
     private let recorder = CaptureRecorder()
     private var statsTimer: DispatchSourceTimer?
     private var displaySleepToken: NSObjectProtocol?
@@ -553,18 +583,30 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var discoveryRetryScheduled = false
     private var isSwitchingVideoDevice = false
     // Main-queue transaction state; prevents follow from reusing the old format ID.
-    private var pendingVideoConfiguration: (formatID: Int, frameRate: Double, fromFollow: Bool)?
-    private var pendingAudioDeviceID: String?
-    private var pendingAudioPersist = false
+    private var pendingVideoConfiguration: (formatID: Int, frameRate: Double)?
+    private var pendingAudioSelection: (id: String?, persist: Bool)?
+    // Keep an explicit choice until macOS grants microphone access, including after a
+    // denial followed by a visit to System Settings.
+    private var pendingAudioPermissionSelection: AudioSelectionIntent?
+    private var audioPermissionRequestInFlight = false
     // Requests originate on main; queued work and its result both check this synchronized token.
     // Never hold its lock while configuring a device, starting a session or publishing UI state.
     private let videoConfiguration = ConfigurationRevision()
     private let audioConfiguration = ConfigurationRevision()
+    private let macWindowRefreshRevision = ConfigurationRevision()
     private var macWindowCapture: MacWindowCapture?
     /// Set while a Mac-window session owns the preview, so device paths stay inactive.
     private var isMacWindowSourceActive = false
+    /// Main-queue mirror of ScreenCaptureKit state; starting alone is not recordable.
+    private var macWindowCaptureIsRunning = false
+    private var configuredMacWindowSize = CGSize.zero
+    private var refreshMacWindowsAfterRecording = false
+    #if MONIVIEW_CAPTURE_TESTING
+    var windowCaptureStartCountForTesting = 0
+    #endif
 
-    override init() {
+    init(supportedInterpolationQualities: [FrameInterpolationMode]) {
+        self.supportedInterpolationQualities = supportedInterpolationQualities.filter { $0 != .off }
         super.init()
         let savedPreset = UserDefaults.standard.string(forKey: "view.colorPreset")
         if let data = UserDefaults.standard.data(forKey: "view.picture"), let saved = try? JSONDecoder().decode(PictureSettings.self, from: data) {
@@ -613,6 +655,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // Re-read authorization so granting access in System Settings takes effect without a relaunch.
             self?.refreshDevices(force: false)
         })
+        configureInterpolationCapabilities(supportedInterpolationQualities)
         startStatsTimer()
         // Only ask for camera access when the camera-based source is the one in use.
         // A window-source session never touches AVFoundation video input, so prompting
@@ -641,7 +684,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             selectVideoDevice(id: selectedVideoID)
         case .macWindow:
             // Release the device input so the UVC stream and the window stream never
-            // compete for the same GPU and frame handoff.
+            // compete for the same GPU and frame handoff. Audio is not part of that
+            // conflict: it keeps its own input on the same session, so listening and
+            // recording audio survive the switch. The session is stopped only when
+            // nothing is left for it to run.
             videoConfiguration.advance()
             sessionQueue.async { [weak self] in
                 guard let self else { return }
@@ -649,18 +695,26 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
                 self.selectedDevice = nil
                 self.session.commitConfiguration()
-                self.session.stopRunning()
+                // Video just left, but audio may still be on this session. Stopping it here
+                // silenced a selected capture-card audio input for the rest of the session.
+                self.reconcileCaptureSessionRunning()
             }
+            // This source doesn't enter camera-device discovery, but audio must still refresh.
+            refreshAudioDevices()
             refreshMacWindows()
         }
     }
 
     func refreshMacWindows() {
         guard sourceKind == .macWindow else { return }
+        guard !isRecording else { statusMessage = "停止录制后可更换设备。"; return }
+        let revision = macWindowRefreshRevision.advance()
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let options = try await MacWindowCapture.availableWindows(excludingBundleID: Bundle.main.bundleIdentifier)
+                // Enumeration may outlive a source switch or the start of a recording.
+                guard self.macWindowRefreshRevision.isCurrent(revision), self.sourceKind == .macWindow, !self.isRecording else { return }
                 self.macWindowOptions = options
                 self.macWindowStatus = options.isEmpty ? L10n.text("没有可选择的窗口") : nil
                 if self.selectedMacWindowID == nil || !options.contains(where: { $0.id == self.selectedMacWindowID }) {
@@ -673,6 +727,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.restartMacWindowCapture()
                 }
             } catch {
+                guard self.macWindowRefreshRevision.isCurrent(revision), self.sourceKind == .macWindow, !self.isRecording else { return }
                 self.macWindowOptions = []
                 self.macWindowStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 self.stopMacWindowCapture()
@@ -685,6 +740,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             stopMacWindowCapture()
             return
         }
+        macWindowRefreshRevision.advance()
         let capture = macWindowCapture ?? MacWindowCapture(
             frameSink: { [weak self] (sample: CMSampleBuffer) in
                 guard let self, let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
@@ -698,8 +754,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             dropped: { [weak self] in self?.frames.markDropped() })
         macWindowCapture = capture
         isMacWindowSourceActive = true
+        macWindowCaptureIsRunning = false
+        configuredMacWindowSize = .zero
+        isRunning = false
         frames.clear()
         // The window stream replaces any device stream in the same preview pipeline.
+        #if MONIVIEW_CAPTURE_TESTING
+        windowCaptureStartCountForTesting += 1
+        #endif
         capture.start(windowID: windowID)
         let option = macWindowOptions.first { $0.id == windowID }
         deviceName = option.map { $0.title.isEmpty ? $0.applicationName : $0.title } ?? L10n.text("Mac 窗口")
@@ -710,34 +772,51 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         frameRateOptions = [0]
         selectedFrameRate = 0
         selectedFPS = 0
-        isRunning = true
     }
 
     private func handleMacWindowState(_ state: MacWindowCapture.State) {
         guard sourceKind == .macWindow else { return }
         switch state {
         case .running:
+            macWindowCaptureIsRunning = true
+            configuredMacWindowSize = macWindowCapture?.configuredPixelSize ?? .zero
             macWindowStatus = nil
             isRunning = true
         case .starting:
+            macWindowCaptureIsRunning = false
+            configuredMacWindowSize = .zero
+            isRunning = false
             macWindowStatus = L10n.text("正在连接窗口…")
         case .failed(let message):
+            macWindowCaptureIsRunning = false
+            configuredMacWindowSize = .zero
             macWindowStatus = message
             isRunning = false
+            frames.clear()
             // A closed window is expected during normal use; refresh the list instead
-            // of leaving a dead preview.
-            refreshMacWindows()
+            // of leaving a dead preview. Finalize an active file before enumerating again.
+            if isRecording {
+                refreshMacWindowsAfterRecording = true
+                stopRecording()
+            } else {
+                refreshMacWindows()
+            }
         case .stopped, .idle:
+            macWindowCaptureIsRunning = false
+            configuredMacWindowSize = .zero
             isRunning = false
         }
     }
 
     private func stopMacWindowCapture() {
+        macWindowRefreshRevision.advance()
         macWindowCapture?.stop()
         macWindowCapture = nil
         isMacWindowSourceActive = false
+        macWindowCaptureIsRunning = false
+        configuredMacWindowSize = .zero
         macWindowStatus = nil
-        if sourceKind == .macWindow { isRunning = false }
+        isRunning = false
     }
 
     /// Share the recording completion path with the capture-device flow.
@@ -749,6 +828,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 self.recordingVideoDrops = drops.video; self.recordingAudioDrops = drops.audio
                 self.isRecording = false
                 self.recordingStartedAt = nil
+                self.refreshDevices(force: false)
                 let warning = drops.video + drops.audio > 0 ? L10n.format(" · 录制丢弃视频 %d 帧 / 音频 %d 包", drops.video, drops.audio) : ""
                 self.recordingError = error?.localizedDescription
                 self.statusMessage = error.map { L10n.format("录制失败：%@", $0.localizedDescription) } ?? L10n.format("已保存到 %@%@", url.lastPathComponent, warning)
@@ -757,32 +837,40 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.statusDismissal = dismiss
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: dismiss)
                 }
-                self.recordingFinished?(); self.recordingFinished = nil
+                self.applyPendingAudioSelection()
+                let refreshWindows = self.refreshMacWindowsAfterRecording
+                self.refreshMacWindowsAfterRecording = false
+                if refreshWindows { self.refreshMacWindows() }
+                let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
             }
         }
     }
 
     func refreshDevices(force: Bool = true) {
+        // Audio permission and device discovery are independent of camera authorization.
+        let audioDisconnected = refreshAudioDevices(checkingRecording: true)
         // Only the device source depends on camera authorization. While a window source
         // is selected this must not report a camera prompt, or the UI waits on a
         // permission the current source never needs.
         guard sourceKind == .device else {
             cameraPermissionPending = false
             permissionDenied = false
+            // Audio discovery and restore already ran above this camera-source guard.
             return
         }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
+            cameraPermissionPending = false
             permissionDenied = false
         case .notDetermined:
             cameraPermissionPending = true
             return
         default:
+            cameraPermissionPending = false
             permissionDenied = true
             return
         }
         let videos = Self.devices(.video)
-        let audios = Self.devices(.audio)
         if !videos.isEmpty { discoveryRetryCount = 0 }
         else if !isRecording && !discoveryRetryScheduled && discoveryRetryCount < 5 {
             // UVC providers can finish initializing after the initial discovery snapshot.
@@ -796,7 +884,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         if isRecording {
             let videoDisconnected = !videos.contains(where: { $0.uniqueID == selectedVideoID })
-            let audioDisconnected = selectedAudioID.map { id in !audios.contains(where: { $0.uniqueID == id }) } ?? false
             if videoDisconnected || audioDisconnected {
                 stopRecording()
                 statusMessage = videoDisconnected ? "视频设备断开，正在保存录制。" : "音频设备断开，正在保存录制。"
@@ -804,11 +891,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             return
         }
         videoOptions = videos.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
-        audioOptions = audios.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
-        if let id = selectedAudioID, !audios.contains(where: { $0.uniqueID == id }) { selectAudioDevice(id: nil, persist: false) }
         if let id = selectedVideoID, videos.contains(where: { $0.uniqueID == id }) {
             if force { selectVideoDevice(id: id) }
-            restoreSavedAudioIfNeeded(audios: audios)
             return
         }
         // Prefer a USB capture device over Continuity Camera.
@@ -862,7 +946,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.requestedFrameRate = desiredFPS
                     self.session.commitConfiguration()
                     configurationOpen = false
-                    if !self.session.isRunning { self.session.startRunning() }
+                    self.reconcileCaptureSessionRunning()
                     // The session negotiates its own preset format at commit/start, and a format
                     // set inside a session configuration is reverted. Apply the chosen format
                     // directly to the device afterwards; this is verified to stick on UVC hardware.
@@ -881,7 +965,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         self.selectedFrameRate = desiredFPS
                         self.frameRateOptions = Self.frameRates(for: device)
                         self.isSwitchingVideoDevice = false
-                        self.lastRealRateSwitchAt = .distantPast
                         self.resetContentRateObservation()
                         self.statusMessage = nil
                         self.autoSelectAudio(for: device, replacePair: previouslyPaired)
@@ -892,17 +975,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.configuredFrameDuration = .invalid
                     self.requestedFormatIndex = nil
                     self.session.commitConfiguration()
-                    self.session.stopRunning()
+                    // Removing video must not stop an independent audio input.
+                    self.reconcileCaptureSessionRunning()
                     DispatchQueue.main.async {
                         guard self.videoConfiguration.isCurrent(generation) else { return }
                         self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
                         self.formatOptions = []; self.selectedFormatID = nil
                         self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
                         self.isSwitchingVideoDevice = false
-                        self.lastRealRateSwitchAt = .distantPast
                         self.resetContentRateObservation()
                         self.isRunning = false
-                        self.selectAudioDevice(id: nil, persist: false)
                     }
                 }
             } catch {
@@ -913,13 +995,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 self.configuredFrameDuration = .invalid
                 self.requestedFormatIndex = nil
                 self.session.commitConfiguration()
+                self.reconcileCaptureSessionRunning()
                 DispatchQueue.main.async {
                     guard self.videoConfiguration.isCurrent(generation) else { return }
                     self.deviceName = "未连接"; self.resolution = "—"; self.pixelFormat = "—"
                     self.formatOptions = []; self.selectedFormatID = nil
                     self.frameRateOptions = [0]; self.selectedFrameRate = 0; self.selectedFPS = 0
                     self.isSwitchingVideoDevice = false
-                    self.lastRealRateSwitchAt = .distantPast
                     self.resetContentRateObservation()
                     self.isRunning = false
                     self.statusMessage = L10n.format("连接失败：%@", error.localizedDescription)
@@ -928,11 +1010,41 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
     }
 
-    /// Reconnect the user's saved audio input when it reappears while video stays connected.
+    /// Reconnect the user's saved audio input when it reappears in either source mode.
     private func restoreSavedAudioIfNeeded(audios: [AVCaptureDevice]) {
         guard !isRecording, let saved = UserDefaults.standard.string(forKey: "audio.selection"), saved != "off" else { return }
         guard selectedAudioID != saved, audios.contains(where: { $0.uniqueID == saved }) else { return }
         selectAudioDevice(id: saved, persist: false)
+    }
+
+    /// Refresh audio permissions, devices, saved selections and recording disconnects.
+    /// Without it the audio picker stayed stale, a reconnected saved device was ignored,
+    /// and unplugging audio mid-recording did not close the file.
+    @discardableResult
+    private func refreshAudioDevices(checkingRecording: Bool = false) -> Bool {
+        let audios = Self.devices(.audio)
+        audioOptions = audios.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
+        if checkingRecording, isRecording {
+            let audioDisconnected = selectedAudioID.map { id in
+                !audios.contains(where: { $0.uniqueID == id })
+            } ?? false
+            if audioDisconnected {
+                stopRecording()
+                statusMessage = "音频设备断开，正在保存录制。"
+            }
+            return audioDisconnected
+        }
+        if isRecording { return false }
+        if pendingAudioPermissionSelection != nil {
+            resumePendingAudioPermissionSelection(audios: audios)
+            return false
+        }
+        if let id = selectedAudioID, !audios.contains(where: { $0.uniqueID == id }) {
+            selectAudioDevice(id: nil, persist: false)
+            return false
+        }
+        restoreSavedAudioIfNeeded(audios: audios)
+        return false
     }
 
     private func autoSelectAudio(for device: AVCaptureDevice, replacePair: Bool) {
@@ -956,35 +1068,100 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         selectedAudioID = id
         // Persist only a successfully configured explicit choice; failures must not
         // erase a saved device that is temporarily unplugged.
-        guard let id else { configureAudioInput(id: nil, persist: persist); return }
+        guard let id else {
+            pendingAudioPermissionSelection = nil
+            configureAudioInput(id: nil, persist: persist)
+            return
+        }
+        let intent = AudioSelectionIntent(id: id, persist: persist)
+        switch audioAuthorizationState() {
+        case .authorized:
+            pendingAudioPermissionSelection = nil
+            configureAudioInput(id: id, persist: persist)
+        case .notDetermined, .denied:
+            pendingAudioPermissionSelection = intent
+            resumePendingAudioPermissionSelection()
+        }
+    }
+
+    private func audioAuthorizationState() -> AudioAuthorizationState {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: configureAudioInput(id: id, persist: persist)
+        case .authorized: return .authorized
+        case .notDetermined: return .notDetermined
+        default: return .denied
+        }
+    }
+
+    private func resumePendingAudioPermissionSelection(
+        authorization: AudioAuthorizationState? = nil,
+        audios: [AVCaptureDevice]? = nil
+    ) {
+        guard let pending = pendingAudioPermissionSelection else { return }
+        let state = authorization ?? audioAuthorizationState()
+        switch state {
         case .notDetermined:
             audioStatus = "等待麦克风权限"
+            guard AudioPermissionPolicy.shouldRequestAccess(for: state, requestInFlight: audioPermissionRequestInFlight) else { return }
+            audioPermissionRequestInFlight = true
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
-                    guard let self, self.selectedAudioID == id else { return }
-                    // Never reconfigure the session while a recording is in progress.
+                    guard let self else { return }
+                    self.audioPermissionRequestInFlight = false
+                    guard let current = self.pendingAudioPermissionSelection,
+                          current.id == self.selectedAudioID else { return }
                     if granted {
-                        if self.isRecording { self.pendingAudioDeviceID = id; self.pendingAudioPersist = persist }
-                        else { self.configureAudioInput(id: id, persist: persist) }
+                        self.resumePendingAudioPermissionSelection(authorization: .authorized)
+                    } else {
+                        self.audioStatus = "需要麦克风权限"
+                        self.statusMessage = "请在系统设置 › 隐私与安全性 › 麦克风中允许 MoniView。"
                     }
-                    else { self.audioStatus = "需要麦克风权限"; self.statusMessage = "请在系统设置 › 隐私与安全性 › 麦克风中允许 MoniView。" }
                 }
             }
-        default:
+        case .denied:
             audioStatus = "需要麦克风权限"
             statusMessage = "请在系统设置中允许 MoniView 访问麦克风，才能播放采集卡声音。"
+        case .authorized:
+            let available = audios ?? Self.devices(.audio)
+            let restorable = AudioPermissionPolicy.restorableSelection(
+                pending: pending,
+                selectedID: selectedAudioID,
+                authorization: state,
+                deviceAvailable: available.contains { $0.uniqueID == pending.id }
+            )
+            guard let restorable else { return }
+            pendingAudioPermissionSelection = nil
+            if isRecording { pendingAudioSelection = (restorable.id, restorable.persist) }
+            else { configureAudioInput(id: restorable.id, persist: restorable.persist) }
         }
     }
 
     private func configureAudioInput(id: String?, persist: Bool = false) {
-        guard !isRecording else { pendingAudioDeviceID = id; pendingAudioPersist = persist; return }
+        guard !isRecording else { pendingAudioSelection = (id, persist); return }
         let device = Self.devices(.audio).first { $0.uniqueID == id }
         let revision = audioConfiguration.advance()
         sessionQueue.async { [weak self] in
             guard let self, self.audioConfiguration.isCurrent(revision) else { return }
-            let previousInput = self.audioInput
+            // Inspect the installed input only on sessionQueue. Repeated refreshes and
+            // permission callbacks need no new transaction when the actual device matches.
+            let actualInput = self.session.inputs
+                .compactMap { $0 as? AVCaptureDeviceInput }
+                .first { $0.device.hasMediaType(.audio) }
+            self.audioInput = actualInput
+            if !CaptureSessionPolicy.audioInputNeedsConfiguration(
+                actualID: actualInput?.device.uniqueID,
+                requestedID: id
+            ) {
+                self.reconcileCaptureSessionRunning()
+                DispatchQueue.main.async {
+                    guard self.audioConfiguration.isCurrent(revision) else { return }
+                    if persist { UserDefaults.standard.set(id ?? "off", forKey: "audio.selection") }
+                    self.audioStatus = id == nil ? "未连接音频" : "实时监听中"
+                    if id == nil { self.audioLevel = 0 }
+                    self.statusMessage = nil
+                }
+                return
+            }
+            let previousInput = actualInput
             self.session.beginConfiguration()
             var configurationOpen = true
             do {
@@ -997,6 +1174,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 }
                 self.session.commitConfiguration()
                 configurationOpen = false
+                // Window mode has no video input to start the session, and audio must not go
+                // silent just because the preview comes from a window. Starting an idle session
+                // is what makes listening and audio recording work there; the mirror case stops
+                // a running session that no longer owns any input.
+                self.reconcileCaptureSessionRunning()
                 // Adding an audio input may renegotiate video. Reassert the requested format
                 // directly; a session commit would revert it to the preset choice.
                 if let video = self.selectedDevice {
@@ -1020,6 +1202,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.audioInput = previousInput
                 }
                 self.session.commitConfiguration()
+                // Restoring inputs must restore their running state as well.
+                self.reconcileCaptureSessionRunning()
                 if let video = self.selectedDevice, let index = self.requestedFormatIndex {
                     try? self.configureFormat(video, index: index, fps: self.requestedFrameRate)
                 }
@@ -1034,6 +1218,23 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 }
             }
         }
+    }
+
+    /// Called only on sessionQueue, after committing a configuration.
+    private func reconcileCaptureSessionRunning() {
+        switch CaptureSessionPolicy.action(isRunning: session.isRunning, inputCount: session.inputs.count) {
+        case .start: session.startRunning()
+        case .stop: session.stopRunning()
+        case nil: break
+        }
+    }
+
+    /// Called on the main queue by both recording completion paths.
+    private func applyPendingAudioSelection() {
+        guard let pending = pendingAudioSelection else { return }
+        pendingAudioSelection = nil
+        selectedAudioID = pending.id
+        configureAudioInput(id: pending.id, persist: pending.persist)
     }
 
     func setAudioVolume(_ volume: Float) {
@@ -1054,24 +1255,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let currentRate = pendingVideoConfiguration?.frameRate ?? selectedFrameRate
         applyFormat(index: id, fps: option?.supportsFrameRate(currentRate) == true ? currentRate : 0)
     }
-    /// Follow mode: capture rate tracks the measured content rate (nearest supported
-    /// rate at or above it). Manual rate selection exits the mode. Persisted.
-    @Published var followsRealContentRate: Bool = UserDefaults.standard.bool(forKey: "capture.followRealRate") {
-        didSet { UserDefaults.standard.set(followsRealContentRate, forKey: "capture.followRealRate") }
-    }
-    private var heldDetectedContentFPS: Double?
-    private var lastDetectedContentFPSAt: Date = .distantPast
-    private var lastRealRateSwitchAt: Date = .distantPast
+    /// One interpolation basis switch; capture sampling remains an independent choice.
+    var followsRealContentRate: Bool { picture.skipsExactDuplicateInterpolation }
     func selectFrameRate(_ fps: Int) { selectFrameRateValue(Double(fps)) }
-    func selectFrameRateValue(_ fps: Double, fromFollow: Bool = false) {
-        if !fromFollow { followsRealContentRate = false }
+    func selectFrameRateValue(_ fps: Double) {
         guard !isRecording else { statusMessage = "停止录制后可更改帧率。"; return }
         guard let formatID = pendingVideoConfiguration?.formatID ?? selectedFormatID else { return }
-        applyFormat(index: formatID, fps: fps, fromFollow: fromFollow)
+        applyFormat(index: formatID, fps: fps)
     }
-    private func applyFormat(index: Int, fps: Double, fromFollow: Bool = false) {
-        pendingVideoConfiguration = (index, fps, fromFollow)
-        if !fromFollow { resetContentRateObservation() }
+    private func applyFormat(index: Int, fps: Double) {
+        pendingVideoConfiguration = (index, fps)
+        resetContentRateObservation()
         let generation = videoConfiguration.advance()
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -1089,7 +1283,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 try self.configureFormat(device, index: index, fps: fps)
                 self.requestedFrameRate = fps
                 self.requestedFormatIndex = index
-                self.publishFormat(device: device, index: index, fps: fps, generation: generation, fromFollow: fromFollow)
+                self.publishFormat(device: device, index: index, fps: fps, generation: generation)
             } catch {
                 DispatchQueue.main.async {
                     guard self.videoConfiguration.isCurrent(generation) else { return }
@@ -1100,7 +1294,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
     }
 
-    private func publishFormat(device: AVCaptureDevice, index: Int, fps: Double, generation: UInt64, fromFollow: Bool) {
+    private func publishFormat(device: AVCaptureDevice, index: Int, fps: Double, generation: UInt64) {
         let format = device.activeFormat
         let dim = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         let options = Self.frameRates(for: device)
@@ -1114,18 +1308,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.frameRateOptions = options
             self.resolution = "\(dim.width) × \(dim.height)"; self.pixelFormat = pixel; self.statusMessage = nil
             self.pendingVideoConfiguration = nil
-            self.lastRealRateSwitchAt = fromFollow ? Date() : .distantPast
             self.resetContentRateObservation()
         }
     }
 
     private func resetContentRateObservation() {
-        heldDetectedContentFPS = nil
-        lastDetectedContentFPSAt = .distantPast
         detectedContentFPS = nil
         stableContentFPS = nil
         contentFPSStabilityStreak = 0
-        frames.setMeasuredContentFPS(nil)
+        lastContentMeasurementIdentity = nil
     }
     private static func frameRates(for format: AVCaptureDevice.Format) -> [Double] {
         var values = Set<Double>()
@@ -1133,7 +1324,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if abs(range.minFrameRate - range.maxFrameRate) < 0.01 {
                 values.insert((range.maxFrameRate * 100).rounded() / 100)
             } else {
-                for value in [24.0, 25, 29.97, 30, 45, 50, 59.94, 60, 90, 120, range.minFrameRate, range.maxFrameRate] where value >= range.minFrameRate && value <= range.maxFrameRate {
+                for value in [20.0, 24, 25, 29.97, 30, 40, 45, 48, 50, 59.94, 60, 90, 100, 120, 144, range.minFrameRate, range.maxFrameRate] where value >= range.minFrameRate && value <= range.maxFrameRate {
                     values.insert((value * 100).rounded() / 100)
                 }
             }
@@ -1271,21 +1462,39 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let upscaleMethod: UpscaleMethod
         let upscaleTarget: UpscaleTarget
         let interpolation: FrameInterpolationMode
+        var nativeFrameRate = false
+
+        func apply(to settings: inout PictureSettings, supported: [FrameInterpolationMode]) {
+            settings.lowLatency = lowLatency
+            settings.enhancementStrength = enhancementStrength
+            settings.upscaleMethod = upscaleMethod
+            settings.upscaleTarget = upscaleTarget
+            settings.enhancementEnabled = true
+            if nativeFrameRate {
+                settings.setInterpolationEnabled(false)
+            } else {
+                let resolved = FrameInterpolationMode.availableQuality(interpolation, supported: supported)
+                settings.preferredInterpolationQuality = resolved
+                settings.frameInterpolation = resolved
+                settings.forceFrameInterpolation = resolved != .off
+                settings.skipsExactDuplicateInterpolation = true
+            }
+        }
     }
 
-    /// Two starting points covering the axes a user actually chooses between: keep the
-    /// picture at the source's own size for the smoothest motion, or scale up to the
-    /// display for a sharper picture. Whether interpolation runs at all is the separate
-    /// 插帧加倍 switch, so a preset never overrides it.
+    /// Selecting a preset applies a complete, predictable processing configuration.
+    /// Subsequent manual edits remain available and change the preset label to custom.
     static let qualityPresets: [QualityPreset] = [
-        // Source-sized: the midpoint stays at the capture resolution. This is the tier
-        // that holds 120 on a 1080p60 source.
-        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.38,
+        // Source-sized flow avoids display-size scaling work. Throughput remains
+        // dependent on the source cadence, GPU load and presentation deadlines.
+        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.55,
                       upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .flowBlend),
         // Display-sized: midpoints and endpoints scale up to the window. Sharper, and it
         // costs more, so the target rate may not hold on a busy GPU.
-        QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.50,
-                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality)
+        QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.80,
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .quality),
+        QualityPreset(name: "原生增强", lowLatency: false, enhancementStrength: 1.00,
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .flowBlend, nativeFrameRate: true)
     ]
 
     func applyQualityPreset(_ name: String) {
@@ -1293,31 +1502,51 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         applyingPreset = true
         defer { applyingPreset = false }
         var next = picture
-        next.lowLatency = preset.lowLatency
-        next.enhancementStrength = preset.enhancementStrength
-        next.upscaleMethod = preset.upscaleMethod
-        next.upscaleTarget = preset.upscaleTarget
-        next.frameInterpolation = preset.interpolation
-        next.preferredInterpolationQuality = preset.interpolation
-        // A preset describes a performance target, so it also clears the force override.
-        // Leaving it set meant switching presets kept interpolation ignoring its budget,
-        // and the previous overload flag followed the user into the new preset.
-        next.forceFrameInterpolation = false
+        preset.apply(to: &next, supported: supportedInterpolationQualities)
         picture = next
         selectedQualityPreset = preset.name
     }
 
-    /// Fields a quality preset owns; a manual edit to any of them means 自定义.
-    private func qualitySignature(lowLatency: Bool, strength: Double, method: UpscaleMethod,
-                                  target: UpscaleTarget, interpolation: FrameInterpolationMode) -> [Double] {
-        [lowLatency ? 1 : 0, strength,
-         Double(UpscaleMethod.allCases.firstIndex(of: method) ?? 0),
-         Double(UpscaleTarget.allCases.firstIndex(of: target) ?? 0),
-         Double(FrameInterpolationMode.allCases.firstIndex(of: interpolation) ?? 0)]
+    /// UI supplies actual platform capabilities for load, presets and switch recovery.
+    func configureInterpolationCapabilities(_ supported: [FrameInterpolationMode]) {
+        supportedInterpolationQualities = supported.filter { $0 != .off }
+        var next = picture
+        let wasEnabled = next.frameInterpolation != .off
+        let preferred = next.preferredInterpolationQuality ?? (wasEnabled ? next.frameInterpolation : .flowBlend)
+        let resolved = FrameInterpolationMode.availableQuality(preferred, supported: supportedInterpolationQualities)
+        next.preferredInterpolationQuality = resolved
+        next.frameInterpolation = wasEnabled ? resolved : .off
+        next.normalizeForceFlag()
+        picture = next
+        selectedQualityPreset = Self.qualityPresets.first { matchesQualityPreset($0, settings: next) }?.name
+    }
+
+    private func matchesQualityPreset(_ preset: QualityPreset, settings: PictureSettings) -> Bool {
+        guard settings.lowLatency == preset.lowLatency,
+              settings.enhancementStrength == preset.enhancementStrength,
+              settings.upscaleMethod == preset.upscaleMethod,
+              settings.upscaleTarget == preset.upscaleTarget else { return false }
+        if preset.nativeFrameRate {
+            return settings.enhancementEnabled && settings.frameInterpolation == .off
+        }
+        let resolved = FrameInterpolationMode.availableQuality(preset.interpolation, supported: supportedInterpolationQualities)
+        return settings.enhancementEnabled && settings.frameInterpolation == resolved &&
+            settings.preferredInterpolationQuality == resolved &&
+            settings.forceFrameInterpolation == (resolved != .off) && settings.skipsExactDuplicateInterpolation
     }
 
     func startRecording(to url: URL) {
-        guard isRunning, !isRecording else { return }
+        guard !isRecording else { return }
+        let windowSize = configuredMacWindowSize
+        if sourceKind == .macWindow {
+            guard CaptureSessionPolicy.canRecordWindowCapture(
+                isRunning: macWindowCaptureIsRunning,
+                width: Int(windowSize.width),
+                height: Int(windowSize.height)
+            ) else { return }
+        } else {
+            guard isRunning else { return }
+        }
         isRecording = true
         recordingStartedAt = Date()
         recordingError = nil
@@ -1325,12 +1554,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         statusMessage = "正在录制…"
         recorder.setPicture(recordIncludesPicture ? picture : nil)
         if sourceKind == .macWindow {
-            // Window frames arrive as BGRA sample buffers, so the recorder uses the
-            // source size directly. No capture-device format is involved.
-            let size = macWindowCapture?.configuredPixelSize ?? CGSize(width: 1920, height: 1080)
-            let audioDesc = audioInput?.device.activeFormat.formatDescription
-            let asbd = audioDesc.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
-            startWindowRecording(url: url, width: Int(size.width), height: Int(size.height), audio: asbd)
+            // The size is valid only after ScreenCaptureKit has reported .running.
+            // Never manufacture recording dimensions while its stream is still starting.
+            macWindowRefreshRevision.advance()
+            // Session mutations and the audio format snapshot share a queue. A just-selected
+            // audio input must finish configuring before the recording's tracks are created.
+            sessionQueue.async { [weak self] in
+                guard let self else { return }
+                let audioDesc = self.audioInput?.device.activeFormat.formatDescription
+                let asbd = audioDesc.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
+                self.startWindowRecording(url: url, width: Int(windowSize.width), height: Int(windowSize.height), audio: asbd)
+            }
             return
         }
         sessionQueue.async { [weak self] in
@@ -1339,7 +1573,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 DispatchQueue.main.async {
                     self.isRecording = false; self.recordingStartedAt = nil; self.recordingError = L10n.text("视频设备已断开。")
                     self.statusMessage = L10n.format("录制失败：%@", self.recordingError!)
-                    self.recordingFinished?(); self.recordingFinished = nil
+                    self.applyPendingAudioSelection()
+                    let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
                 }
                 return
             }
@@ -1366,13 +1601,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: dismiss)
                     }
                     // Apply an audio device change that was deferred to avoid reconfiguring a live recording.
-                    if let pending = self.pendingAudioDeviceID {
-                        let persist = self.pendingAudioPersist
-                        self.pendingAudioDeviceID = nil
-                        self.pendingAudioPersist = false
-                        self.selectedAudioID = pending
-                        self.configureAudioInput(id: pending, persist: persist)
-                    }
+                    self.applyPendingAudioSelection()
                     let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
                 }
             }
@@ -1392,6 +1621,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
             recorder.append(sampleBuffer, video: true)
         } else if output === audioOutput {
+            #if MONIVIEW_CAPTURE_TESTING
+            audioSampleObserverForTesting?(sampleBuffer)
+            #endif
             let power = connection.audioChannels.map(\.averagePowerLevel).max() ?? -160
             let level = power <= -80 ? 0 : min(1, pow(10, power / 20))
             frames.setLevel(level)
@@ -1413,8 +1645,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) { frames.markDropped() }
 
     private func requestInitialPermission() {
+        // Refresh audio independently even if the camera prompt is still unresolved.
+        refreshDevices()
         switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: refreshDevices()
+        case .authorized: break
         case .notDetermined:
             cameraPermissionPending = true
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
@@ -1451,19 +1685,24 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.presentedSourceFPS = Int((Double(presentationStats.presentedSource) / elapsed).rounded())
             self.presentedOutputFPS = Int((Double(presentationStats.presentedSource + presentationStats.generated) / elapsed).rounded())
             self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
-            // Hold a lost detection briefly: content hovering at the duplicate threshold
-            // must not flap the UI. Budget math uses its own live window, unaffected.
-            // Snap the raw ratio onto a standard rate before it is used: the measurement can
-            // land between two of them depending on capture timing, and a value that hops
-            // between runs drags the temporal multiplier with it.
-            let rawDetected = ContentCadencePolicy.quantizedRate(self.frames.takeMeasuredContentFPS())
-            if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
-            let held = Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil
-            let detectedContentFPS = rawDetected ?? held
+            // Measure every input frame, independently of preview load. Unknown or stale
+            // results are not reused as evidence for capture or interpolation decisions.
+            let inputMeasurement = self.frames.inputContentCadenceSnapshot()
+            let detectedContentFPS = ContentCadencePolicy.boundedObservedRate(
+                inputMeasurement?.fps, signalFPS: self.frames.sourceFrameRate())
+            let isNewMeasurement: Bool
+            if let epoch = inputMeasurement?.streamEpoch, let sequence = inputMeasurement?.sequence {
+                isNewMeasurement = self.lastContentMeasurementIdentity.map {
+                    $0.epoch != epoch || $0.sequence != sequence
+                } ?? true
+                self.lastContentMeasurementIdentity = (epoch, sequence)
+            } else {
+                isNewMeasurement = false
+            }
             // Only a fresh measurement advances the streak. Re-feeding the held value every
             // second let an old result accumulate "stability" with no new evidence, which
             // then justified switching the capture rate on stale information.
-            if rawDetected != nil {
+            if detectedContentFPS != nil && isNewMeasurement {
                 self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
                     previous: self.detectedContentFPS, current: detectedContentFPS, streak: self.contentFPSStabilityStreak)
             } else {
@@ -1471,21 +1710,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             }
             self.detectedContentFPS = detectedContentFPS
             self.stableContentFPS = ContentCadencePolicy.stableRate(detectedContentFPS, streak: self.contentFPSStabilityStreak)
-            if self.followsRealContentRate, !self.isRecording, !self.isSwitchingVideoDevice,
-               self.pendingVideoConfiguration == nil, self.frames.currentPreviewState() != "hidden",
-               let stable = self.stableContentFPS,
-               Date().timeIntervalSince(self.lastRealRateSwitchAt) > 15,
-               let target = ContentCadencePolicy.targetRate(contentFPS: stable, supportedRates: self.frameRateOptions),
-               ContentCadencePolicy.isAcceptableFollowTarget(contentFPS: stable, target: target),
-               abs(self.selectedFrameRate - target) > 0.01 {
-                self.selectFrameRateValue(target, fromFollow: true)
-                // The stream rate just changed, so every cadence sample taken at the old
-                // rate describes a different signal. Keeping them let the next estimate
-                // build on the previous one and walk the capture rate down below the
-                // content it was meant to carry.
-                self.resetContentRateObservation()
-                self.lastRealRateSwitchAt = Date()
-            }
             if let (buffer, _, _) = self.frames.latest() {
                 self.isPortraitSource = CVPixelBufferGetHeight(buffer) > CVPixelBufferGetWidth(buffer)
             }
@@ -1504,7 +1728,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.upscaleEngine = self.frames.currentEngine()
             self.aiUpscaleStatus = self.frames.currentAIUpscaleStatus()
             self.enhancedSize = self.frames.currentEnhancedSize()
-            self.isRunning = stats.0 > 0
+            self.isRunning = self.sourceKind == .macWindow
+                ? self.macWindowCaptureIsRunning
+                : stats.0 > 0
             self.updatePowerAssertions()
             self.diagnosticTick += 1
             if self.diagnosticTick % 5 == 0, self.isRunning || self.isRecording { self.writeDiagnostics() }
@@ -1572,6 +1798,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
         payload["interpolationMidpointGPUMs"] = frames.currentInterpolationGPUCost()
+        payload["interpolationBasisFPS"] = interpolationBasisFPS as Any? ?? NSNull()
+        payload["enhancementStrength"] = picture.enhancementStrength
         payload["activeMultiplier"] = activeMultiplier
         payload["interpolationTargetFPS"] = interpolationTargetFPS
         payload["aiUpscaleStatus"] = aiUpscaleStatus

@@ -29,7 +29,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>MoniView 需要访问 USB 视频采集卡以显示 HDMI 画面。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MoniView 需要访问采集卡音频输入以实时播放和录制画面声音。</string>
+	<string>MoniView 需要访问你选择的音频输入，以实时监听和录制声音。</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>

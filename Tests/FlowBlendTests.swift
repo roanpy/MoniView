@@ -218,6 +218,69 @@ private final class FlowBlendSuite {
         check(flowRGB < 0.13 && flowRGB < dissolveRGB * 0.95 && flowY < dissolveY * 0.95,
               "\(name) midpoint displacement",
               String(format: "RGB MAE flow %.4f / dissolve %.4f; Y MAE %.4f / %.4f", flowRGB, dissolveRGB, flowY, dissolveY))
+
+        // Compare non-midpoint phases against the known translated-block image. The
+        // edge ROI covers the block's previous, intermediate and current contours,
+        // where a wrong reverse-flow lookup can change confidence with blend phase.
+        for phase: Float in [0.25, 0.75] {
+            let phaseSourceX = sourceAX + Int((Double(sourceBX - sourceAX) * Double(phase)).rounded())
+            let phaseSourceY = sourceAY + Int((Double(sourceBY - sourceAY) * Double(phase)).rounded())
+            let phaseX = Int(Double(phaseSourceX) * sx), phaseY = Int(Double(phaseSourceY) * sy)
+            let phaseBuffer = make(phaseSourceX, phaseSourceY)
+            let phaseReference = renderReference(CIImage(cvPixelBuffer: phaseBuffer), width: width, height: height)
+            let phaseActual = interpolate(previous: previous, current: current, previousBuffer: a, currentBuffer: b,
+                                          blend: phase, width: width, height: height)
+            let roiPadding = 24, edgeRadius = 8
+            let roiMinX = max(0, min(ax, min(phaseX, bx)) - roiPadding)
+            let roiMinY = max(0, min(ay, min(phaseY, by)) - roiPadding)
+            let roiMaxX = min(width, max(ax, max(phaseX, bx)) + blockWidth + roiPadding)
+            let roiMaxY = min(height, max(ay, max(phaseY, by)) + blockHeight + roiPadding)
+            var roiFlowError = 0.0, roiDissolveError = 0.0
+            var edgeFlowError = 0.0, edgeDissolveError = 0.0
+            var roiPixels = 0, edgePixels = 0
+
+            func nearBoundary(_ x: Int, _ y: Int, _ blockX: Int, _ blockY: Int) -> Bool {
+                let left = blockX, right = blockX + blockWidth - 1
+                let top = blockY, bottom = blockY + blockHeight - 1
+                return x >= left - edgeRadius && x <= right + edgeRadius &&
+                       y >= top - edgeRadius && y <= bottom + edgeRadius &&
+                       (abs(x - left) <= edgeRadius || abs(x - right) <= edgeRadius ||
+                        abs(y - top) <= edgeRadius || abs(y - bottom) <= edgeRadius)
+            }
+
+            for y in roiMinY..<roiMaxY {
+                for x in roiMinX..<roiMaxX {
+                    let offset = ((height - 1 - y) * width + x) * 4
+                    let isEdge = nearBoundary(x, y, ax, ay) || nearBoundary(x, y, phaseX, phaseY) ||
+                                 nearBoundary(x, y, bx, by)
+                    for channel in 0..<3 {
+                        let expected = Double(phaseReference[offset + channel])
+                        let dissolve = Double(nativeA[offset + channel]) * (1.0 - Double(phase)) +
+                                       Double(nativeB[offset + channel]) * Double(phase)
+                        roiFlowError += abs(Double(phaseActual[offset + channel]) - expected)
+                        roiDissolveError += abs(dissolve - expected)
+                        if isEdge {
+                            edgeFlowError += abs(Double(phaseActual[offset + channel]) - expected)
+                            edgeDissolveError += abs(dissolve - expected)
+                        }
+                    }
+                    roiPixels += 1
+                    if isEdge { edgePixels += 1 }
+                }
+            }
+            let roiFlowMAE = roiFlowError / Double(roiPixels * 3 * 255)
+            let roiDissolveMAE = roiDissolveError / Double(roiPixels * 3 * 255)
+            let edgeFlowMAE = edgeFlowError / Double(edgePixels * 3 * 255)
+            let edgeDissolveMAE = edgeDissolveError / Double(edgePixels * 3 * 255)
+            check(roiFlowMAE < 0.13 && roiFlowMAE < roiDissolveMAE * 0.95,
+                  "\(name) phase \(phase) motion ROI",
+                  String(format: "RGB MAE flow %.4f / phase-weighted dissolve %.4f", roiFlowMAE, roiDissolveMAE))
+            check(edgePixels > 0 && edgeFlowMAE < 0.13 && edgeFlowMAE < edgeDissolveMAE * 0.95,
+                  "\(name) phase \(phase) motion/occlusion boundary",
+                  String(format: "RGB MAE flow %.4f / phase-weighted dissolve %.4f over %d boundary pixels",
+                         edgeFlowMAE, edgeDissolveMAE, edgePixels))
+        }
+
         var backgroundMax = 0
         var interiorBias = [Double](repeating: 0, count: 3)
         var interiorSamples = 0

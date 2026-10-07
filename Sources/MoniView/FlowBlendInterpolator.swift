@@ -267,7 +267,10 @@ final class FlowBlendInterpolator {
 
             float4 forward = forwardFlow.sample(linearSampler, uv);
             float2 currentUV = uv + forward.xy * ((1.0f - blend) / dimensions);
-            float4 backward = backwardFlow.sample(linearSampler, currentUV);
+            // Reverse flow is defined at the full correspondence in the current frame;
+            // its lookup must not move with the intermediate output's blend phase.
+            float2 currentFlowUV = uv + forward.xy / dimensions;
+            float4 backward = backwardFlow.sample(linearSampler, currentFlowUV);
             float consistency = 1.0f - smoothstep(2.0f, 9.0f, length(forward.xy + backward.xy));
 
             float2 flowStep = 16.0f / dimensions;

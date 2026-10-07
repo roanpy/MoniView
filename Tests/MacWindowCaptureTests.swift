@@ -19,6 +19,10 @@ private final class Counter {
     private var statusCounts: [String: Int] = [:]
     private var signatures: [UInt64] = []
     private(set) var states: [MacWindowCapture.State] = []
+    private var stateObservations: [(reported: MacWindowCapture.State,
+                                     captureState: MacWindowCapture.State?,
+                                     configuredSize: CGSize)] = []
+    weak var capture: MacWindowCapture?
 
     func record(sample: CMSampleBuffer) {
         guard let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
@@ -63,7 +67,20 @@ private final class Counter {
 
     var statuses: [String: Int] { lock.lock(); defer { lock.unlock() }; return statusCounts }
 
-    func recordState(_ state: MacWindowCapture.State) { lock.lock(); states.append(state); lock.unlock() }
+    func recordState(_ state: MacWindowCapture.State) {
+        let captureState = capture?.state
+        let configuredSize = capture?.configuredPixelSize ?? .zero
+        lock.lock()
+        states.append(state)
+        stateObservations.append((state, captureState, configuredSize))
+        lock.unlock()
+    }
+
+    var runningStateObservation: (captureState: MacWindowCapture.State?, configuredSize: CGSize)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let observation = stateObservations.first(where: { $0.reported == .running }) else { return nil }
+        return (observation.captureState, observation.configuredSize)
+    }
 
     var snapshot: (count: Int, dropped: Int, sizes: Set<String>, formats: Set<UInt32>, states: [MacWindowCapture.State], increasing: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -147,15 +164,18 @@ enum MacWindowCaptureTests {
 
         let (animated, timer) = makeWindow(animated: true, title: "MoniView capture test")
         pump(0.5)
-        let expectedWidth = Int(animated.frame.width)
-        let expectedHeight = Int(animated.frame.height)
-        check(expectedWidth >= 160 && expectedHeight >= 120, "Synthetic window is a valid capture size")
+        let expectedFrameWidth = Int(animated.frame.width)
+        let expectedFrameHeight = Int(animated.frame.height)
+        let backingScale = max(1, animated.screen?.backingScaleFactor ?? 1)
+        let expectedPixelWidth = max(2, Int((animated.frame.width * backingScale).rounded(.down)) & ~1)
+        let expectedPixelHeight = max(2, Int((animated.frame.height * backingScale).rounded(.down)) & ~1)
+        check(expectedFrameWidth >= 160 && expectedFrameHeight >= 120, "Synthetic window is a valid capture size")
 
         // Discovery includes this process's window and reports its frame size.
         let options = try! runBlocking { try await MacWindowCapture.availableWindows(excludingBundleID: nil) }
         let option = options.first { $0.id == UInt32(animated.windowNumber) }
         check(options.contains { $0.id == UInt32(animated.windowNumber) }, "Discovery lists the synthetic window")
-        check(option?.width == expectedWidth && option?.height == expectedHeight, "Discovery reports the window frame size")
+        check(option?.width == expectedFrameWidth && option?.height == expectedFrameHeight, "Discovery reports the window frame size")
 
         // Exclusion drops an owner's windows when its bundle identifier is passed.
         if let other = options.first(where: { $0.applicationName != "" }),
@@ -171,16 +191,21 @@ enum MacWindowCaptureTests {
             frameSink: { counter.record(sample: $0) },
             state: { counter.recordState($0) },
             dropped: { counter.recordDrop() })
+        counter.capture = capture
         capture.start(windowID: UInt32(animated.windowNumber))
         pump(3.0)
         let animatedStats = counter.snapshot
         print("Animated window: frames=\(animatedStats.count) size=\(animatedStats.sizes.first ?? "-") format=\(animatedStats.formats.map { fourCC($0) }.first ?? "-") increasing=\(animatedStats.increasing)")
         check(animatedStats.states.contains(.running), "Animated capture reaches the running state")
         check(animatedStats.count > 100, "Animated capture delivers frames (got \(animatedStats.count))")
-        check(animatedStats.sizes == ["\(expectedWidth)x\(expectedHeight)"], "Frames use the configured size (got \(animatedStats.sizes))")
+        check(animatedStats.sizes == ["\(expectedPixelWidth)x\(expectedPixelHeight)"], "Frames use the configured pixel size (got \(animatedStats.sizes))")
         check(animatedStats.formats == [kCVPixelFormatType_32BGRA], "Frames are BGRA (got \(animatedStats.formats.map { fourCC($0) }))")
         check(animatedStats.increasing, "Presentation timestamps strictly increase")
-        check(capture.configuredPixelSize == CGSize(width: expectedWidth, height: expectedHeight), "Adapter reports the configured pixel size")
+        check(capture.configuredPixelSize == CGSize(width: expectedPixelWidth, height: expectedPixelHeight), "Adapter reports the configured pixel size")
+        let runningObservation = counter.runningStateObservation
+        check(runningObservation?.captureState == .running &&
+              runningObservation?.configuredSize == CGSize(width: expectedPixelWidth, height: expectedPixelHeight),
+              "State callback can synchronously read state and configured pixels")
 
         // Stop must stop delivery and report the stopped state.
         capture.stop()
@@ -211,6 +236,7 @@ enum MacWindowCaptureTests {
             frameSink: { staticCounter.record(sample: $0) },
             state: { staticCounter.recordState($0) },
             dropped: { staticCounter.recordDrop() })
+        staticCounter.capture = staticCapture
         staticCapture.start(windowID: UInt32(staticWindow.windowNumber))
         pump(2.0)
         let staticStats = staticCounter.snapshot

@@ -26,6 +26,12 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
         case .flowBlend: return 1920
         }
     }
+
+    static func availableQuality(_ requested: FrameInterpolationMode,
+                                 supported: [FrameInterpolationMode]) -> FrameInterpolationMode {
+        if requested != .off && supported.contains(requested) { return requested }
+        return [.flowBlend, .balanced, .efficient, .quality].first(where: supported.contains) ?? .off
+    }
 }
 
 /// Pure admission and input sizing policy. The renderer owns displayLink, buffers and its
@@ -79,8 +85,8 @@ enum FrameInterpolationPolicy {
 
     /// Presentations the display can hold inside one pair period, capped at the engine's own
     /// stated multiplier. The step is chosen from a tolerant cadence estimate while the period
-    /// comes from measured PTS, so the two can disagree: the same 60 Hz pair holds four
-    /// presentations on a 120 Hz panel, two on a 60 Hz panel, and a cadence that reads it as
+    /// comes from measured PTS, so the two can disagree: the same 60 FPS pair holds two
+    /// presentations on a 120 Hz panel, one on a 60 Hz panel, and a cadence that reads it as
     /// 20 FPS content asks for three on both. Asking for more than the display can hold pushes
     /// the endpoint past its deadline, so the step is reduced to what this pair actually fits.
     static func multiplierFittingPair(_ multiplier: Double, pairPeriod: Double, displayFPS: Double) -> Double {
@@ -95,6 +101,19 @@ enum FrameInterpolationPolicy {
         var allowed = 1
         for step in 2...min(stated, 3) where Double(step) <= capacity { allowed = step }
         return Double(allowed)
+    }
+
+    /// Follow normally pairs against the last rendered unique endpoint. Prefer the raw
+    /// adjacent capture pair only when fresh input-side evidence says the content cadence
+    /// is effectively the capture cadence and strict pixel equality confirms a change.
+    /// A missing/stale estimate never blocks the existing unique-pair path.
+    static func prefersAdjacentInputPair(inputFPS: Double?, signalFPS: Double,
+                                         evidenceFreshForCurrentEpoch: Bool,
+                                         adjacentFramesAreDifferent: Bool) -> Bool {
+        guard evidenceFreshForCurrentEpoch, adjacentFramesAreDifferent,
+              let inputFPS, inputFPS.isFinite, inputFPS > 0,
+              signalFPS.isFinite, signalFPS > 0 else { return false }
+        return abs(inputFPS - signalFPS) <= max(1.5, signalFPS * 0.05)
     }
     static let budgetFraction = 0.9
     static let pairBudgetFraction = 0.9
@@ -129,6 +148,49 @@ enum FrameInterpolationPolicy {
         return generated + source <= Double(midpoints.count + 1) * slot * pairBudgetFraction
     }
 
+    /// Cost of one pair when its flow phases are encoded together before the first
+    /// presentation. That first command already includes every generated phase; only
+    /// later cached-phase presentations and the source endpoint add more commands.
+    static func pairCost(generationBatch: Double, subsequentPresentation: Double?,
+                        sourceEndpoint: Double, generatedPhaseCount: Int) -> Double? {
+        guard generatedPhaseCount >= 1, generationBatch.isFinite, generationBatch >= 0,
+              sourceEndpoint.isFinite, sourceEndpoint >= 0 else { return nil }
+        let subsequentCount = generatedPhaseCount - 1
+        if subsequentCount > 0 {
+            guard let subsequentPresentation, subsequentPresentation.isFinite,
+                  subsequentPresentation >= 0 else { return nil }
+            let total = generationBatch + subsequentPresentation * Double(subsequentCount) + sourceEndpoint
+            return total.isFinite ? total : nil
+        }
+        let total = generationBatch + sourceEndpoint
+        return total.isFinite ? total : nil
+    }
+
+    /// Check measured work against its actual phase intervals and the whole source-pair
+    /// period. `generationBatch` is counted once even when that command generated 2 phases.
+    static func costsFit(generationBatch: Double, subsequentPresentation: Double?,
+                        sourceEndpoint: Double, phases: [Double], pairPeriod: Double) -> Bool {
+        guard !phases.isEmpty, phases.allSatisfy({ $0.isFinite && $0 > 0 && $0 < 1 }),
+              zip(phases, phases.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }),
+              pairPeriod.isFinite, pairPeriod > 0,
+              let total = pairCost(generationBatch: generationBatch,
+                                   subsequentPresentation: subsequentPresentation,
+                                   sourceEndpoint: sourceEndpoint,
+                                   generatedPhaseCount: phases.count) else { return false }
+
+        let generationSlot = phases[0] * pairPeriod
+        guard generationBatch <= generationSlot * midpointBudgetFraction else { return false }
+        if phases.count > 1 {
+            guard let subsequentPresentation else { return false }
+            for (previous, next) in zip(phases, phases.dropFirst()) {
+                guard subsequentPresentation <= (next - previous) * pairPeriod * budgetFraction else { return false }
+            }
+        }
+        let endpointSlot = (1 - phases[phases.count - 1]) * pairPeriod
+        guard sourceEndpoint <= endpointSlot * budgetFraction else { return false }
+        return total <= pairPeriod * pairBudgetFraction
+    }
+
     /// Force ignores measured budget only. A finite measurement and a feasible
     /// presentation deadline are still required; display/input eligibility is separate.
     static func allowsMeasuredPair(midpoint: Double, source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
@@ -142,6 +204,23 @@ enum FrameInterpolationPolicy {
               source >= 0, slot > 0,
               midpoints.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return false }
         return force || costsFit(midpoints: midpoints, source: source, slot: slot)
+    }
+
+    /// Batch-aware renderer admission. Force bypasses only the measured budget; phase
+    /// ordering, finite costs and the actual presentation deadline still apply.
+    static func allowsMeasuredPair(generationBatch: Double, subsequentPresentation: Double?,
+                                   sourceEndpoint: Double, phases: [Double], pairPeriod: Double,
+                                   force: Bool, deadlineFits: Bool) -> Bool {
+        guard deadlineFits, !phases.isEmpty,
+              phases.allSatisfy({ $0.isFinite && $0 > 0 && $0 < 1 }),
+              zip(phases, phases.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }),
+              generationBatch.isFinite, generationBatch >= 0,
+              sourceEndpoint.isFinite, sourceEndpoint >= 0,
+              pairPeriod.isFinite, pairPeriod > 0,
+              phases.count == 1 || (subsequentPresentation?.isFinite == true && (subsequentPresentation ?? -1) >= 0) else { return false }
+        return force || costsFit(generationBatch: generationBatch,
+            subsequentPresentation: subsequentPresentation, sourceEndpoint: sourceEndpoint,
+            phases: phases, pairPeriod: pairPeriod)
     }
 
     /// Force can retry a budget failure immediately, but cannot clear an active

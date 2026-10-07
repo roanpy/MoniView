@@ -1,4 +1,5 @@
 @preconcurrency import ScreenCaptureKit
+import AppKit
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -13,6 +14,64 @@ struct MacWindowOption: Identifiable, Hashable {
     var displayTitle: String {
         let name = title.isEmpty ? applicationName : title
         return "\(name) — \(applicationName)"
+    }
+}
+
+/// Small, framework-independent rules used by the ScreenCaptureKit adapter. Keeping
+/// these calculations pure makes display selection, Retina sizing, and callback
+/// identity checks testable without opening a capture session.
+enum MacWindowCapturePolicy {
+    struct Display: Equatable {
+        let id: UInt32
+        let frame: CGRect
+    }
+
+    static func displayID(forWindowFrame windowFrame: CGRect, among displays: [Display]) -> UInt32? {
+        guard !windowFrame.isNull, !windowFrame.isEmpty else { return nil }
+        let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        var best: (id: UInt32, area: CGFloat, containsCenter: Bool)?
+
+        for display in displays {
+            let overlap = windowFrame.intersection(display.frame)
+            guard !overlap.isNull, !overlap.isEmpty else { continue }
+            let area = overlap.width * overlap.height
+            let containsCenter = display.frame.contains(center)
+            if best == nil || area > best!.area || (area == best!.area && containsCenter && !best!.containsCenter) {
+                best = (display.id, area, containsCenter)
+            }
+        }
+        return best?.id
+    }
+
+    /// SCWindow and SCDisplay geometry is in screen points, while configured stream
+    /// dimensions are output pixels. Preserve the current 3840-pixel width ceiling.
+    static func pixelSize(forWindowFrameSize size: CGSize,
+                          backingScaleFactor: CGFloat,
+                          maximumWidth: Int = 3840) -> CGSize {
+        guard size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0, maximumWidth >= 2 else { return .zero }
+        let scale = backingScaleFactor.isFinite ? max(1, backingScaleFactor) : 1
+        let pixelWidth = size.width * scale
+        let outputScale = min(1, CGFloat(maximumWidth) / pixelWidth)
+        func evenDimension(_ value: CGFloat) -> Int {
+            max(2, Int((value * outputScale).rounded(.down)) & ~1)
+        }
+        return CGSize(width: evenDimension(pixelWidth), height: evenDimension(size.height * scale))
+    }
+
+    static func boundedRefreshRate(_ reportedRate: Int) -> Int {
+        min(240, max(30, reportedRate > 0 ? reportedRate : 60))
+    }
+
+    static func acceptsCallback<Stream: AnyObject>(
+        callbackStream: Stream,
+        activeStream: Stream?,
+        activeGeneration: UInt64?,
+        generation: UInt64
+    ) -> Bool {
+        guard let activeStream, callbackStream === activeStream,
+              activeGeneration == generation else { return false }
+        return true
     }
 }
 
@@ -52,13 +111,23 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let stateHandler: (State) -> Void
     private let droppedHandler: () -> Void
     private let queue = DispatchQueue(label: "dev.moniview.sck", qos: .userInteractive)
+    private let stateLock = NSLock()
     private var stream: SCStream?
-    private var windowID: UInt32?
+    private var streamGeneration: UInt64?
     private var generation: UInt64 = 0
     private var configuredSize = CGSize.zero
-    private(set) var state: State = .idle
+    private var stateValue: State = .idle
+    var state: State {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stateValue
+    }
     /// The pixel size frames are delivered at; the recorder uses it for its writer.
-    var configuredPixelSize: CGSize { configuredSize }
+    var configuredPixelSize: CGSize {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return configuredSize
+    }
 
     init(frameSink: @escaping (CMSampleBuffer) -> Void,
          state: @escaping (State) -> Void,
@@ -95,72 +164,180 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func start(windowID: UInt32) {
+        stateLock.lock()
         generation &+= 1
         let expected = generation
-        publish(.starting)
+        let previous = stream
+        stream = nil
+        streamGeneration = nil
+        configuredSize = .zero
+        stateValue = .starting
+        enqueueStateLocked(.starting, generation: expected)
+        stateLock.unlock()
+
         Task { [weak self] in
             guard let self else { return }
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard self.generation == expected else { return }
-                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-                    self.publish(.failed(MacWindowCaptureError.windowUnavailable.localizedDescription)); return
-                }
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                let configuration = SCStreamConfiguration()
-                // Keep the source's own pixel size; enhancement targets are applied later.
-                let scale = min(1, 3840 / max(1, window.frame.width))
-                let width = max(2, Int(window.frame.width * scale) & ~1)
-                let height = max(2, Int(window.frame.height * scale) & ~1)
-                configuration.width = width
-                configuration.height = height
-                // Ask for the display's own rate: a 120 Hz panel would otherwise be
-                // capped at 60 by a hardcoded interval. This is a requested cadence,
-                // not proof of a source's render rate.
-                let displayRate = await Self.displayRefreshRate()
-                configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(displayRate))
-                configuration.queueDepth = 5
-                configuration.showsCursor = false
-                configuration.pixelFormat = kCVPixelFormatType_32BGRA
-                configuration.scalesToFit = true
-                let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
-                try await stream.startCapture()
-                guard self.generation == expected else { try? await stream.stopCapture(); return }
-                self.windowID = windowID
-                self.configuredSize = CGSize(width: width, height: height)
-                self.stream = stream
-                self.publish(.running)
-            } catch {
-                guard self.generation == expected else { return }
-                self.publish(.failed(MacWindowCaptureError.startFailed(error.localizedDescription).localizedDescription))
-            }
+            if let previous { try? await previous.stopCapture() }
+            guard self.isCurrentGeneration(expected) else { return }
+            await self.startCapture(windowID: windowID, generation: expected)
         }
     }
 
     func stop() {
+        stateLock.lock()
         generation &+= 1
+        let expected = generation
         let existing = stream
         stream = nil
-        windowID = nil
+        streamGeneration = nil
         configuredSize = .zero
-        publish(.stopped)
+        stateValue = .stopped
+        enqueueStateLocked(.stopped, generation: expected)
+        stateLock.unlock()
+
         guard let existing else { return }
         Task { try? await existing.stopCapture() }
     }
 
-    /// The refresh limit of the display showing the source window. Apple reports this
-    /// per screen; it is the ceiling the compositor can deliver, not a measured rate.
-    private static func displayRefreshRate() async -> Int {
-        await MainActor.run {
-            let reported = NSScreen.main?.maximumFramesPerSecond ?? 60
-            return min(240, max(30, reported))
+    private func startCapture(windowID: UInt32, generation expected: UInt64) async {
+        var candidateStream: SCStream?
+        var installedStream: SCStream?
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard isCurrentGeneration(expected) else { return }
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                _ = transition(to: .failed(MacWindowCaptureError.windowUnavailable.localizedDescription),
+                               generation: expected, onlyWhileStarting: true)
+                return
+            }
+
+            let displayID = MacWindowCapturePolicy.displayID(
+                forWindowFrame: window.frame,
+                among: content.displays.map { MacWindowCapturePolicy.Display(id: $0.displayID, frame: $0.frame) })
+            let display = await Self.displayMetrics(for: displayID)
+            guard isCurrentGeneration(expected) else { return }
+
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let configuration = SCStreamConfiguration()
+            // Window/display geometry is in logical points; the stream output is pixels.
+            let size = MacWindowCapturePolicy.pixelSize(
+                forWindowFrameSize: window.frame.size,
+                backingScaleFactor: display.backingScaleFactor)
+            guard size != .zero else {
+                _ = transition(to: .failed(MacWindowCaptureError.windowUnavailable.localizedDescription),
+                               generation: expected, onlyWhileStarting: true)
+                return
+            }
+            let width = Int(size.width)
+            let height = Int(size.height)
+            configuration.width = width
+            configuration.height = height
+            // This is the source display's maximum cadence, not a measured render rate.
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(display.refreshRate))
+            configuration.queueDepth = 5
+            configuration.showsCursor = false
+            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            configuration.scalesToFit = true
+
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+            candidateStream = stream
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
+            guard installStartingStream(stream, generation: expected) else {
+                try? await stream.stopCapture()
+                return
+            }
+            installedStream = stream
+            try await stream.startCapture()
+            guard activate(stream, configuredSize: size, generation: expected) else {
+                try? await stream.stopCapture()
+                return
+            }
+            candidateStream = nil
+        } catch {
+            let detail = MacWindowCaptureError.startFailed(error.localizedDescription).localizedDescription
+            _ = transition(to: .failed(detail), generation: expected,
+                           matchingStream: installedStream, onlyWhileStarting: true, clearActiveStream: true)
+            if let candidateStream { try? await candidateStream.stopCapture() }
         }
     }
 
-    private func publish(_ newState: State) {
-        state = newState
-        DispatchQueue.main.async { [weak self] in self?.stateHandler(newState) }
+    private static func displayMetrics(for displayID: UInt32?) async -> (backingScaleFactor: CGFloat, refreshRate: Int) {
+        await MainActor.run {
+            guard let displayID,
+                  let screen = NSScreen.screens.first(where: {
+                      ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+                  }) else {
+                return (1, MacWindowCapturePolicy.boundedRefreshRate(60))
+            }
+            return (max(1, screen.backingScaleFactor),
+                    MacWindowCapturePolicy.boundedRefreshRate(screen.maximumFramesPerSecond))
+        }
+    }
+
+    private func isCurrentGeneration(_ expected: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return generation == expected
+    }
+
+    private func installStartingStream(_ candidate: SCStream, generation expected: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == expected, stateValue == .starting else { return false }
+        stream = candidate
+        streamGeneration = expected
+        // Keep configuredPixelSize at zero until startCapture succeeds.
+        configuredSize = .zero
+        return true
+    }
+
+    private func activate(_ candidate: SCStream, configuredSize size: CGSize, generation expected: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == expected, stateValue == .starting,
+              MacWindowCapturePolicy.acceptsCallback(callbackStream: candidate,
+                                                     activeStream: stream,
+                                                     activeGeneration: streamGeneration,
+                                                     generation: generation) else { return false }
+        self.configuredSize = size
+        stateValue = .running
+        enqueueStateLocked(.running, generation: expected)
+        return true
+    }
+
+    private func transition(to newState: State, generation expected: UInt64,
+                            matchingStream: SCStream? = nil,
+                            onlyWhileStarting: Bool = false,
+                            clearActiveStream: Bool = false) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == expected else { return false }
+        if let matchingStream, !MacWindowCapturePolicy.acceptsCallback(
+            callbackStream: matchingStream, activeStream: stream,
+            activeGeneration: streamGeneration, generation: generation) { return false }
+        if onlyWhileStarting, stateValue != .starting { return false }
+        stateValue = newState
+        if clearActiveStream {
+            stream = nil
+            streamGeneration = nil
+            configuredSize = .zero
+        }
+        enqueueStateLocked(newState, generation: expected)
+        return true
+    }
+
+    /// Caller holds stateLock so transition order and callback delivery order agree.
+    private func enqueueStateLocked(_ newState: State, generation expected: UInt64) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let isCurrent = self.generation == expected
+            self.stateLock.unlock()
+            guard isCurrent else { return }
+            // Never invoke client code while holding stateLock. Handlers may read
+            // state/configuration or synchronously call start/stop.
+            self.stateHandler(newState)
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -168,6 +345,17 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = attachments.first?[.status] as? Int,
               let status = SCFrameStatus(rawValue: statusRaw) else { return }
+        stateLock.lock()
+        let isCurrent = stateValue == .running &&
+            MacWindowCapturePolicy.acceptsCallback(callbackStream: stream,
+                                                   activeStream: self.stream,
+                                                   activeGeneration: streamGeneration,
+                                                   generation: generation)
+        stateLock.unlock()
+        // An accepted callback may finish if stop/restart races after this snapshot.
+        // The next callback observes the new generation. Client code runs lock-free
+        // so it can safely query or change capture state synchronously.
+        guard isCurrent else { return }
         guard status == .complete else {
             // Unchanged content: the compositor re-sent the previous surface.
             // Counting it as dropped keeps cadence and duplicate statistics honest.
@@ -179,6 +367,17 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        publish(.failed(MacWindowCaptureError.startFailed(error.localizedDescription).localizedDescription))
+        let detail = MacWindowCaptureError.startFailed(error.localizedDescription).localizedDescription
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard MacWindowCapturePolicy.acceptsCallback(callbackStream: stream,
+                                                     activeStream: self.stream,
+                                                     activeGeneration: streamGeneration,
+                                                     generation: generation) else { return }
+        stateValue = .failed(detail)
+        self.stream = nil
+        streamGeneration = nil
+        configuredSize = .zero
+        enqueueStateLocked(.failed(detail), generation: generation)
     }
 }

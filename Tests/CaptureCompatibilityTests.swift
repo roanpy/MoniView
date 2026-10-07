@@ -99,6 +99,27 @@ struct CaptureCompatibilityTests {
         let frames = LatestVideoFrame()
         frames.put(pixelBuffer(), pts: .zero)
         let snapshot = frames.latestSnapshot()!
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: snapshot.streamEpoch)
+        precondition(frames.currentActiveMultiplier() == 2 && frames.currentInterpolationBasisFPS() == 30)
+        // Deterministic freshness checks, without sleeping or retaining obsolete activity.
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: snapshot.streamEpoch, at: 10)
+        precondition(frames.currentInterpolationActivity(at: 10.9)?.basisFPS == 30, "native fallback preserves recent success")
+        precondition(frames.currentInterpolationActivity(at: 11.25)?.multiplier == 2, "statistics window remains stable")
+        precondition(frames.currentInterpolationActivity(at: 11.251) == nil, "sustained inactivity expires")
+        precondition(frames.currentInterpolationActivity(at: 9) == nil, "future timestamp cannot count as recent success")
+        frames.setActiveMultiplier(nil)
+        precondition(frames.currentInterpolationActivity(at: 10.1) == nil, "hard reset immediately clears recent activity")
+        frames.setActiveMultiplier(3, inputFPS: 20, streamEpoch: snapshot.streamEpoch, at: 12)
+        precondition(frames.currentInterpolationActivity(at: 12.1)?.basisFPS == 20, "new success replaces basis dynamically")
+        // A fresh success re-arms the window instead of leaving the original deadline in place.
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: snapshot.streamEpoch, at: 13.2)
+        precondition(frames.currentInterpolationActivity(at: 14.3)?.multiplier == 2, "renewal restarts the readout window")
+        precondition(frames.currentInterpolationActivity(at: 14.5) == nil, "the window still expires after renewal")
+        // An older stream generation cannot republish over activity from the current one.
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: snapshot.streamEpoch, at: 15.0)
+        frames.setActiveMultiplier(3, inputFPS: 20, streamEpoch: snapshot.streamEpoch &+ 7, at: 15.2)
+        precondition(frames.currentInterpolationActivity(at: 15.3)?.multiplier == 2, "an older epoch cannot republish over recent activity")
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: snapshot.streamEpoch)
         frames.markPresentedSource(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch, presentedTime: 1)
         frames.markGenerated(streamEpoch: snapshot.streamEpoch, presentedTime: 1 + 1/120.0)
         frames.markPresentedSource(sequence: snapshot.sequence, streamEpoch: snapshot.streamEpoch, presentedTime: 1.1)
@@ -109,6 +130,16 @@ struct CaptureCompatibilityTests {
         frames.setPreviewState("hidden")
         precondition(frames.presentationP95() == 0, "hidden preview resets presentation interval baseline")
         frames.clear()
+        precondition(frames.currentActiveMultiplier() == nil && frames.currentInterpolationBasisFPS() == nil, "clearing input clears the applied pairing")
+        frames.setActiveMultiplier(3, inputFPS: 20, streamEpoch: snapshot.streamEpoch)
+        precondition(frames.currentActiveMultiplier() == nil, "retired epoch cannot republish a multiplier")
+        frames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 30))
+        let resumedEpoch = frames.streamGeneration()
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: resumedEpoch)
+        frames.put(pixelBuffer(width: 32, height: 32), pts: CMTime(value: 2, timescale: 30))
+        precondition(frames.currentActiveMultiplier() == nil && frames.currentInterpolationBasisFPS() == nil, "layout epoch clears pairing")
+        frames.setActiveMultiplier(2, inputFPS: 30, streamEpoch: resumedEpoch)
+        precondition(frames.currentActiveMultiplier() == nil, "prior layout epoch cannot overwrite resumed state")
         frames.markDuplicateSkipped(sequence: snapshot.sequence + 1, streamEpoch: snapshot.streamEpoch)
         precondition(frames.takeDuplicateSkips() == 0, "retired stream skip ignored")
     }
@@ -122,6 +153,15 @@ struct CaptureCompatibilityTests {
         precondition(restored == newSettings && restored.forceFrameInterpolation, "new force/quality settings persist")
         // This is the persisted shape before interpolationMode was added.
         precondition(!PictureSettings().forceFrameInterpolation, "force defaults off")
+        precondition(PictureSettings().skipsExactDuplicateInterpolation, "content follow defaults on")
+        var explicitCaptureBasis = PictureSettings()
+        explicitCaptureBasis.skipsExactDuplicateInterpolation = false
+        let savedCaptureBasis = try! JSONDecoder().decode(PictureSettings.self, from: JSONEncoder().encode(explicitCaptureBasis))
+        precondition(!savedCaptureBasis.skipsExactDuplicateInterpolation, "explicit capture basis remains off after save")
+        precondition(FrameInterpolationMode.availableQuality(.quality, supported: [.flowBlend]) == .flowBlend, "unavailable VT falls back to available Flow")
+        precondition(FrameInterpolationMode.availableQuality(.flowBlend, supported: [.balanced]) == .balanced, "unavailable Flow falls back to available VT")
+        precondition(FrameInterpolationMode.availableQuality(.quality, supported: []) == .off, "no available engine disables interpolation")
+        precondition(FrameInterpolationMode.availableQuality(.quality, supported: [.quality, .flowBlend]) == .quality, "supported saved engine is retained")
         let oldJSON = #"{"brightness":0.12,"contrast":1.08,"saturation":0.91,"sharpness":0.2,"vibrance":0.15,"lowLatency":true,"enhancementEnabled":true,"enhancementStrength":0.35,"upscaleTarget":"原始","upscaleMethod":"MetalFX","highlightRecovery":0.05}"#
         let decoded: PictureSettings
         do {
@@ -129,6 +169,8 @@ struct CaptureCompatibilityTests {
         } catch {
             preconditionFailure("legacy PictureSettings JSON did not decode: \(error)")
         }
+        precondition(decoded.enhancementStrength == 0.35, "saved strength is not raised by new defaults")
+        precondition(decoded.skipsExactDuplicateInterpolation, "legacy unspecified follow defaults on")
         precondition(!decoded.forceFrameInterpolation && decoded.preferredInterpolationQuality == nil, "legacy additions default to off/unset")
         var prior = try! JSONSerialization.jsonObject(with: Data(oldJSON.utf8)) as! [String: Any]
         prior["interpolationMode"] = FrameInterpolationMode.quality.rawValue
@@ -171,8 +213,15 @@ struct CaptureCompatibilityTests {
         frames.setInterpolationHistoryEnabled(false)
         precondition(hasNoPair(frames, sequence: retained.sourceSequence),
                      "disabling interpolation history must clear the previous frame")
+        // The independent input-cadence worker may still be comparing this buffer.
+        // Interpolation releases immediately; the bounded input comparison releases
+        // its preceding sample as soon as the newest sample finishes processing.
+        let releaseDeadline = Date().addingTimeInterval(1)
+        while retained.weakPrevious.value != nil && Date() < releaseDeadline {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
         precondition(retained.weakPrevious.value == nil,
-                     "disabling interpolation history must release its strong previous-buffer reference")
+                     "disabled interpolation and completed input comparison must release the preceding buffer")
         frames.put(pixelBuffer(), pts: CMTime(value: 3003, timescale: 60000))
         precondition(hasNoPair(frames, sequence: frames.latest()!.1),
                      "disabled history must not retain subsequent frames")
@@ -240,7 +289,123 @@ struct CaptureCompatibilityTests {
         CaptureFormatOption(id: 0, width: 1920, height: 1080, minimumFPS: Int(rate.rounded()), maximumFPS: Int(rate.rounded()), rates: [rate...rate])
     }
 
+    private static func testCaptureLifecyclePolicies() {
+        precondition(CaptureSessionPolicy.action(isRunning: true, inputCount: 1) == nil,
+                     "A running session with audio still attached is left alone")
+        precondition(CaptureSessionPolicy.action(isRunning: true, inputCount: 0) == .stop,
+                     "A running session with no input is stopped")
+        precondition(CaptureSessionPolicy.action(isRunning: false, inputCount: 1) == .start,
+                     "Window mode starts an idle session so audio keeps running")
+        precondition(CaptureSessionPolicy.action(isRunning: false, inputCount: 0) == nil,
+                     "An idle session with no input is left alone")
+        precondition(CaptureSessionPolicy.shouldRun(inputCount: 1) && !CaptureSessionPolicy.shouldRun(inputCount: 0),
+                     "Only an input justifies running the session")
+
+        let pending = AudioSelectionIntent(id: "external-mic", persist: true)
+        precondition(AudioPermissionPolicy.shouldRequestAccess(for: .notDetermined, requestInFlight: false))
+        precondition(!AudioPermissionPolicy.shouldRequestAccess(for: .notDetermined, requestInFlight: true),
+                     "A refresh must not issue another permission request while one is pending")
+        precondition(!AudioPermissionPolicy.shouldRequestAccess(for: .denied, requestInFlight: false),
+                     "A denial waits for the user to grant access in System Settings")
+        precondition(AudioPermissionPolicy.restorableSelection(
+            pending: pending, selectedID: pending.id, authorization: .denied, deviceAvailable: true
+        ) == nil)
+        precondition(AudioPermissionPolicy.restorableSelection(
+            pending: pending, selectedID: pending.id, authorization: .authorized, deviceAvailable: true
+        ) == pending, "Grant recovery preserves both selected ID and persist intent")
+        precondition(AudioPermissionPolicy.restorableSelection(
+            pending: pending, selectedID: "another-device", authorization: .authorized, deviceAvailable: true
+        ) == nil, "A stale permission callback cannot replace the current selection")
+        precondition(AudioPermissionPolicy.restorableSelection(
+            pending: pending, selectedID: pending.id, authorization: .authorized, deviceAvailable: false
+        ) == nil, "A disconnected pending device waits until it reappears")
+
+        precondition(!CaptureSessionPolicy.audioInputNeedsConfiguration(actualID: "mic", requestedID: "mic"),
+                     "Repeated selection does not reopen audio configuration")
+        precondition(CaptureSessionPolicy.audioInputNeedsConfiguration(actualID: "mic", requestedID: nil))
+        precondition(!CaptureSessionPolicy.audioInputNeedsConfiguration(actualID: nil, requestedID: nil))
+        precondition(!CaptureSessionPolicy.canRecordWindowCapture(isRunning: false, width: 640, height: 360),
+                     "A starting window stream is not recordable")
+        precondition(!CaptureSessionPolicy.canRecordWindowCapture(isRunning: true, width: 0, height: 360),
+                     "A running stream without configured dimensions is not recordable")
+        precondition(CaptureSessionPolicy.canRecordWindowCapture(isRunning: true, width: 640, height: 360),
+                     "A running window stream with valid dimensions is recordable")
+        print("PASS audio permission recovery, idempotent input configuration, shared session, and window recording gates")
+    }
+
+    private static func testQualityPresetInterpolationState() {
+        var disabled = PictureSettings()
+        disabled.setInterpolationEnabled(false)
+        disabled.forceFrameInterpolation = true
+        disabled.applyInterpolationPreset(.quality)
+        precondition(disabled.frameInterpolation == .off, "Applying a preset must preserve interpolation-off")
+        precondition(disabled.preferredInterpolationQuality == .quality,
+                     "An off setting still remembers the preset quality")
+        precondition(!disabled.forceFrameInterpolation, "A preset clears the force override")
+        disabled.setInterpolationEnabled(true)
+        precondition(disabled.frameInterpolation == .quality,
+                     "Turning interpolation back on restores the quality chosen by the preset")
+        precondition(disabled.forceFrameInterpolation, "Enabling interpolation defaults to force-on")
+
+        var enabled = PictureSettings()
+        enabled.frameInterpolation = .efficient
+        enabled.preferredInterpolationQuality = .efficient
+        enabled.forceFrameInterpolation = true
+        enabled.applyInterpolationPreset(.flowBlend)
+        precondition(enabled.frameInterpolation == .flowBlend,
+                     "An enabled setting switches to the preset's interpolation engine")
+        precondition(enabled.preferredInterpolationQuality == .flowBlend && enabled.forceFrameInterpolation,
+                     "An enabled preset preserves the force choice")
+        enabled.forceFrameInterpolation = false
+        enabled.applyInterpolationPreset(.quality)
+        precondition(!enabled.forceFrameInterpolation, "Presets also preserve an explicit force-off choice")
+
+        let smooth = CaptureManager.qualityPresets.first { $0.name == "流畅优先" }!
+        let quality = CaptureManager.qualityPresets.first { $0.name == "画质优先" }!
+        let native = CaptureManager.qualityPresets.first { $0.name == "原生增强" }!
+        smooth.apply(to: &enabled, supported: [.flowBlend, .quality])
+        precondition(enabled.enhancementStrength == 0.55 && enabled.frameInterpolation == .flowBlend)
+        precondition(enabled.forceFrameInterpolation && enabled.skipsExactDuplicateInterpolation, "smooth explicitly enables force and content follow")
+        quality.apply(to: &enabled, supported: [.flowBlend, .quality])
+        precondition(enabled.enhancementStrength == 0.80 && enabled.upscaleTarget == .screen)
+        let priorEngine = enabled.frameInterpolation
+        enabled.skipsExactDuplicateInterpolation = false
+        native.apply(to: &enabled, supported: [.flowBlend, .quality])
+        precondition(enabled.frameInterpolation == .off && !enabled.forceFrameInterpolation, "native generates no frames")
+        precondition(enabled.preferredInterpolationQuality == priorEngine, "native retains the selected engine for later enable")
+        precondition(enabled.enhancementEnabled && enabled.enhancementStrength == 1 && enabled.upscaleTarget == .screen && !enabled.lowLatency, "native uses full display-sized enhancement")
+        precondition(!enabled.skipsExactDuplicateInterpolation, "native preserves the chosen content basis")
+        quality.apply(to: &enabled, supported: [.flowBlend])
+        precondition(enabled.frameInterpolation == .flowBlend && enabled.preferredInterpolationQuality == .flowBlend && enabled.forceFrameInterpolation && enabled.skipsExactDuplicateInterpolation, "return from native enables interpolation with available fallback")
+        enabled.setInterpolationEnabled(true)
+        precondition(enabled.frameInterpolation == .flowBlend && enabled.forceFrameInterpolation, "explicit enable defaults force-on after native")
+        for capabilities: [FrameInterpolationMode] in [[.flowBlend, .quality], [.flowBlend], []] {
+            for oldMode in FrameInterpolationMode.allCases {
+                for preset in CaptureManager.qualityPresets {
+                    var settings = PictureSettings()
+                    settings.enhancementEnabled = false
+                    settings.frameInterpolation = oldMode
+                    settings.forceFrameInterpolation = false
+                    settings.skipsExactDuplicateInterpolation = false
+                    preset.apply(to: &settings, supported: capabilities)
+                    let expected = preset.nativeFrameRate ? FrameInterpolationMode.off :
+                        FrameInterpolationMode.availableQuality(preset.interpolation, supported: capabilities)
+                    precondition(settings.enhancementEnabled && settings.frameInterpolation == expected)
+                    precondition(settings.forceFrameInterpolation == (expected != .off))
+                    precondition(preset.nativeFrameRate || settings.skipsExactDuplicateInterpolation)
+                    precondition(settings.upscaleTarget == preset.upscaleTarget && settings.enhancementStrength == preset.enhancementStrength)
+                }
+            }
+        }
+        print("PASS complete quality presets enable interpolation, content follow and force; native/no-engine disable safely")
+    }
+
     static func main() {
+        if CommandLine.arguments.contains("--pure-only") {
+            testCaptureLifecyclePolicies()
+            testQualityPresetInterpolationState()
+            return
+        }
         for mode in FrameInterpolationMode.allCases where mode != .off {
             var settings = PictureSettings()
             settings.frameInterpolation = mode
@@ -254,12 +419,13 @@ struct CaptureCompatibilityTests {
             var settings = PictureSettings()
             settings.preferredInterpolationQuality = saved
             settings.setInterpolationEnabled(true)
-            precondition(settings.frameInterpolation == .balanced, "Invalid saved quality must recover")
+            precondition(settings.frameInterpolation == .flowBlend, "Invalid saved quality must recover")
         }
         testPresentationIntervalsAndDuplicateSkips()
         testOldPictureSettingsJSON()
         testInterpolationHistory()
         testStableSourceFrameRatesAndResets()
+        testQualityPresetInterpolationState()
 
         let presentationFrames = LatestVideoFrame()
         presentationFrames.put(pixelBuffer())
@@ -303,6 +469,8 @@ struct CaptureCompatibilityTests {
         precondition(UpscaleTarget.screen.resolvedLongEdge(screenLongEdge: 5120, sourceLongEdge: 1920) == 5120)
         precondition(UpscaleTarget.screen.resolvedLongEdge(screenLongEdge: nil, sourceLongEdge: 1920) == 1920)
         precondition(UpscaleTarget.native.resolvedLongEdge(screenLongEdge: 5120, sourceLongEdge: 2160) == 2160)
+
+        testCaptureLifecyclePolicies()
         print("Capture compatibility tests passed: legacy settings, frame history/PTS, cadence resets, formats, rates, and display targets.")
     }
 }

@@ -4,7 +4,8 @@ import SwiftUI
 @main
 struct MoniViewApp: App {
     @NSApplicationDelegateAdaptor(MoniViewAppDelegate.self) private var appDelegate
-    @StateObject private var captureManager = CaptureManager()
+    @StateObject private var captureManager = CaptureManager(supportedInterpolationQualities:
+        FrameInterpolationMode.allCases.filter { $0 != .off && FrameInterpolatorSupport.isSupported($0) })
     @AppStorage("view.alwaysOnTop") private var alwaysOnTop = false
 
     var body: some Scene {
@@ -13,7 +14,9 @@ struct MoniViewApp: App {
                 .environmentObject(captureManager)
                 .preferredColorScheme(.dark)
                 .frame(minWidth: 880, minHeight: 590)
-                .onAppear { appDelegate.capture = captureManager }
+                .onAppear {
+                    appDelegate.capture = captureManager
+                }
                 .background {
                     WindowLevelObserver(alwaysOnTop: alwaysOnTop)
                         .frame(width: 0, height: 0)

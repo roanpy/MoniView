@@ -26,6 +26,7 @@ final class RecorderFaultInjectionHooks {
         let finishing: Bool
         let finishWritingStarted: Bool
         let sessionID: Int
+        let stagingDirectories: [URL]
     }
 
     private let lock = NSLock()
@@ -42,6 +43,7 @@ final class RecorderFaultInjectionHooks {
     private var finishing = false
     private var finishWritingStarted = false
     private var sessionID = 0
+    private var stagingDirectories: [URL] = []
 
     func setAudioInputForcedNotReady(_ value: Bool) {
         lock.lock(); forceAudioNotReady = value; lock.unlock()
@@ -72,6 +74,7 @@ final class RecorderFaultInjectionHooks {
     func markFinishing() { lock.lock(); finishing = true; lock.unlock() }
     func markFinishWritingStarted() { lock.lock(); finishWritingStarted = true; lock.unlock() }
     func markCompleted() { lock.lock(); finishing = false; lock.unlock() }
+    func recordStagingDirectory(_ url: URL) { lock.lock(); stagingDirectories.append(url); lock.unlock() }
 
     func recordReceived(_ pts: CMTime) { lock.lock(); received.append(pts); lock.unlock() }
     func setPending(_ pts: [CMTime]) { lock.lock(); pending = pts; lock.unlock() }
@@ -87,7 +90,8 @@ final class RecorderFaultInjectionHooks {
                         droppedAudioPTS: dropped, ignoredAudioPTS: ignored,
                         failedAudioPTS: failed, notReadyObservations: notReadyObservations,
                         writerStarted: writerStarted, finishing: finishing,
-                        finishWritingStarted: finishWritingStarted, sessionID: sessionID)
+                        finishWritingStarted: finishWritingStarted, sessionID: sessionID,
+                        stagingDirectories: stagingDirectories)
     }
 
     func consumeCommitFailure() -> Bool {
@@ -146,6 +150,8 @@ final class CaptureRecorder {
     // the writer finishes successfully, so an existing file is never truncated on failure.
     private var workingURL: URL?
     private var destinationURL: URL?
+    private var replacementDirectoryURL: URL?
+    private var hasDestinationAccess = false
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private let colorSpace = CGColorSpace(name: CGColorSpace.itur_709)!
     private let context: CIContext = {
@@ -167,12 +173,24 @@ final class CaptureRecorder {
             self.lastAudioTime = nil
             self.audioDrainDeadline = nil
             self.finishWritingStarted = false
-            // Write beside the destination so the final move stays on one volume, and never
-            // touch an existing file until the new recording has finished successfully.
             let destination = url
-            let working = destination.deletingLastPathComponent()
-                .appendingPathComponent(".moniview-\(UUID().uuidString).mov")
+            let accessed = destination.startAccessingSecurityScopedResource()
+            var replacementDirectory: URL?
             do {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: destination.deletingLastPathComponent().path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                    throw CaptureFailure.message("录制目标文件夹不存在。")
+                }
+                // A save-panel grant covers the selected file, not an arbitrary sibling.
+                // Ask Foundation for staging space on the destination's volume so the
+                // completed recording can replace it safely under App Sandbox as well.
+                let directory = try FileManager.default.url(for: .itemReplacementDirectory,
+                    in: .userDomainMask, appropriateFor: destination, create: true)
+                replacementDirectory = directory
+                #if MONIVIEW_RECORDER_TESTING
+                self.testing.recordStagingDirectory(directory)
+                #endif
+                let working = directory.appendingPathComponent("recording.mov")
                 let writer = try AVAssetWriter(outputURL: working, fileType: .mov)
                 // Fragmented MOV keeps finished segments playable if the process dies mid-recording.
                 writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 1)
@@ -222,6 +240,8 @@ final class CaptureRecorder {
                 self.mode = appliesPictureProcessing ? .processed(pictureSnapshot!) : .source
                 self.workingURL = working
                 self.destinationURL = destination
+                self.replacementDirectoryURL = directory
+                self.hasDestinationAccess = accessed
                 self.writer = writer; self.videoInput = video; self.audioInput = audioInput
                 self.startTime = nil; self.videoCount = 0; self.completion = completion
                 self.writerGeneration = self.beginAccepting()
@@ -231,7 +251,8 @@ final class CaptureRecorder {
             } catch {
                 self.clearAcceptingAfterStartFailure()
                 self.clearAudioBacklog()
-                try? FileManager.default.removeItem(at: working)
+                if let replacementDirectory { try? FileManager.default.removeItem(at: replacementDirectory) }
+                if accessed { destination.stopAccessingSecurityScopedResource() }
                 completion(error)
             }
         }
@@ -595,14 +616,22 @@ final class CaptureRecorder {
         finishing = false
         let working = workingURL
         let destination = destinationURL
+        let replacementDirectory = replacementDirectoryURL
+        let accessed = hasDestinationAccess
         workingURL = nil; destinationURL = nil
+        replacementDirectoryURL = nil; hasDestinationAccess = false
+        let releaseDestination = {
+            if let replacementDirectory { try? FileManager.default.removeItem(at: replacementDirectory) }
+            if accessed { destination?.stopAccessingSecurityScopedResource() }
+        }
 #if MONIVIEW_RECORDER_TESTING
         testing.markCompleted()
 #endif
-        guard let working, let destination else { callback?(error); return }
+        guard let working, let destination else { releaseDestination(); callback?(error); return }
         guard error == nil else {
             // Remove the partial file and leave any existing destination untouched.
             try? FileManager.default.removeItem(at: working)
+            releaseDestination()
             callback?(error)
             return
         }
@@ -621,6 +650,7 @@ final class CaptureRecorder {
             // finished temporary recording instead of leaking it beside the destination.
             try? FileManager.default.removeItem(at: working)
         }
+        releaseDestination()
         callback?(commitError)
     }
 

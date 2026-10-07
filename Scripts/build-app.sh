@@ -39,6 +39,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/MoniView"
 cp "$PROJECT_ROOT/Resources/MoniView.icns" "$APP_BUNDLE/Contents/Resources/MoniView.icns"
 cp "$PROJECT_ROOT/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/PrivacyInfo.xcprivacy"
+cp "$PROJECT_ROOT/LICENSE" "$APP_BUNDLE/Contents/Resources/LICENSE"
 cp -R "$PROJECT_ROOT/Resources/en.lproj" "$PROJECT_ROOT/Resources/zh-Hans.lproj" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
@@ -71,7 +72,7 @@ if [[ "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
     exit 1
   }
 fi
-for resource in MoniView.icns PrivacyInfo.xcprivacy en.lproj/Localizable.strings zh-Hans.lproj/Localizable.strings; do
+for resource in MoniView.icns PrivacyInfo.xcprivacy LICENSE en.lproj/Localizable.strings zh-Hans.lproj/Localizable.strings; do
   [[ -e "$APP_BUNDLE/Contents/Resources/$resource" ]] || { echo "error: missing $resource" >&2; exit 1; }
 done
 

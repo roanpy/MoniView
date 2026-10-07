@@ -177,7 +177,7 @@ struct MainView: View {
         .overlay {
             if capture.isRunning && capture.showsStatusBar && !showInformation {
                 sourceSummary
-                    .frame(maxWidth: 640)
+                    .frame(maxWidth: 900)
                     .allowsHitTesting(false)
             }
         }
@@ -190,7 +190,7 @@ struct MainView: View {
             Text("·")
             Text(actualBufferResolution).fixedSize()
             Text("·")
-            Text("\(capture.measuredFPS) FPS").fixedSize()
+            Text(L10n.format("采集 %d FPS", capture.measuredFPS)).fixedSize()
             if capture.picture.enhancementEnabled && capture.showsEngineStatus {
                 Text("·")
                 Text(enhancementSummary)
@@ -199,7 +199,8 @@ struct MainView: View {
             }
             if capture.showsEngineStatus && capture.picture.frameInterpolation != .off {
                 Text("·")
-                Text(L10n.format("输出 %d FPS", capture.outputFPS))
+                Text(interpolationSummary)
+                    .help(L10n.text("显示最近有效插帧配对；实际呈现见输出帧率。"))
                     .fixedSize()
                     .foregroundStyle(Color(hex: 0xec8718))
             }
@@ -209,6 +210,16 @@ struct MainView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color.black.opacity(isFullscreen ? 0.56 : 0.22), in: Capsule())
+    }
+
+    private var interpolationSummary: String {
+        if let activity = capture.interpolationActivity {
+            let basis = activity.basisFPS
+            return L10n.format("插帧 %d→%d · 输出 %d FPS（生成 %d）",
+                               Int(basis.rounded()), Int((basis * activity.multiplier).rounded()),
+                               capture.outputFPS, capture.generatedFPS)
+        }
+        return L10n.format("插帧待运行 · 输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS)
     }
 
     private var enhancementSummary: String {
@@ -444,11 +455,10 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
             if let contentFPS = capture.detectedContentFPS {
-                Text(L10n.format("实际内容约 %d FPS · %@ 目标 %d",
-                                 Int(contentFPS.rounded()), capture.activeMultiplierLabel, Int(capture.interpolationTargetFPS.rounded())))
+                Text(L10n.format("实际约 %d 帧", Int(contentFPS.rounded())))
             }
             if capture.picture.frameInterpolation != .off {
-                Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
+                Text(interpolationSummary + " · " + L10n.text(capture.interpolationStatus))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
@@ -522,6 +532,32 @@ struct MainView: View {
         }
     }
 
+    /// Preset caption for the resolved configuration. A capability fallback (Flow in
+    /// place of the quality tier, or no engine at all) must not be described as the
+    /// combination the preset would have applied.
+    private var qualityPresetSummary: String {
+        guard let name = capture.selectedQualityPreset else { return "已自定义：下列选项可继续调整。" }
+        let engine = capture.picture.frameInterpolation
+        switch name {
+        case "原生增强":
+            return "原生帧率 · 匹配屏幕 · 增强 1.00；开启插帧可继续微调。"
+        case "流畅优先":
+            switch engine {
+            case .flowBlend: return "原始尺寸 · 光流插帧 · 跟随内容 · 增强 0.55"
+            case .quality: return "原始尺寸 · 高档插帧 · 跟随内容 · 增强 0.55"
+            case .off: return "原始尺寸 · 插帧不可用，已关闭 · 增强 0.55"
+            default: return "原始尺寸 · 可用插帧 · 跟随内容 · 增强 0.55"
+            }
+        default:
+            switch engine {
+            case .quality: return "匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.80"
+            case .flowBlend: return "匹配屏幕 · 光流插帧（回退）· 跟随内容 · 增强 0.80"
+            case .off: return "匹配屏幕 · 插帧不可用，已关闭 · 增强 0.80"
+            default: return "匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.80"
+            }
+        }
+    }
+
     private var clarityPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             panelHeading("画质增强", subtitle: "实时预览处理", icon: "sparkles.tv")
@@ -533,23 +569,27 @@ struct MainView: View {
             }
             .padding(4)
             .background(Color.black.opacity(0.2), in: Capsule())
-            Text(L10n.text(capture.selectedQualityPreset == nil
-                ? "已自定义：下列选项可继续调整。"
-                : "选预设即可，下面可继续微调。"))
+            Text(L10n.text(qualityPresetSummary))
                 .font(.system(size: 10))
                 .foregroundStyle(Color(hex: 0x98908a))
             VStack(alignment: .leading, spacing: 9) {
                 settingsToggle("启用画质增强", isOn: $capture.picture.enhancementEnabled)
-                settingsToggle("插帧加倍", isOn: Binding(
+                settingsToggle("平滑插帧", isOn: Binding(
                     get: { capture.picture.frameInterpolation != .off },
-                    set: { capture.picture.setInterpolationEnabled($0) }))
-                    .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported(capture.picture.preferredInterpolationQuality ?? .balanced))
-                    .help(L10n.text("在两张原帧之间生成一张中间帧，目标 2×。需要屏幕刷新率至少是内容帧率的两倍。"))
+                    set: { enabled in
+                        if enabled, !FrameInterpolatorSupport.isSupported(capture.picture.preferredInterpolationQuality ?? .balanced),
+                           let fallback = availableInterpolationQualities.first {
+                            capture.picture.preferredInterpolationQuality = fallback
+                        }
+                        capture.picture.setInterpolationEnabled(enabled)
+                    }))
+                    .disabled(capture.picture.frameInterpolation == .off && (!capture.picture.enhancementEnabled || availableInterpolationQualities.isEmpty))
+                    .help(L10n.text("按内容节奏生成中间帧，自动选择 2× 或支持的 3×；实际输出受屏幕刷新率与处理耗时限制。"))
                 qualityAdvancedSettings
                 if capture.picture.frameInterpolation != .off {
                     interpolationReadout
                 }
-                if capture.picture.frameInterpolation != .off || !FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation) {
+                if capture.picture.frameInterpolation != .off || availableInterpolationQualities.isEmpty {
                     Text(L10n.text(FrameInterpolatorSupport.isSupported(capture.picture.frameInterpolation) ? capture.interpolationStatus : "插帧不可用"))
                         .font(.system(size: 10)).foregroundStyle(Color(hex: 0x98908a))
                         .fixedSize(horizontal: false, vertical: true)
@@ -595,10 +635,10 @@ struct MainView: View {
             labeledPicker("插帧质量", selection: Binding(
                 get: { capture.picture.frameInterpolation },
                 set: { capture.picture.frameInterpolation = $0; capture.picture.preferredInterpolationQuality = $0 }),
-                choices: FrameInterpolationMode.allCases.filter { $0 != .off }.map { PickerChoice(value: $0, title: L10n.text($0.title)) })
+                choices: interpolationQualityChoices)
                 .disabled(!capture.picture.enhancementEnabled || capture.picture.frameInterpolation == .off)
                 .help(L10n.text(capture.picture.frameInterpolation == .off
-                    ? "插帧已关闭；打开「插帧加倍」后可选择质量档位。"
+                    ? "插帧已关闭；打开「平滑插帧」后可选择质量档位。"
                     : "低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。"))
             if capture.picture.frameInterpolation == .off {
                 Text(L10n.text("插帧关闭：以下质量与高级选项不生效。"))
@@ -612,10 +652,25 @@ struct MainView: View {
             settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
                 .disabled(capture.picture.frameInterpolation == .off)
                 .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
-            settingsToggle("跳过重复插帧", isOn: $capture.picture.skipsExactDuplicateInterpolation)
+            settingsToggle("跟随内容帧率", isOn: $capture.picture.skipsExactDuplicateInterpolation)
                 .disabled(capture.picture.frameInterpolation == .off)
-                .help(L10n.text("仅跳过完全相同画面的中间帧生成，不改变采集帧率，也不代表主机游戏帧率。"))
+                .help(L10n.text("开启按不同内容画面的时间插帧，关闭按采集节奏插帧；不改变采集档位。"))
         }
+    }
+
+    private var availableInterpolationQualities: [FrameInterpolationMode] {
+        FrameInterpolationMode.allCases.filter { $0 != .off && FrameInterpolatorSupport.isSupported($0) }
+    }
+
+    private var interpolationQualityChoices: [PickerChoice<FrameInterpolationMode>] {
+        let current = capture.picture.frameInterpolation
+        var choices = availableInterpolationQualities.map { PickerChoice(value: $0, title: L10n.text($0.title)) }
+        if current == .off {
+            choices.insert(PickerChoice(value: .off, title: L10n.text("插帧关闭")), at: 0)
+        } else if !availableInterpolationQualities.contains(current) {
+            choices.insert(PickerChoice(value: current, title: L10n.text(current.title) + " · " + L10n.text("插帧不可用")), at: 0)
+        }
+        return choices
     }
 
     /// Live interpolation readout, shown only while interpolation is on.
@@ -623,9 +678,12 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 6) {
             Divider().overlay(Color.white.opacity(0.06))
             HStack {
-                if let contentFPS = capture.detectedContentFPS {
-                    Text(L10n.format("实际内容约 %d FPS · %@ 目标 %d",
-                                     Int(contentFPS.rounded()), capture.activeMultiplierLabel, Int(capture.interpolationTargetFPS.rounded())))
+                if let activity = capture.interpolationActivity {
+                    let basisFPS = activity.basisFPS
+                    let multiplierLabel = String(format: "%.0f×", activity.multiplier)
+                    Text(L10n.format(capture.picture.skipsExactDuplicateInterpolation
+                                     ? "内容配对 %d FPS · %@ 目标 %d" : "采集 %d FPS · %@ 目标 %d",
+                                     Int(basisFPS.rounded()), multiplierLabel, Int((basisFPS * activity.multiplier).rounded())))
                 } else {
                     // The capture signal rate is not the content rate: a 30 FPS game in a
                     // 60 Hz signal can only reach 60, so an undetected cadence must not
@@ -703,7 +761,7 @@ struct MainView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("刷新来源")
+        .help(L10n.text("刷新来源"))
     }
 
     private var settingsPanel: some View {
@@ -753,53 +811,48 @@ struct MainView: View {
                     choices: capture.formatOptions.map { PickerChoice(value: Optional($0.id), title: $0.title) })
                     .disabled(capture.isRecording || capture.formatOptions.isEmpty)
 
-                HStack {
-                    Text("帧率")
+                HStack(spacing: 8) {
+                    Text(L10n.text("帧率"))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color(hex: 0xc8bfb7))
-                    Spacer()
-                    HStack(spacing: 2) {
-                        fpsButton(0, title: "自动")
-                        ForEach(quickFrameRates, id: \.self) { fps in
-                            fpsButton(fps, title: String(fps))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 5) {
+                        HStack(spacing: 1) {
+                            fpsButton(0, title: "自动")
+                            ForEach(quickFrameRates, id: \.self) { fps in
+                                fpsButton(fps, title: CaptureFrameRatePolicy.shortcutTitle(fps))
+                            }
                         }
+                        .padding(3)
+                        .background(Color.black.opacity(0.28), in: Capsule())
+                        Text(capture.detectedContentFPS.map {
+                            L10n.format("实际约 %d 帧", Int($0.rounded()))
+                        } ?? L10n.text("实际待测"))
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color(hex: 0x98908a))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .padding(3)
-                    .background(Color.black.opacity(0.28), in: Capsule())
-                    .frame(width: 195, alignment: .trailing)
-                }
-                if let contentFPS = capture.detectedContentFPS {
-                    Text(L10n.format("实测内容约 %d FPS", Int(contentFPS.rounded())))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x98908a))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                } else if capture.followsRealContentRate {
-                    Text(L10n.text("跟随已开启，暂未检测到可跟随节奏"))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0x98908a))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    .frame(width: 195, alignment: .leading)
                 }
 
                 // The shortcut row above is the everyday control; this picker carries every
                 // advertised value, including fractional rates and high-rate modes, so nothing
-                // becomes unreachable. Follow is the mode switch beside it.
+                // becomes unreachable. Interpolation's content-follow switch lives in
+                // the enhancement panel, so this row only changes hardware sampling.
                 HStack(alignment: .center, spacing: 8) {
-                    labeledPicker("完整帧率", fieldWidth: 150,
-                        selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
-                        choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
+                    Text(L10n.text("完整帧率"))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color(hex: 0xc8bfb7))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    AlignedPicker(title: "完整帧率",
+                        choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) },
+                        selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }))
+                        .frame(width: 195, height: 27)
                         .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                    if capture.frameRateOptions.contains(where: { $0 > 0 }) {
-                        Toggle(isOn: $capture.followsRealContentRate) {
-                            Text(L10n.text("跟随"))
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color(hex: 0xc8bfb7))
-                        }
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .fixedSize()
-                        .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                        .help(L10n.text("采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
-                    }
+                        .help(L10n.text("采集档位决定采样上限。识别变化的内容帧率，建议保留 60 帧采集；插帧的跟随开关不会改变采集档位。"))
                 }
                 labeledPicker("画面比例", fieldWidth: 195, selection: $capture.aspectMode,
                     choices: AspectMode.allCases.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })
@@ -930,7 +983,7 @@ struct MainView: View {
             Text(L10n.text(title))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color(hex: 0xc8bfb7))
-                .frame(width: Locale.preferredLanguages.first?.hasPrefix("zh") == true ? 58 : 96, alignment: .leading)
+                .frame(width: Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true ? 58 : 96, alignment: .leading)
             Text(String(format: format, value.wrappedValue))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Color(hex: 0xaaa199))
@@ -978,6 +1031,8 @@ struct MainView: View {
             Text(L10n.text(title))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(selected ? Color(hex: 0x2d1b0b) : Color(hex: 0xf2e9df))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
                 .background(selected ? Color(hex: 0xf2a340) : Color.white.opacity(0.055), in: Capsule())
@@ -997,6 +1052,8 @@ struct MainView: View {
             Text(L10n.text(title))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(selected ? Color(hex: 0x2d1b0b) : Color(hex: 0xf2e9df))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
                 .background(selected ? Color(hex: 0xf2a340) : Color.white.opacity(0.055), in: Capsule())
@@ -1006,33 +1063,34 @@ struct MainView: View {
         .accessibilityValue(L10n.text(selected ? "已选中" : "未选中"))
     }
 
-    private var quickFrameRates: [Int] {
-        // Follow takes one of the existing shortcut slots. All advertised rates remain
-        // in the dropdown; high-rate hardware gets its 90/120 shortcuts too.
-        let supported = [30, 45, 50, 60, 90, 120].filter { fps in
-            capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
-        }
-        var choices = Array(supported.suffix(3))
-        if let selected = supported.first(where: { abs(Double($0) - capture.selectedFrameRate) < 0.01 }), !choices.contains(selected) {
-            choices[0] = selected; choices.sort()
-        }
-        return choices
+    private var quickFrameRates: [Double] {
+        let rates = CaptureFrameRatePolicy.shortcuts(supportedRates: capture.frameRateOptions,
+                                                     selectedRate: capture.selectedFrameRate, limit: 4)
+        // Fractional labels need more space; keep three shortcuts alongside the content
+        // reading rather than rounding away their precision or hiding the current choice.
+        return rates.contains(where: { CaptureFrameRatePolicy.shortcutTitle($0).count > 3 })
+            ? CaptureFrameRatePolicy.shortcuts(supportedRates: capture.frameRateOptions,
+                                                selectedRate: capture.selectedFrameRate, limit: 3)
+            : rates
     }
 
-    private func fpsButton(_ fps: Int, title: String) -> some View {
-        let selected = abs(capture.selectedFrameRate - Double(fps)) < 0.01
+    private func fpsButton(_ fps: Double, title: String) -> some View {
+        let selected = abs(capture.selectedFrameRate - fps) < 0.001
         // Same-resolution pixel formats can advertise different frame rates;
         // configureFormat selects the compatible variant when needed.
-        let isSupported = capture.frameRateOptions.contains { abs($0 - Double(fps)) < 0.01 }
+        let isSupported = capture.frameRateOptions.contains { abs($0 - fps) < 0.001 }
 
         return Button {
-            capture.selectFrameRate(fps)
+            capture.selectFrameRateValue(fps)
         } label: {
             Text(L10n.text(title))
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(isSupported ? Color(hex: 0xf1e9e1) : Color(hex: 0x6d6660))
-                .frame(minWidth: 32)
-                .padding(.vertical, 6)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(minWidth: fps == 0 ? 32 : (quickFrameRates.count == 4 ? 25 : 28))
+                .padding(.horizontal, title.count > 3 ? 2 : 0)
+                .padding(.vertical, 7)
                 .background(selected ? Color(hex: 0x635850) : .clear, in: Capsule())
         }
         .buttonStyle(.plain)

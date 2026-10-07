@@ -184,7 +184,11 @@ struct FrameInterpolationPolicyTests {
         check(P.multiplierFittingPair(3, pairPeriod: 0.0147, displayFPS: 120) == 1,
               "A 1-tick pair at 68 Hz content has no room even on a 120 Hz panel")
         check(P.multiplierFittingPair(3, pairPeriod: 0.0334, displayFPS: 120) == 3,
-              "A 29.94 ms pair holds all three presentations on a 120 Hz panel")
+              "A 33.4 ms pair holds all three presentations on a 120 Hz panel")
+        check(P.multiplier(contentFPS: 1 / 0.05, targetFPS: 60, displayFPS: 120) == 3,
+              "A 50 ms unique-pair PTS interval requests 3x for a 60 FPS target")
+        check(P.multiplier(contentFPS: 1 / (1.0 / 60.0), targetFPS: 60, displayFPS: 120) == 2,
+              "A 60 Hz signal cadence keeps the 2x request")
         for invalid in [1.0, 0.0, -3, Double.nan] {
             check(P.multiplierFittingPair(invalid, pairPeriod: 1.0 / 20, displayFPS: 120) == 1, "Invalid multiplier yields no step")
         }
@@ -195,6 +199,73 @@ struct FrameInterpolationPolicyTests {
         check(P.costsFit(midpoints: [0.005, 0.005], source: 0.006, slot: 0.02), "Two midpoints fit a long slot")
         check(!P.costsFit(midpoints: [0.04, 0.04], source: 0.006, slot: 0.02), "Midpoints past the individual cap are rejected")
         check(!P.costsFit(midpoints: [], source: 0.001, slot: 0.02), "An empty midpoint list is rejected")
+        let flow3Phases = [1.0 / 3.0, 2.0 / 3.0]
+        check(P.pairCost(generationBatch: 0.0038, subsequentPresentation: 0.0002,
+                         sourceEndpoint: 0.0001, generatedPhaseCount: 2).map { abs($0 - 0.0041) < 1e-12 } ?? false,
+              "3x counts the combined generation batch once, then the cached phase and endpoint")
+        check(P.costsFit(generationBatch: 0.0038, subsequentPresentation: 0.0002,
+                         sourceEndpoint: 0.0001, phases: flow3Phases, pairPeriod: 0.05),
+              "3x measured command costs fit their actual slots and the pair budget")
+        check(!P.allowsMeasuredPair(generationBatch: 0.0038, subsequentPresentation: nil,
+                                    sourceEndpoint: 0.0001, phases: flow3Phases, pairPeriod: 0.05,
+                                    force: false, deadlineFits: true),
+              "Automatic 3x waits for a measured cached-phase presentation cost")
+        check(P.pairCost(generationBatch: 0.004, subsequentPresentation: nil,
+                         sourceEndpoint: 0.001, generatedPhaseCount: 1).map { abs($0 - 0.005) < 1e-12 } ?? false,
+              "2x keeps one generated command plus its source endpoint")
+        check(P.costsFit(generationBatch: 0.004, subsequentPresentation: nil,
+                         sourceEndpoint: 0.001, phases: [0.5], pairPeriod: 1.0 / 30.0),
+              "2x remains admitted without requiring a cached-phase sample")
+        check(P.allowsMeasuredPair(generationBatch: 0.004, subsequentPresentation: nil,
+                                   sourceEndpoint: 0.001, phases: [0.5], pairPeriod: 1.0 / 30.0,
+                                   force: false, deadlineFits: true),
+              "The batch-aware 2x admission path stays enabled")
+        check(P.allowsMeasuredPair(generationBatch: 0.03, subsequentPresentation: 0.03,
+                                   sourceEndpoint: 0.02, phases: flow3Phases, pairPeriod: 0.05,
+                                   force: true, deadlineFits: true),
+              "Force bypasses measured cost limits")
+        check(!P.allowsMeasuredPair(generationBatch: 0.001, subsequentPresentation: 0.001,
+                                    sourceEndpoint: 0.001, phases: flow3Phases, pairPeriod: 0.05,
+                                    force: true, deadlineFits: false),
+              "Force cannot bypass a missed presentation deadline")
+        check(P.costsFit(generationBatch: 0.003, subsequentPresentation: nil,
+                         sourceEndpoint: 0.001, phases: [1.0 / 3.0], pairPeriod: 0.05),
+              "A partial 3x result keeps its real 1/3 phase interval")
+        check(P.prefersAdjacentInputPair(inputFPS: 59.03, signalFPS: 60,
+                                         evidenceFreshForCurrentEpoch: true,
+                                         adjacentFramesAreDifferent: true),
+              "Fresh 60 Hz input evidence keeps raw adjacent pairing when rendering drops frames")
+        check(!P.prefersAdjacentInputPair(inputFPS: 30, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: true,
+                                          adjacentFramesAreDifferent: false),
+              "Repeated 30 Hz content stays on first-copy unique pairing")
+        check(!P.prefersAdjacentInputPair(inputFPS: 30, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: true,
+                                          adjacentFramesAreDifferent: true),
+              "A 30 Hz estimate cannot be mistaken for 60 Hz merely on a transition frame")
+        check(!P.prefersAdjacentInputPair(inputFPS: 20, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: true,
+                                          adjacentFramesAreDifferent: false),
+              "Repeated 20 Hz content does not use the capture-adjacent 60 Hz period")
+        check(!P.prefersAdjacentInputPair(inputFPS: nil, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: false,
+                                          adjacentFramesAreDifferent: true) &&
+              P.multiplier(contentFPS: 30, targetFPS: 60, displayFPS: 120) == 2,
+              "Unknown input cadence cannot promote to 120, while a valid unique pair still doubles")
+        check(!P.prefersAdjacentInputPair(inputFPS: 60, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: false,
+                                          adjacentFramesAreDifferent: true),
+              "Stale or epoch-mismatched cadence cannot select raw adjacent pairing")
+        check(!P.prefersAdjacentInputPair(inputFPS: 60, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: true,
+                                          adjacentFramesAreDifferent: false),
+              "Strictly identical adjacent frames never select raw adjacent interpolation")
+        check(!P.prefersAdjacentInputPair(inputFPS: 55, signalFPS: 60,
+                                          evidenceFreshForCurrentEpoch: true,
+                                          adjacentFramesAreDifferent: true),
+              "Cadence materially below signal rate stays on unique-content timing")
+        check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 120) == 3,
+              "A genuine 20 Hz unique pair still requests 3x for 60 Hz output")
         check(P.eligibility(runtimeSupported: true, inputFPS: 20, displayFPS: 60, inputValid: true, multiplier: 3), "20 FPS to 60 admitted at 3x")
         check(!P.eligibility(runtimeSupported: true, inputFPS: 20, displayFPS: 60, inputValid: true, multiplier: 4), "Out of range multiplier rejected")
         print("FrameInterpolationPolicy: \(checks) checks passed (admission/sizing/processing interval only; no renderer, GPU or presentation claim).")

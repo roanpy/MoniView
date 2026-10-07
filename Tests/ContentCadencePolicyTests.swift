@@ -10,6 +10,17 @@ struct ContentCadencePolicyTests {
     }
 
     static func main() {
+        check(ContentCadencePolicy.boundedObservedRate(61, signalFPS: 60) == 60,
+              "Window-edge overshoot cannot exceed the delivered sampling rate")
+        check(ContentCadencePolicy.boundedObservedRate(40, signalFPS: 60) == 40,
+              "Nonstandard content cadence is preserved")
+        check(ContentCadencePolicy.boundedObservedRate(30, signalFPS: 20) == 20,
+              "A low capture rate cannot establish faster content updates")
+        check(ContentCadencePolicy.boundedObservedRate(nil, signalFPS: 60) == nil &&
+              ContentCadencePolicy.boundedObservedRate(.nan, signalFPS: 60) == nil,
+              "Invalid or absent observations stay unknown")
+        check(ContentCadencePolicy.boundedObservedRate(29.97, signalFPS: nil) == 29.97,
+              "An absent stable signal rate does not invent a replacement")
         check(ContentCadencePolicy.nextStabilityStreak(previous: nil, current: 30, streak: 4) == 0,
               "First cadence sample starts a fresh streak")
         check(ContentCadencePolicy.nextStabilityStreak(previous: 29.97, current: 29.975, streak: 4) == 5,

@@ -38,8 +38,10 @@ enum VideoFrameDuplicateDetector {
         defer { CVPixelBufferUnlockBaseAddress(current, .readOnly) }
         let total = planeByteCount(previous)
         guard total > 0 else { return false }
-        let differing = differingByteCount(previous, current)
-        return Double(differing) <= Double(total) * allowedDifference
+        let limit = Double(total) * allowedDifference
+        guard !limit.isNaN, limit >= 0 else { return false }
+        let differing = differingByteCount(previous, current, limit: limit)
+        return Double(differing) <= limit
     }
 
     /// Total compared byte count across the planes an exact comparison would visit.
@@ -56,23 +58,27 @@ enum VideoFrameDuplicateDetector {
     }
 
     /// Bytes that differ, counted on the same rows the exact comparison inspects.
-    private static func differingByteCount(_ first: CVPixelBuffer, _ second: CVPixelBuffer) -> Int {
+    private static func differingByteCount(_ first: CVPixelBuffer, _ second: CVPixelBuffer, limit: Double) -> Int {
         var differing = 0
         if CVPixelBufferGetPlaneCount(first) == 0 {
             guard let a = CVPixelBufferGetBaseAddress(first), let b = CVPixelBufferGetBaseAddress(second) else { return .max }
             differing += countDifferences(a, CVPixelBufferGetBytesPerRow(first),
                                           b, CVPixelBufferGetBytesPerRow(second),
                                           rowBytes: CVPixelBufferGetWidth(first) * 4,
-                                          rowCount: CVPixelBufferGetHeight(first))
+                                          rowCount: CVPixelBufferGetHeight(first), limit: limit)
         } else {
             for plane in 0..<CVPixelBufferGetPlaneCount(first) {
                 guard let a = CVPixelBufferGetBaseAddressOfPlane(first, plane),
                       let b = CVPixelBufferGetBaseAddressOfPlane(second, plane) else { return .max }
                 let bytesPerSample = plane == 0 ? 1 : 2
-                differing += countDifferences(a, CVPixelBufferGetBytesPerRowOfPlane(first, plane),
+                let count = countDifferences(a, CVPixelBufferGetBytesPerRowOfPlane(first, plane),
                                               b, CVPixelBufferGetBytesPerRowOfPlane(second, plane),
                                               rowBytes: CVPixelBufferGetWidthOfPlane(first, plane) * bytesPerSample,
-                                              rowCount: CVPixelBufferGetHeightOfPlane(first, plane))
+                                              rowCount: CVPixelBufferGetHeightOfPlane(first, plane),
+                                              limit: limit - Double(differing))
+                guard count != .max else { return .max }
+                differing += count
+                if Double(differing) > limit { return differing }
             }
         }
         return differing
@@ -81,7 +87,7 @@ enum VideoFrameDuplicateDetector {
     private static func countDifferences(
         _ firstBase: UnsafeMutableRawPointer, _ firstStride: Int,
         _ secondBase: UnsafeMutableRawPointer, _ secondStride: Int,
-        rowBytes: Int, rowCount: Int
+        rowBytes: Int, rowCount: Int, limit: Double
     ) -> Int {
         guard rowBytes > 0, rowCount > 0, firstStride >= rowBytes, secondStride >= rowBytes else { return .max }
         let first = firstBase.assumingMemoryBound(to: UInt8.self)
@@ -93,7 +99,12 @@ enum VideoFrameDuplicateDetector {
             // Rows of a duplicate are usually byte-identical, so let memcmp settle them at
             // memory speed and only count bytes on the rare row that actually differs.
             if memcmp(a, b, rowBytes) == 0 { continue }
-            for index in 0..<rowBytes where a[index] != b[index] { differing += 1 }
+            for index in 0..<rowBytes where a[index] != b[index] {
+                differing += 1
+                // Once the tolerance is exceeded, later bytes cannot make this a repeat.
+                // Keep the full original comparison for accepted pairs and ignore row padding.
+                if Double(differing) > limit { return differing }
+            }
         }
         return differing
     }
