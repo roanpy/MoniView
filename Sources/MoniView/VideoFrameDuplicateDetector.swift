@@ -19,6 +19,14 @@ enum VideoFrameDuplicateDetector {
     /// never treats genuinely different pictures as repeats.
     static func areEquivalentForCadence(_ previous: CVPixelBuffer, _ current: CVPixelBuffer,
                                         allowedDifference: Double = 0.002) -> Bool {
+        // Same format allow-list as the exact path. The difference counter assumes two-plane
+        // 420 or packed BGRA, so an unexpected layout must be refused rather than measured:
+        // a three-plane format would have its chroma rows read past their true length.
+        let format = CVPixelBufferGetPixelFormatType(previous)
+        let isBiPlanar420 = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+            format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        let isBGRA = format == kCVPixelFormatType_32BGRA
+        guard isBiPlanar420 || isBGRA else { return false }
         guard ObjectIdentifier(previous as AnyObject) != ObjectIdentifier(current as AnyObject),
               CVPixelBufferGetWidth(previous) == CVPixelBufferGetWidth(current),
               CVPixelBufferGetHeight(previous) == CVPixelBufferGetHeight(current),

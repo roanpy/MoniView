@@ -834,11 +834,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         contentFPS: contentFPS, targetFPS: 60, displayFPS: displayFPS)
                     let multiplier = engineMultipliers.contains(requested) ? requested : (engineMultipliers.first ?? 2)
                     let phases = FrameInterpolationPolicy.midpointPhases(multiplier: multiplier)
-                    guard !phases.isEmpty else { return }
+                    guard !phases.isEmpty else {
+                        // The GPU semaphore is already held here, so leaving without releasing it
+                        // would stall the renderer permanently rather than skipping one pair.
+                        inFlight.signal()
+                        return
+                    }
                     activeMidpointCount = phases.count
                     let steps = Double(phases.count)
-                    // Publish the step the engine is about to run so the panel reports the
-                    // pipeline in use rather than its own recomputation of it.
+                    // The published step follows the phases actually produced; it is updated again
+                    // below when one of them fails to encode, so the panel never advertises 3x
+                    // for a pair that ran as 2x.
                     frames.setActiveMultiplier(steps + 1)
                     let slot = pair.period / (steps + 1)
                     activePairPeriod = pair.period
@@ -888,6 +894,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                                 let producedCount = producedImages.count
                                 activeMidpointCount = producedCount
                                 let producedSlot = pair.period / Double(producedCount + 1)
+                                frames.setActiveMultiplier(Double(producedCount + 1))
                                 generatedMidpoint = true; sourceImage = first
                                 presentationTime = target
                                 if producedImages.count > 1 {

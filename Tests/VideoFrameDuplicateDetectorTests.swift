@@ -140,6 +140,15 @@ struct VideoFrameDuplicateDetectorTests {
             check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, different),
                   "different content is not equivalent: \(format.name)")
 
+            // A format outside the allow-list is refused rather than measured: the byte
+            // counter assumes two-plane 420 or packed BGRA.
+            let planar = makeBuffer(width: 12, height: 8, format: kCVPixelFormatType_420YpCbCr8Planar)
+            fill(planar, seed: 91, padding: 0x11)
+            let planarCopy = makeBuffer(width: 12, height: 8, format: kCVPixelFormatType_420YpCbCr8Planar)
+            fill(planarCopy, seed: 91, padding: 0x11)
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(planar, planarCopy),
+                  "An unsupported planar format is refused by the tolerant path: \(format.name)")
+
             // Zero tolerance degenerates to exactness.
             check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, noisy, allowedDifference: 0),
                   "zero tolerance rejects any difference: \(format.name)")

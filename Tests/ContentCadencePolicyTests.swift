@@ -67,8 +67,12 @@ struct ContentCadencePolicyTests {
         check(ContentCadencePolicy.quantizedRate(30.0) == 30, "An exact standard rate is unchanged")
         check(ContentCadencePolicy.quantizedRate(29.97) == 29.97, "Fractional standard rate is preserved")
         check(ContentCadencePolicy.quantizedRate(30.4) == 30, "Slight overshoot resolves to 30")
-        check(ContentCadencePolicy.quantizedRate(37.5) == 30, "Midpoint drift resolves downward, since jitter only inflates the estimate")
+        check(ContentCadencePolicy.quantizedRate(37.5) == 40, "A value between two rates resolves to the nearer one")
         check(ContentCadencePolicy.quantizedRate(41.25) == 40, "Clear overshoot still resolves to 40")
+        check(ContentCadencePolicy.quantizedRate(59.0) == 60, "A near-60 reading is not pushed down to 50")
+        check(ContentCadencePolicy.quantizedRate(59.4) == 60, "Slight undershoot still reads as 60")
+        check(ContentCadencePolicy.quantizedRate(47.5) == 48, "47.5 resolves to 48")
+        check(ContentCadencePolicy.quantizedRate(50.5) == 50, "50.5 resolves to 50")
         check(ContentCadencePolicy.quantizedRate(20.2) == 20, "Low content resolves to 20")
         check(ContentCadencePolicy.quantizedRate(33.0) == 30, "33 FPS resolves to 30")
         for invalid in [0.0, -5, Double.nan, Double.infinity] {

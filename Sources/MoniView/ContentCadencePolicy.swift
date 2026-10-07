@@ -34,16 +34,12 @@ enum ContentCadencePolicy {
 
     static func quantizedRate(_ rate: Double?) -> Double? {
         guard let rate, rate.isFinite, rate > 0 else { return nil }
-        // Bias downward. Capture timing jitter makes two copies of one picture differ by a
-        // few pixels, so they read as distinct frames; the error only ever pushes the
-        // estimate up, never down. Snapping a value that sits clearly between two standard
-        // rates to the lower one therefore recovers the true rate instead of inflating it:
-        // 37.5 for a 30 FPS game becomes 30, not 40.
-        guard let upper = standardRates.first(where: { $0 >= rate }) else { return standardRates.last }
-        guard let lower = standardRates.last(where: { $0 <= rate }) else { return standardRates.first }
-        if upper == lower { return lower }
-        let span = upper - lower
-        return (rate - lower) / span > 0.9 ? upper : lower
+        // Snap to the nearest standard rate. An earlier version biased downward to offset the
+        // capture noise that inflated the estimate, but that pushed a 59 FPS source down to 50
+        // because the 50-to-60 gap is wide. The inflation itself is fixed at its source now:
+        // measurement tolerates the device's own encoding noise instead of counting it as new
+        // content, so the value that arrives here is already close to the true rate.
+        return standardRates.min { abs($0 - rate) < abs($1 - rate) }
     }
 
     static func targetRate(contentFPS: Double, supportedRates: [Double]) -> Double? {
