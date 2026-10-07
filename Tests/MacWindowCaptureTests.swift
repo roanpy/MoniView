@@ -224,7 +224,7 @@ enum MacWindowCaptureTests {
             state: { counter.recordState($0) },
             dropped: { counter.recordDrop() })
         counter.capture = capture
-        capture.start(windowID: UInt32(animated.windowNumber))
+        capture.start(windowID: UInt32(animated.windowNumber), ingestToken: 7)
         pump(3.0)
         let animatedStats = counter.snapshot
         print("Animated window: frames=\(animatedStats.count) size=\(animatedStats.sizes.first ?? "-") format=\(animatedStats.formats.map { fourCC($0) }.first ?? "-") increasing=\(animatedStats.increasing)")
@@ -250,12 +250,18 @@ enum MacWindowCaptureTests {
         check(deliveries.generations.count == 1,
               "Every delivered frame carries the running stream's generation (got \(deliveries.generations.count))")
         let deliveredGeneration = deliveries.generations.first ?? 0
+        // The adapter hands over the token its stream was started with, and stops offering it once
+        // the stream is gone; the client's mailbox refuses a token it no longer issued.
+        check(capture.ingestToken(forGeneration: deliveredGeneration) == 7,
+              "The running stream offers the ingest token it was started with")
 
         // Stop must stop delivery and report the stopped state.
         capture.stop()
         pump(0.4)
         check(!capture.acceptsFrame(generation: deliveredGeneration),
               "A stopped stream rejects the generation its frames carried")
+        check(capture.ingestToken(forGeneration: deliveredGeneration) == nil,
+              "A stopped stream offers no ingest token")
         let afterStop = counter.snapshot.count
         pump(0.6)
         check(counter.snapshot.count == afterStop, "Stop ends frame delivery")
@@ -263,7 +269,7 @@ enum MacWindowCaptureTests {
 
         // Restart must resume delivery on the same instance.
         counter.reset()
-        capture.start(windowID: UInt32(animated.windowNumber))
+        capture.start(windowID: UInt32(animated.windowNumber), ingestToken: 8)
         pump(2.0)
         check(counter.snapshot.count > 60, "Restart resumes frame delivery (got \(counter.snapshot.count))")
         capture.stop()
@@ -286,7 +292,7 @@ enum MacWindowCaptureTests {
             state: { staticCounter.recordState($0) },
             dropped: { staticCounter.recordDrop() })
         staticCounter.capture = staticCapture
-        staticCapture.start(windowID: UInt32(staticWindow.windowNumber))
+        staticCapture.start(windowID: UInt32(staticWindow.windowNumber), ingestToken: 9)
         pump(2.0)
         let staticStats = staticCounter.snapshot
         staticCapture.stop()
@@ -319,7 +325,7 @@ enum MacWindowCaptureTests {
                 state: { silentCounter.recordState($0) },
                 dropped: { silentCounter.recordDrop() })
             silentCounter.capture = silentCapture
-            silentCapture.start(windowID: silentWindow.windowID)
+            silentCapture.start(windowID: silentWindow.windowID, ingestToken: 10)
             pump(MacWindowCapture.firstFrameDeadlineSeconds + 1.0)
             let silentStats = silentCounter.snapshot
             silentCapture.stop()

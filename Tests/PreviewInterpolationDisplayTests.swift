@@ -8,6 +8,20 @@ import Darwin
 // Preserve the final acceptance measurements even when a precondition fails.
 setbuf(stdout, nil)
 
+/// An optimized Swift build traps on a failing precondition without printing its message, so a
+/// failed fixture assertion used to be indistinguishable from a crash in the code under test.
+/// These helpers report before they stop: exit 2 marks an unusable configuration (not a pass),
+/// exit 1 marks a failed acceptance assertion.
+func skipFixture(_ why: String) -> Never {
+    print("SKIP fixture: \(why)")
+    exit(2)
+}
+func requireFixture(_ condition: Bool, _ message: String) {
+    guard !condition else { return }
+    print("FAIL fixture assertion: \(message)")
+    exit(1)
+}
+
 // A native window and GPU with synthetic SDR input. This is not a capture-card,
 // picture-quality, HDMI-latency or long-running throughput certification.
 let environment = ProcessInfo.processInfo.environment
@@ -17,6 +31,7 @@ let height = Int(environment["MONIVIEW_TEST_HEIGHT"] ?? "1080") ?? 1080
 let presentationLimit = 3
 let require120 = environment["MONIVIEW_REQUIRE_120"] == "1"
 let requireCadence = environment["MONIVIEW_REQUIRE_2X"] == "1"
+let requireForcedAttempts = environment["MONIVIEW_TEST_FORCE_CONTINUOUS"] == "1"
 let repeatDivisor = Int(environment["MONIVIEW_TEST_REPEAT"] ?? (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? "2" : "1")) ?? 1
 let expectedContentFPS = Double(fps) / Double(max(1, repeatDivisor))
 // The renderer targets 60 FPS by the smallest whole step, using the flow tier for a third phase.
@@ -29,14 +44,24 @@ let expectedMultiplier: Double = {
 let testRestart = environment["MONIVIEW_TEST_RESTART"] == "1"
 let testEngineSwitch = environment["MONIVIEW_TEST_SWITCH"] == "1"
 let testFollowSwitch = environment["MONIVIEW_TEST_FOLLOW_SWITCH"] == "1"
+let testEndpointEvidence = environment["MONIVIEW_TEST_ENDPOINT_EVIDENCE"] == "1"
+let testBlankFailure = environment["MONIVIEW_TEST_BLANK_FAILURE"] == "1"
 let followEnabled = environment["MONIVIEW_TEST_FOLLOW"] == "1" || environment["MONIVIEW_TEST_DUPLICATES"] == "1"
 let fault = environment["MONIVIEW_TEST_PRESENTATION_FAILURE"] == "1"
-precondition(!testRestart || !require120, "Restart test uses the non-strict fixture")
-precondition(!testEngineSwitch || testRestart, "Engine-switch acceptance requires restart sampling")
-precondition(!testFollowSwitch || (!testRestart && !testEngineSwitch && !require120 && !requireCadence && !fault),
-             "Follow-switch acceptance is exclusive with restart, engine-switch, strict, cadence, and fault tests")
-precondition(!testFollowSwitch || (fps == 60 && repeatDivisor == 2 && followEnabled),
-             "Follow-switch acceptance requires Follow initially enabled, 60 FPS, and repeat divisor 2")
+if testRestart && require120 { skipFixture("the restart test uses the non-strict fixture") }
+if testEngineSwitch && !testRestart { skipFixture("engine-switch acceptance requires restart sampling") }
+if testFollowSwitch && (testRestart || testEngineSwitch || require120 || requireCadence || fault) {
+    skipFixture("follow-switch acceptance is exclusive with restart, engine-switch, strict, cadence and fault modes")
+}
+if testFollowSwitch && !(fps == 60 && repeatDivisor == 2 && followEnabled) {
+    skipFixture("follow-switch acceptance requires Follow initially enabled, 60 FPS and repeat divisor 2")
+}
+if testEndpointEvidence && (testRestart || testEngineSwitch || testFollowSwitch || require120 || requireCadence || fault) {
+    skipFixture("the endpoint-evidence probe stands alone; it cannot share a run with restart, engine-switch, follow-switch, strict, cadence or fault modes")
+}
+if testBlankFailure && (testRestart || testEngineSwitch || testFollowSwitch || testEndpointEvidence || require120 || requireCadence || fault) {
+    skipFixture("the blank-failure probe stands alone; it cannot share a run with restart, engine-switch, follow-switch, endpoint-evidence, strict, cadence or fault modes")
+}
 let stopAt = require120 ? 36 : 16
 let finishAt = testFollowSwitch ? 24 : (testRestart ? 33 : stopAt + 3)
 let targetName = (environment["MONIVIEW_TEST_TARGET"] ?? "native").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -46,20 +71,22 @@ case "native", "original", "原始": testTarget = .native
 case "2k", "qhd": testTarget = .qhd
 case "4k", "uhd": testTarget = .uhd
 case "screen", "display", "屏幕": testTarget = .screen
-default: fatalError("MONIVIEW_TEST_TARGET must be native, 2k, 4k, or screen (got \(targetName))")
+default: skipFixture("MONIVIEW_TEST_TARGET must be native, 2k, 4k, or screen (got \(targetName))")
 }
 let lowLatency: Bool
 if let raw = environment["MONIVIEW_TEST_LOW_LATENCY"] {
     switch raw.lowercased() {
     case "1", "true", "on": lowLatency = true
     case "0", "false", "off": lowLatency = false
-    default: fatalError("MONIVIEW_TEST_LOW_LATENCY must be 0 or 1 (got \(raw))")
+    default: skipFixture("MONIVIEW_TEST_LOW_LATENCY must be 0 or 1 (got \(raw))")
     }
 } else {
     lowLatency = environment["MONIVIEW_TEST_UNCAPPED"] != "1"
 }
 let enhancementStrength = Double(environment["MONIVIEW_TEST_STRENGTH"] ?? "0") ?? .nan
-precondition(enhancementStrength.isFinite && (0...1).contains(enhancementStrength), "MONIVIEW_TEST_STRENGTH must be between 0 and 1")
+if !(enhancementStrength.isFinite && (0...1).contains(enhancementStrength)) {
+    skipFixture("MONIVIEW_TEST_STRENGTH must be between 0 and 1 (got \(environment["MONIVIEW_TEST_STRENGTH"] ?? "unset"))")
+}
 let requireMetalFX = environment["MONIVIEW_TEST_REQUIRE_METALFX"] == "1"
 let testFullscreen = environment["MONIVIEW_TEST_FULLSCREEN"] == "1"
 let testInterpolationMode: FrameInterpolationMode
@@ -72,7 +99,8 @@ if environment["MONIVIEW_TEST_FLOWBLEND"] == "1" {
 } else {
     testInterpolationMode = .efficient
 }
-precondition(fps > 0 && width >= 640 && height >= 480)
+requireFixture(fps > 0 && width >= 640 && height >= 480,
+               "MONIVIEW_TEST_FPS must be positive and MONIVIEW_TEST_WIDTH/HEIGHT at least 640x480 (got \(fps) FPS, \(width)x\(height))")
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 guard testInterpolationMode == .flowBlend || FrameInterpolatorSupport.isSupported else { print("SKIP runtime interpolation unavailable (not a pass)"); exit(2) }
@@ -101,9 +129,37 @@ if environment["MONIVIEW_TEST_VIVID"] == "1" {
 }
 var events: [(sequence: UInt64, generated: Bool, time: Double)] = []
 preview.onPresentation = { events.append(($0, $1, $2)) }
+/// The endpoint of a pair reports the midpoint's presentation as its evidence. A fallback reason
+/// stated after a midpoint and before that pair's already-scheduled endpoint must stay: the
+/// endpoint is the source frame, so its later presentation is not evidence that the engine ran.
+var endpointEvidenceSequence: UInt64?
+var endpointEvidenceOutcome: (keptReason: Bool, caption: String)?
+if testEndpointEvidence {
+    preview.onPresentation = { sequence, generated, time in
+        events.append((sequence, generated, time))
+        if generated, endpointEvidenceSequence == nil {
+            // Midpoint on screen: state the reason before the endpoint of this same pair presents.
+            endpointEvidenceSequence = sequence
+            frames.setInterpolationState("处理超预算，暂用原始帧率")
+        } else if let injected = endpointEvidenceSequence, !generated, sequence == injected,
+                  endpointEvidenceOutcome == nil {
+            // Read the caption once this endpoint's handler has finished: its own call is what must
+            // keep the reason instead of announcing running from the endpoint's time.
+            DispatchQueue.main.async {
+                guard endpointEvidenceOutcome == nil else { return }
+                let caption = frames.currentInterpolationState()
+                endpointEvidenceOutcome = (caption == "处理超预算，暂用原始帧率", caption)
+            }
+        }
+    }
+}
 var recovered = false
+var blankWasRetried = false
 preview.onPresentationRecovery = { recovered = true }
 preview.suppressPresentedCallbacks = fault
+// The blank-failure probe suppresses only the clearing draw's presentation callback: its frame
+// path stays healthy, so the layer is retired by the unconfirmed blank and not by a lost frame.
+preview.suppressBlankPresentedCallbacks = testBlankFailure
 // The drawable cost is dominated by the visible output size, so the window size is
 // configurable: a 960x540 window is not representative of a near-fullscreen preview.
 let testWindowWidth = Int(environment["MONIVIEW_TEST_WINDOW_WIDTH"] ?? "960") ?? 960
@@ -154,7 +210,7 @@ input.schedule(deadline: .now(), repeating: 1.0 / Double(fps))
 input.setEventHandler {
     var buffer: CVPixelBuffer?
     let attrs: [String:Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:], kCVPixelBufferMetalCompatibilityKey as String:true]
-    guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &buffer) == kCVReturnSuccess, let buffer else { fatalError("allocation") }
+    guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &buffer) == kCVReturnSuccess, let buffer else { skipFixture("input buffer allocation failed") }
     if environment["MONIVIEW_TEST_METADATA"] != "missing" {
         for (key, value) in [(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2), (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2), (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2)] {
             CVBufferSetAttachment(buffer, key, value, .shouldPropagate)
@@ -187,7 +243,7 @@ if fault {
         preview.settings.frameInterpolation = .off
         preview.configureInterpolation()
         // Turning interpolation off must clear the readout at once, not after the window.
-        precondition(frames.currentInterpolationActivity() == nil, "disabling interpolation clears the readout immediately")
+        requireFixture(frames.currentInterpolationActivity() == nil, "disabling interpolation clears the readout immediately")
         input.cancel() // no display-link or future input may rescue a lost callback
         if environment["MONIVIEW_TEST_CLEAR_INPUT"] == "1" { frames.clear() }
         preview.requestRender()
@@ -236,10 +292,11 @@ var countedSources = Set<UInt64>()
 func validateCadencePresentations(_ samples: [(sequence: UInt64, generated: Bool, time: Double)], multiplier: Int) {
     let ordered = samples.sorted { $0.time < $1.time }
     let intervals = zip(ordered, ordered.dropFirst()).map { $1.time - $0.time }.filter { $0 > 0 }.sorted()
-    precondition(!intervals.isEmpty, "no presentation spacing samples")
+    requireFixture(!intervals.isEmpty, "no presentation spacing samples")
     let slot = 1 / (expectedContentFPS * Double(multiplier))
     let p95 = intervals[min(intervals.count - 1, Int(ceil(Double(intervals.count) * 0.95)) - 1)]
-    precondition(p95 <= slot * 1.6 + 0.001, "presentation spacing is not consistent with target output")
+    let intervalTolerance = testInterpolationMode == .quality ? 1.35 : 1.6
+    requireFixture(p95 <= slot * intervalTolerance + 0.001, "presentation spacing is not consistent with target output")
     // Each completed sequence needs the requested number of distinct generated presentations
     // before its source endpoint; a lone midpoint cannot pass the third-phase acceptance.
     var completePairs = 0
@@ -249,7 +306,7 @@ func validateCadencePresentations(_ samples: [(sequence: UInt64, generated: Bool
         let midpoints = sequenceEvents.filter { $0.generated && $0.time < endpoint.time }
         if midpoints.count == multiplier - 1 { completePairs += 1 }
     }
-    precondition(completePairs >= Int(Double(samples.count) / Double(multiplier) * 0.8),
+    requireFixture(completePairs >= Int(Double(samples.count) / Double(multiplier) * 0.8),
                  "too few completed pairs contain every generated phase before the endpoint")
     print("PASS \(multiplier)x presentation structure: complete pairs=\(completePairs), interval P95=\(p95 * 1000) ms")
 }
@@ -339,13 +396,17 @@ stats.setEventHandler {
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!
-        precondition(work == "\(expected.width)×\(expected.height)", "Clear silently reduced its working resolution")
+        requireFixture(work == "\(expected.width)×\(expected.height)", "Clear silently reduced its working resolution")
     }
     if testInterpolationMode == .balanced, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .balanced)!
-        precondition(work == "\(expected.width)×\(expected.height)", "Medium silently reduced its working resolution")
+        requireFixture(work == "\(expected.width)×\(expected.height)", "Medium silently reduced its working resolution")
     }
     let newEvents = events.dropFirst(eventOffset); eventOffset = events.count
+    if requireForcedAttempts, tick >= 6, tick <= 12 {
+        requireFixture(preview.settings.forceFrameInterpolation && gen > 0,
+                       "successful forced processing repeatedly paused or lost deadline eligibility")
+    }
     let sourcePresentations = newEvents.filter { !$0.generated && countedSources.insert($0.sequence).inserted }.count
     if requireCadence, tick >= 6, tick <= 12 {
         cadenceEvents.append(contentsOf: newEvents)
@@ -396,7 +457,7 @@ stats.setEventHandler {
     if Double(gen) >= expectedContentFPS * 0.85 { steady += 1 }
     // Count source presentations independently from renderer statistics. The pair
     // shares the same sampling boundary, including native fallback and redraws.
-    precondition(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
+    requireFixture(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
     print("tick=\(tick) newCADcount=\(newCADCount) window=\(String(format: "%.3f", cadWindowDuration))s capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) engine=\(frames.currentEngine()) spatial=\(frames.currentEnhancedSize() ?? "native") work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
     if testFollowSwitch && (tick == 18 || tick == 19) {
         let basis = frames.currentInterpolationBasisFPS()
@@ -404,17 +465,60 @@ stats.setEventHandler {
         let engine = frames.currentEngine()
         followSwitchSampleTicks.append(tick)
         print("follow-switch tick=\(tick) generated=\(gen) basisFPS=\(basis.map { String(format: "%.2f", $0) } ?? "nil") multiplier=\(multiplier.map { String(format: "%.2f", $0) } ?? "nil") engine=\(engine)")
-        precondition(gen > 0, "Follow-switch generation did not resume by tick \(tick)")
-        precondition(abs((basis ?? .nan) - 60) < 0.5 && abs((multiplier ?? .nan) - 2) < 0.001,
+        requireFixture(gen > 0, "Follow-switch generation did not resume by tick \(tick)")
+        requireFixture(abs((basis ?? .nan) - 60) < 0.5 && abs((multiplier ?? .nan) - 2) < 0.001,
                      "Follow-switch retained a stale content-rate basis or multiplier at tick \(tick)")
-        precondition(preview.settings.frameInterpolation == originalInterpolationMode &&
+        requireFixture(preview.settings.frameInterpolation == originalInterpolationMode &&
                      preview.settings.forceFrameInterpolation == originalForceSetting &&
                      preview.settings.upscaleMethod == originalUpscaleMethod && engine == followSwitchEngine,
                      "Follow-switch changed the original interpolation or spatial engine")
     }
     if fault && tick == 2 {
-        precondition(recovered && preview.peakOutstandingPresentations <= presentationLimit, "lost callbacks did not retire old preview")
+        requireFixture(recovered && preview.peakOutstandingPresentations <= presentationLimit, "lost callbacks did not retire old preview")
         print("PASS injected presentation-callback loss: old layer retired without recycling outstanding tokens")
+        input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil); return
+    }
+    if testBlankFailure, tick == 2 {
+        // Stop the synthetic input first so the pipeline is quiet before the clear: an in-flight
+        // frame callback would otherwise be dropped by the epoch change and distort the drawable
+        // accounting this fixture also checks. Interpolation goes off as well, which removes the
+        // display link: the blank's own deadline must be the only thing that retries it.
+        input.cancel()
+        preview.settings.frameInterpolation = .off
+        preview.configureInterpolation()
+        preview.requestRender()
+    }
+    if testBlankFailure, tick == 3 {
+        // A source switch clears the mailbox and asks for a blank, but in this mode the clearing
+        // draw's presentation callback never arrives. No frames remain, so nothing can supersede
+        // the blank: it must be retried from its own deadline (the display link is not the only
+        // way out) and, after the attempt limit, retire the layer instead of leaving the previous
+        // picture on screen.
+        recovered = false
+        frames.clear(blankPreview: true)
+        preview.requestRender()
+    }
+    if testBlankFailure, tick > 3 {
+        if frames.isBlankRequestPending || frames.currentInterpolationState() == "呈现中断，重建预览" {
+            blankWasRetried = true
+        }
+        if tick >= 5 {
+            requireFixture(blankWasRetried, "a blank whose presentation callback was lost was never retried")
+            requireFixture(recovered, "a blank that never presented did not retire the layer")
+            requireFixture(frames.currentInterpolationState() == "呈现中断，重建预览",
+                           "retiring the layer for an unconfirmed blank left a stale caption: \(frames.currentInterpolationState())")
+            print("PASS injected blank-presentation loss: retried from its own deadline and retired after the attempt limit")
+            input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil); return
+        }
+    }
+    if testEndpointEvidence, tick >= 3 {
+        guard let outcome = endpointEvidenceOutcome else {
+            print("SKIP endpoint-evidence probe: no complete pair presented its endpoint")
+            input.cancel(); stats.cancel(); activityProbe.cancel(); exit(2)
+        }
+        requireFixture(outcome.keptReason,
+                     "the endpoint of a pair re-announced running from its own time: \(outcome.caption)")
+        print("PASS endpoint evidence: a fallback reason stated after the midpoint survived the pair's endpoint presentation")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil); return
     }
     if tick == 8 && !testFollowSwitch && !require120 && !requireCadence && testInterpolationMode != .flowBlend && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
@@ -426,27 +530,27 @@ stats.setEventHandler {
             preview.configureInterpolation(); preview.requestRender()
             // The engine switch invalidates the evidence the previous engine recorded: the new
             // engine has not presented anything yet.
-            precondition(frames.recentGeneratedPresentationEvidence() == nil,
+            requireFixture(frames.recentGeneratedPresentationEvidence() == nil,
                          "an engine switch kept the previous engine's evidence")
         } else {
             // A steady run must clear the published pair at once, not after the window.
             let hadActivity = frames.currentInterpolationActivity() != nil
             preview.settings.frameInterpolation = .off
             preview.configureInterpolation()
-            precondition(!hadActivity || frames.currentInterpolationActivity() == nil,
+            requireFixture(!hadActivity || frames.currentInterpolationActivity() == nil,
                          "disabling interpolation clears the readout immediately")
             preview.requestRender()
         }
     }
     if testFollowSwitch && tick == 16 {
-        precondition(originalFollowSetting && preview.settings.frameInterpolation == originalInterpolationMode &&
+        requireFixture(originalFollowSetting && preview.settings.frameInterpolation == originalInterpolationMode &&
                      preview.settings.forceFrameInterpolation == originalForceSetting &&
                      preview.settings.upscaleMethod == originalUpscaleMethod,
                      "Follow-switch did not start from the expected enabled state")
         followSwitchEngine = frames.currentEngine()
         preview.settings.skipsExactDuplicateInterpolation = false
         preview.configureInterpolation(); preview.requestRender()
-        precondition(preview.settings.frameInterpolation == originalInterpolationMode &&
+        requireFixture(preview.settings.frameInterpolation == originalInterpolationMode &&
                      preview.settings.forceFrameInterpolation == originalForceSetting &&
                      preview.settings.upscaleMethod == originalUpscaleMethod,
                      "Follow toggle changed interpolation or spatial engine settings")
@@ -456,7 +560,7 @@ stats.setEventHandler {
         preview.configureInterpolation(); preview.requestRender()
     }
     if testFollowSwitch && tick == 21 {
-        precondition(preview.settings.skipsExactDuplicateInterpolation == originalFollowSetting &&
+        requireFixture(preview.settings.skipsExactDuplicateInterpolation == originalFollowSetting &&
                      preview.settings.frameInterpolation == originalInterpolationMode &&
                      preview.settings.forceFrameInterpolation == originalForceSetting &&
                      preview.settings.upscaleMethod == originalUpscaleMethod &&
@@ -474,59 +578,63 @@ stats.setEventHandler {
         preview.configureInterpolation(); preview.requestRender()
         // Switching the engine off must invalidate the evidence the previous configuration
         // recorded; nothing generated has presented for the disabled one.
-        precondition(frames.recentGeneratedPresentationEvidence() == nil,
+        requireFixture(frames.recentGeneratedPresentationEvidence() == nil,
                      "switching the engine off kept the previous configuration's evidence")
     }
     if testRestart, tick > 30, tick < finishAt {
         // Reverse direction: a success callback from the generation that was switched off may
         // still arrive, and it must not label the disabled engine as running.
         let caption = frames.currentInterpolationState()
-        precondition(!caption.contains("运行中"),
+        requireFixture(!caption.contains("运行中"),
                      "a superseded generation labelled the disabled engine as running: tick=\(tick) state=\(caption)")
-        precondition(frames.recentGeneratedPresentationEvidence() == nil,
+        requireFixture(frames.recentGeneratedPresentationEvidence() == nil,
                      "a superseded generation left presentation evidence behind: tick=\(tick)")
     }
     if tick == finishAt {
         if requireCadence {
             print("recent interpolation activity: \(activitySamples) samples at 20Hz, missing \(missingActivitySamples), mismatched \(mismatchedActivitySamples), expected \(expectedMultiplier)x/\(expectedContentFPS) FPS")
-            precondition(activitySamples >= 100 && missingActivitySamples == 0 && mismatchedActivitySamples == 0,
+            requireFixture(activitySamples >= 100 && missingActivitySamples == 0 && mismatchedActivitySamples == 0,
                          "recent pair readout flickered or changed step during steady interpolation")
         }
         if testRestart {
             print("restart acceptance: windows \(restartPassWindows)/\(restartWindows), caption non-preparing \(restartCaptionWindows - restartCaptionContradictions.count)/\(restartCaptionWindows), source \(Double(restartSources) / restartElapsed) FPS, generated \(Double(restartGenerated) / restartElapsed) FPS, expected multiplier \(expectedMultiplier)")
-            precondition(restartWindows == 6 && restartPassWindows >= 5,
+            requireFixture(restartWindows == 6 && restartPassWindows >= 5,
                          "Interpolation did not restore its target throughput after stop/start")
-            precondition(restartCaptionContradictions.isEmpty,
+            requireFixture(restartCaptionContradictions.isEmpty,
                          "restart caption kept claiming preparation while pairs presented: \(restartCaptionContradictions.joined(separator: "; "))")
             validateCadencePresentations(restartEvents, multiplier: Int(expectedMultiplier))
             print("PASS stop/start: target generated rate, source rate, pair structure and spacing restored")
         }
         if requireCadence {
             print("2x acceptance: windows \(cadencePassWindows)/\(cadenceWindows), source \(Double(cadenceSources) / cadenceElapsed) FPS, generated \(Double(cadenceGenerated) / cadenceElapsed) FPS, expected content \(expectedContentFPS) FPS")
-            precondition(cadenceWindows == 7 && cadencePassWindows >= 6,
+            requireFixture(cadenceWindows == 7 && cadencePassWindows >= 6,
                          "2x content-cadence throughput failed; smoke success is not throughput acceptance")
+            if followEnabled && repeatDivisor > 1 {
+                requireFixture(Double(cadenceSources) / cadenceElapsed <= expectedContentFPS * 1.10,
+                               "duplicate source presentations hid missing generated frames")
+            }
             validateCadencePresentations(cadenceEvents, multiplier: Int(expectedMultiplier))
         }
-        if followEnabled && repeatDivisor > 1 { precondition(totalDuplicateSkips > 0, "identical pairs were not skipped") }
+        if followEnabled && repeatDivisor > 1 { requireFixture(totalDuplicateSkips > 0, "identical pairs were not skipped") }
         if testFollowSwitch {
-            precondition(followSwitchSampleTicks == [18, 19], "Follow-switch did not record both recovery samples")
-            precondition(originalFollowSetting && preview.settings.skipsExactDuplicateInterpolation == originalFollowSetting,
+            requireFixture(followSwitchSampleTicks == [18, 19], "Follow-switch did not record both recovery samples")
+            requireFixture(originalFollowSetting && preview.settings.skipsExactDuplicateInterpolation == originalFollowSetting,
                          "Follow-switch failed to restore the initial Follow setting")
         }
-        precondition(gen == 0 && !recovered, "disable/recovery failure")
-        precondition(frames.currentInterpolationActivity() == nil, "disable leaves stale interpolation activity")
-        precondition(preview.peakOutstandingPresentations <= presentationLimit, "unpresented drawable bound")
+        requireFixture(gen == 0 && !recovered, "disable/recovery failure")
+        requireFixture(frames.currentInterpolationActivity() == nil, "disable leaves stale interpolation activity")
+        requireFixture(preview.peakOutstandingPresentations <= presentationLimit, "unpresented drawable bound")
         if testInterpolationMode == .flowBlend {
-            precondition(total > 0, "FlowBlend produced no generated frame actually presented")
+            requireFixture(total > 0, "FlowBlend produced no generated frame actually presented")
         }
         let sorted = events.sorted { $0.time < $1.time }
         for (a,b) in zip(sorted, sorted.dropFirst()) {
-            precondition(b.sequence >= a.sequence, "presentation went backwards")
+            requireFixture(b.sequence >= a.sequence, "presentation went backwards")
         }
         let eligible = expectedContentFPS * 2 <= Double(window.screen?.maximumFramesPerSecond ?? 0)
         if eligible {
-            if environment["MONIVIEW_ALLOW_BUDGET_FALLBACK"] != "1" { precondition(total > 0, "no generated frame actually presented") }
-        } else { precondition(total == 0, "interpolation despite insufficient refresh") }
+            if environment["MONIVIEW_ALLOW_BUDGET_FALLBACK"] != "1" { requireFixture(total > 0, "no generated frame actually presented") }
+        } else { requireFixture(total == 0, "interpolation despite insufficient refresh") }
         let waits = preview.drawableWaitMS.sorted()
         if !waits.isEmpty { print("Drawable wait P95=\(waits[min(waits.count-1, Int(Double(waits.count)*0.95))])ms, max=\(waits.last!)ms") }
         let measuredCADCounts = require120 ? strictCADWindowCounts : cadWindowCounts
@@ -538,8 +646,8 @@ stats.setEventHandler {
         let cadDuration = require120 ? strictElapsed : cadElapsed
         print("DisplayLink callback diagnostic (not screen FPS): callbacks=\(cadCountTotal), per-tick count mean=\(String(format: "%.2f", cadCountMean)), P95=\(cadCountP95), sampled=\(measuredCADCounts.count) windows/\(String(format: "%.3f", cadDuration))s")
         if require120 {
-            precondition(fps == 60 && (window.screen?.maximumFramesPerSecond ?? 0) >= 120, "120 Hz environment required")
-            if requireMetalFX { precondition(strictMetalFXObserved, "MetalFX spatial upscaler was not observed during strict windows") }
+            requireFixture(fps == 60 && (window.screen?.maximumFramesPerSecond ?? 0) >= 120, "120 Hz environment required")
+            if requireMetalFX { requireFixture(strictMetalFXObserved, "MetalFX spatial upscaler was not observed during strict windows") }
             let ordered = stableEvents.sorted { $0.time < $1.time }
             let intervals = zip(ordered, ordered.dropFirst()).map { $1.time - $0.time }.sorted()
             let mean = intervals.reduce(0,+) / Double(max(1,intervals.count))
@@ -549,7 +657,7 @@ stats.setEventHandler {
             let sourceFPS = Double(strictSourceFrames) / measuredDuration
             let generatedFPS = Double(strictGeneratedFrames) / measuredDuration
             print("120 acceptance: strict windows \(strictWindows)/30, actual mean interval \(mean*1000)ms, P95 \(p95*1000)ms, source FPS \(String(format: "%.2f", sourceFPS)), generated FPS \(String(format: "%.2f", generatedFPS)), output FPS \(String(format: "%.2f", sourceFPS + generatedFPS)), sampled \(strictSampleWindows) windows/\(String(format: "%.3f", measuredDuration))s")
-            precondition(strictWindows >= 27 && mean <= 0.0089 && p95 <= 0.0125, "sustained 60→120 acceptance failed")
+            requireFixture(strictWindows >= 27 && mean <= 0.0089 && p95 <= 0.0125, "sustained 60→120 acceptance failed")
         }
         print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : ", minimize/restore smoke"); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil)

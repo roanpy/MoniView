@@ -11,6 +11,7 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_FLOWBLEND=1                  (use the optical-flow Beta tier; overrides MONIVIEW_TEST_QUALITY / MONIVIEW_TEST_BALANCED)
   MONIVIEW_TEST_QUALITY=1                    (use the Clear interpolation tier)
   MONIVIEW_TEST_REQUIRE_METALFX=1            (strict run must observe MetalFX)
+  MONIVIEW_TEST_FORCE_CONTINUOUS=1           (assert generated presentations in each steady window with Force on; does not certify target FPS)
   MONIVIEW_TEST_FULLSCREEN=1                 (fixture enters native fullscreen after launch; no persistent app setting)
   MONIVIEW_TEST_WINDOW_WIDTH / _HEIGHT       (fixture window size; default 960x540)
   MONIVIEW_TEST_VIVID=1                      (apply the shipped Vivid preset: contrast, saturation, vibrance, highlight recovery)
@@ -22,7 +23,14 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_RESTART=1                    (stop, re-enable the same engine, and verify generated presentations resume)
   MONIVIEW_TEST_SWITCH=1                     (with RESTART: switch to quality and back; verify original target rate)
   MONIVIEW_TEST_FOLLOW_SWITCH=1              (tick 16 disable Follow, tick 20 restore; needs Follow, 60 FPS, repeat=2, 120 Hz)
+  MONIVIEW_TEST_PRESENTATION_FAILURE=1       (standalone: drop every presentation callback; the old layer must retire)
+  MONIVIEW_TEST_BLANK_FAILURE=1              (standalone: drop the clearing draw's presentation callback; the blank must be retried from its own deadline, then retire the layer)
+  MONIVIEW_TEST_ENDPOINT_EVIDENCE=1          (standalone: state a fallback reason after a midpoint; the pair's endpoint must keep it)
   MONIVIEW_TEST_COMPILE_ONLY=1               (compile fixture, do not launch its window)
+
+The three failure/evidence probes stand alone by design: combining one with
+restart, engine-switch, follow-switch, strict or cadence sampling reports SKIP
+(exit 2), and a failing assertion reports FAIL (exit 1) instead of trapping.
 
 Strict mode requires the bound display to report at least 120 Hz and checks the
 test window's visible, unminimized, unoccluded state throughout sampling. If the

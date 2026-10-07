@@ -1,5 +1,22 @@
 # Today's goal: locally usable capture preview / 今日目标：本机可用
 
+## Final closeout scope — 2026-10-07 / 当日最终收尾范围
+
+The user's final instruction is one bounded repair round, tests, Astra acceptance, and a GitHub commit/push. The current delivery gate is the local regression fix: usable Quality and Smoothness presets, interpolation recovery and truthful status, aligned enhancement controls and a stable audio meter. Store/iPad work and another extended subjective gameplay campaign do not hold this closeout open. Historical observations and their missing subjective verdicts below remain historical evidence, not fresh-build certification. Final results are recorded in [LOCAL_VALIDATION.md](LOCAL_VALIDATION.md).
+
+用户最终要求为一轮集中修复、测试、Astra验收并提交推送GitHub。当前交付门槛是本机回归修复：画质与流畅预设可用、插帧恢复及状态准确、增强控件对齐和电平条稳定。商店、iPad及另一轮长时间主观游戏测试不阻塞本次收尾；下方历史观察及尚缺的主观结论仍只作历史证据，不作为最终构建认证。最终结果见[本地验证记录](LOCAL_VALIDATION.md)。
+
+### Final closeout status / 最终收尾进度
+
+- Build 114 is signed, installed and hash-matched; previous candidates are retained. / 构建114签名、安装和哈希核对通过，旧候选保留。
+- Quality 30→60 and Smoothness 30→60 passed steady and restart gates; 20→60 three-phase, callback recovery, capture/window policies, real window capture and recorder fault tests passed. / 画质及流畅30→60稳定和恢复门槛通过，三相位、回调恢复、采集与窗口策略、真实窗口采集及录制故障测试通过。
+- Native UI controls and bilingual resources checked; no claim of a fresh long gameplay verdict or stable High 60→120. / 原生控件及双语资源已检查，不冒称新的长时间游戏结论或High稳定120。
+- Astra's read-only review returned PASS for this bounded scope, with no blocking P1/P2. The closeout changes and evidence are delivered by the corresponding GitHub commit/push; this round ends here. / Astra只读终验限定范围PASS，无阻塞P1/P2；本收尾提交推送交付修改及证据，本轮到此结束。
+
+## Historical frozen acceptance plan / 历史冻结验收计划
+
+The following plan and observations predate the user's bounded final closeout instruction above. Its uncompleted long gameplay/audio items remain uncompleted; they are not the current stop condition. / 下方计划和观察早于用户最终收敛范围的指令，未完成的长游戏及试听项目仍未完成，但不再作为本轮停止条件。
+
 Scenario (frozen): this Mac + Jemdo capture card + 1080p60 capture + 30 FPS game content + 120 Hz display + the Smoothness preset (native input size, Natural colour).
 
 Goal statement: ship a locally installable, interactive and continuously usable build on this Mac and capture card, focused on 30→60 interpolation and recovery, an operable simplified UI, honest status readouts, and a real-game plus short-recording acceptance.

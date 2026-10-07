@@ -213,11 +213,21 @@ struct MainView: View {
     }
 
     private var interpolationSummary: String {
-        if let activity = capture.interpolationActivity {
+        if capture.generatedFPS > 0, let activity = capture.interpolationActivity {
             let basis = activity.basisFPS
             return L10n.format("插帧 %d→%d · 输出 %d FPS（生成 %d）",
                                Int(basis.rounded()), Int((basis * activity.multiplier).rounded()),
                                capture.outputFPS, capture.generatedFPS)
+        }
+        let state = capture.interpolationStatus
+        let output = L10n.format("输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS)
+        if capture.generatedFPS > 0 {
+            return L10n.text("插帧运行中") + " · " + output
+        }
+        // The sampled output and the recent pair TTL can straddle a statistics tick.
+        // With no generated presentations, show the actual reason rather than an old target.
+        if !["关闭", "插帧准备中", "插帧运行中", "强制插帧运行中"].contains(state) {
+            return L10n.text(state) + " · " + output
         }
         return L10n.format("插帧待运行 · 输出 %d FPS（生成 %d）", capture.outputFPS, capture.generatedFPS)
     }
@@ -652,7 +662,7 @@ struct MainView: View {
             // which then looked like the app ignoring performance limits.
             settingsToggle("强制尝试插帧", isOn: $capture.picture.forceFrameInterpolation)
                 .disabled(capture.picture.frameInterpolation == .off)
-                .help(L10n.text("忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。"))
+                .help(L10n.text("持续尝试插帧，超预算时先减少放大处理；仍受屏幕刷新率、有效输入和呈现期限限制。"))
             settingsToggle("跟随内容帧率", isOn: $capture.picture.skipsExactDuplicateInterpolation)
                 .disabled(capture.picture.frameInterpolation == .off)
                 .help(L10n.text("开启按不同内容画面的时间插帧，关闭按采集节奏插帧；不改变采集档位。"))

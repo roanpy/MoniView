@@ -173,21 +173,18 @@ struct CaptureCompatibilityTests {
         precondition(frames.consumeBlankRequest() == currentEpoch, "the new switch requests its own blank")
         frames.rearmBlankRequest(epoch: switchEpoch)
         precondition(!frames.isBlankRequestPending, "a superseded epoch cannot re-open a blank")
-        // A frame that arrives first cancels the request; when it turns out to belong to a
-        // superseded source it is removed again and the switch's blank is restored.
+        // A blank for an input that was replaced is never retried or retired: a newer stream owns
+        // the preview, and re-arming its predecessor's blank would disturb it.
         frames.rearmBlankRequest(epoch: currentEpoch)
         precondition(frames.isBlankRequestPending, "the current epoch can re-arm the blank")
-        let staleSequence = frames.put(pixelBuffer(), pts: CMTime(value: 2, timescale: 60))
-        precondition(frames.consumeBlankRequest() == nil, "the frame supersedes the blank")
-        precondition(!frames.isBlankRequestPending, "the superseded request is gone")
-        frames.discardFrame(sequence: staleSequence)
-        precondition(frames.latest() == nil, "a frame from a superseded source is removed again")
-        precondition(frames.isBlankRequestPending, "discarding it restores the switch's blank")
-        // A newer frame that arrived meanwhile is not discarded with an older sequence.
-        let keptSequence = frames.put(pixelBuffer(), pts: CMTime(value: 3, timescale: 60))
-        frames.discardFrame(sequence: keptSequence &- 1)
-        precondition(frames.latest() != nil, "an older sequence cannot discard a newer frame")
-        print("PASS source-switch blank request: retained through a failed draw, re-armed for the current stream only, and a superseded frame is removed again")
+        frames.put(pixelBuffer(width: 32, height: 32), pts: CMTime(value: 2, timescale: 60))
+        let newerEpoch = frames.streamGeneration()
+        precondition(newerEpoch != currentEpoch, "a new input starts a new stream epoch")
+        precondition(!frames.isBlankStillNeeded(forEpoch: currentEpoch),
+                     "a blank of a replaced input is no longer needed")
+        precondition(!frames.rearmBlankRequest(epoch: currentEpoch),
+                     "a superseded input cannot re-arm its blank")
+        print("PASS source-switch blank request: retained through a failed draw, and never re-armed or retired for an input a newer stream replaced")
 
         // Recent generated activity is evidence for the caption, but only for the stream it was
         // recorded under and only while no newer reason was stated.
@@ -234,6 +231,121 @@ struct CaptureCompatibilityTests {
         precondition(layoutFrames.recentGeneratedPresentationEvidence() == nil,
                      "a superseded stream cannot record evidence")
         print("PASS caption evidence: bound to its stream, refused for a superseded one, and unable to overwrite a newer reason")
+    }
+
+    /// The constructible orderings of a source switch, driven through the same gate and mailbox the
+    /// capture paths use. A frame whose source lost the preview must never be stored at all: the
+    /// check, the write and the switch share one critical section, so no draw or pair can pick the
+    /// frame up while a retraction is still on its way.
+    private static func testSourceIsolationInterleavings() {
+        // (1) The switch runs first. A device frame that reaches its critical section afterwards is
+        // refused before anything is written.
+        let gate = PreviewIngestGate()
+        let frames = LatestVideoFrame()
+        frames.put(pixelBuffer(), pts: CMTime(value: 0, timescale: 60))
+        gate.switchOwner(to: .macWindow) { frames.beginInput(blankPreview: true) }
+        precondition(gate.currentOwner == .macWindow, "the switch publishes the new owner")
+        precondition(frames.latest() == nil, "the switch cleared the mailbox")
+        precondition(frames.isBlankRequestPending, "the switch requested its blank")
+        var ingestBodyRan = false
+        let refused: Bool? = gate.run(forOwner: .device) { () -> Bool in
+            ingestBodyRan = true
+            frames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 60))
+            return true
+        }
+        precondition(refused == nil && !ingestBodyRan, "a card frame cannot be ingested after the switch")
+        precondition(frames.latestSnapshot() == nil, "nothing renderable holds the card's frame")
+        precondition(frames.interpolationPair(sequence: 1) == nil, "no pair can be built from the card's frame")
+        precondition(frames.inputContentCadenceSnapshot() == nil, "no cadence measurement is fed by the card's frame")
+
+        // (2) The ingest is already inside its critical section when the switch starts. The switch
+        // cannot run inside it; the frame it stores is then cleared by that switch, which is the
+        // only trace it may leave.
+        let racingGate = PreviewIngestGate()
+        let racingFrames = LatestVideoFrame()
+        racingFrames.put(pixelBuffer(), pts: CMTime(value: 0, timescale: 60))
+        let switchAttempted = DispatchSemaphore(value: 0)
+        let switchCompleted = DispatchSemaphore(value: 0)
+        var switchRanInsideIngest = false
+        var storedInsideIngest = false
+        let delivered: Bool? = racingGate.run(forOwner: .device) { () -> Bool in
+            DispatchQueue.global().async {
+                switchAttempted.signal()
+                racingGate.switchOwner(to: .macWindow) { racingFrames.beginInput(blankPreview: true) }
+                switchCompleted.signal()
+            }
+            switchAttempted.wait()
+            // The switch must not be able to complete while this body still holds the gate.
+            switchRanInsideIngest = switchCompleted.wait(timeout: .now()) == .success
+            racingFrames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 60))
+            storedInsideIngest = racingFrames.latest() != nil
+            return true
+        }
+        precondition(delivered == true && storedInsideIngest,
+                     "the frame is stored while its source still owns the preview")
+        precondition(!switchRanInsideIngest, "a switch cannot run inside a frame's ingest critical section")
+        precondition(switchCompleted.wait(timeout: .now() + 2) == .success, "the switch completes after the ingest")
+        precondition(racingFrames.latest() == nil, "the switch clears the frame that ingest stored")
+        precondition(racingFrames.isBlankRequestPending, "the switch's blank stands once the frame is cleared")
+
+        // (3) A frame for the new input arrives after the switch and is kept: there is no retraction
+        // left that could take it away, and it cancels the blank it belongs to.
+        let deviceGate = PreviewIngestGate()
+        let deviceFrames = LatestVideoFrame()
+        deviceFrames.put(pixelBuffer(), pts: CMTime(value: 0, timescale: 60))
+        deviceGate.switchOwner(to: .device) { deviceFrames.clear(blankPreview: true) }
+        let newFrameStored: Bool? = deviceGate.run(forOwner: .device) { () -> Bool in
+            deviceFrames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 60))
+            return deviceFrames.latest() != nil
+        }
+        precondition(newFrameStored == true, "the new input's frame is ingested")
+        precondition(deviceFrames.latest() != nil, "nothing removes the new input's frame afterwards")
+        precondition(deviceFrames.consumeBlankRequest() == nil, "the new frame supersedes the switch's blank")
+        print("PASS source isolation: a refused frame is never stored, a switch cannot interleave an ingest, and a new input's frame survives")
+    }
+
+    /// The window path hands every frame the token issued for its stream. A token from a stream a
+    /// switch replaced is refused by the mailbox itself, so a frame that passed the adapter's check
+    /// just before the switch cannot be stored after it.
+    private static func testIngestTokenRefusesSupersededStream() {
+        let frames = LatestVideoFrame()
+        let firstToken = frames.beginInput(blankPreview: true)
+        precondition(frames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 60), token: firstToken) != nil,
+                     "the current input's token is accepted")
+        let switchedToken = frames.beginInput(blankPreview: true)
+        precondition(switchedToken != firstToken, "a new input issues a new token")
+        precondition(frames.latest() == nil, "starting a new input clears the mailbox")
+        precondition(frames.put(pixelBuffer(), pts: CMTime(value: 2, timescale: 60), token: firstToken) == nil,
+                     "a frame from the replaced stream is refused inside the mailbox")
+        precondition(frames.latest() == nil, "nothing renderable holds the replaced stream's frame")
+        precondition(frames.isBlankRequestPending, "the switch keeps its blank")
+        precondition(frames.put(pixelBuffer(), pts: CMTime(value: 3, timescale: 60), token: switchedToken) != nil,
+                     "the new input's token is accepted")
+        precondition(frames.latestSnapshot() != nil, "the new input's frame is renderable")
+        print("PASS ingest token: a replaced stream's frame is refused by the mailbox, and the new input's frame is kept")
+    }
+
+    /// The endpoint of a pair is the source frame, not a generated one. When a fallback reason is
+    /// stated between a midpoint and its already-scheduled endpoint, the endpoint presenting later
+    /// must keep that reason: only the midpoint's own presentation is evidence that the engine ran.
+    private static func testPresentedPairEvidenceUsesMidpoint() {
+        let frames = LatestVideoFrame()
+        frames.put(pixelBuffer(), pts: CMTime(value: 0, timescale: 60))
+        let epoch = frames.streamGeneration()
+        let midpointPresented = ProcessInfo.processInfo.systemUptime
+        frames.recordGeneratedPresentationEvidence(streamEpoch: epoch, at: midpointPresented)
+        // The pair is left native by a fallback reason while its endpoint is still scheduled.
+        frames.setInterpolationState("处理超预算，暂用原始帧率")
+        let endpointPresented = ProcessInfo.processInfo.systemUptime
+        precondition(!frames.publishRunningForPresentedPair(forced: false, midpointPresentedAt: midpointPresented),
+                     "an endpoint presenting after a fallback reason keeps that reason")
+        precondition(frames.currentInterpolationState() == "处理超预算，暂用原始帧率",
+                     "the fallback reason survives the late endpoint")
+        // The endpoint's own later time is not evidence: using it is the defect this covers, and it
+        // is why the presented-pair entry point takes the midpoint instead.
+        precondition(frames.publishInterpolationRunning(forced: false, evidence: endpointPresented),
+                     "the endpoint's later time is not presentation evidence, so it must not be used as such")
+        print("PASS presented-pair evidence: the endpoint reports the midpoint's presentation, so a fallback reason survives it")
     }
 
     private static func testOldPictureSettingsJSON() {
@@ -515,6 +627,9 @@ struct CaptureCompatibilityTests {
         }
         testPresentationIntervalsAndDuplicateSkips()
         testSourceSwitchClearingAndCaptionEvidence()
+        testSourceIsolationInterleavings()
+        testIngestTokenRefusesSupersededStream()
+        testPresentedPairEvidenceUsesMidpoint()
         testOldPictureSettingsJSON()
         testInterpolationHistory()
         testStableSourceFrameRatesAndResets()

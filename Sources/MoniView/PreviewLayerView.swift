@@ -241,6 +241,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var lastRaiseAt = 0.0
     private var lastRaisedToLongEdge: Int?
     private var blockedRaiseTarget: Int?
+    /// Measured overload reduces spatial work before dropping interpolation. Nil preserves
+    /// the selected target; 1.25 and 1.0 are bounded fallbacks, reset with the configuration.
+    private var interpolationSpatialScale: Double?
 
     init(frames: LatestVideoFrame) {
         self.frames = frames
@@ -322,6 +325,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // generated has reached the display for this configuration yet.
             frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
+            interpolationSpatialScale = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -444,6 +448,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
+        interpolationSpatialScale = nil
         // A blank registration belongs to the input that was replaced: its next confirm, failure or
         // timeout must not rebuild the layer the new stream is drawing into.
         clearBlankTracking()
@@ -486,6 +491,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
+        interpolationSpatialScale = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
         // The step belongs to the pair that published it. A display change resets the cadence
         // window and the cost history, so leaving the last step in place would let the panel
@@ -846,7 +852,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             return true
         }()
         // Recover exact source identities even while a multi-phase pair drains.
-        if queuedImage == nil {
+        // A queued endpoint already carries the pair's first-copy PTS and uniqueness.
+        // Reclassifying it against a newer mailbox loses that reference when inference
+        // takes longer than a capture tick, and the next pair uses an older picture.
+        if queuedImage == nil && endpointPresentation == nil {
             let cadencePair = frames.interpolationPair(sequence: sequence)
             let isExactDuplicate = cadencePair.flatMap {
                 isDuplicatePair(previous: $0.0, current: buffer, sequence: sequence,
@@ -895,8 +904,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // spatial pipeline here saves GPU for midpoint quality on the unique frames.
         if interpolationRequested, !sourceIsUniqueContent, !forced, !skipInterpolation, endpointPresentation == nil,
            queuedFrames.isEmpty, CACurrentMediaTime() >= cooldownUntil,
-           let duplicatePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == duplicatePair.1,
-           isDuplicatePair(previous: duplicatePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch) {
+           let previous = lastUniqueSource, previous.streamEpoch == streamEpoch,
+           isDuplicatePair(previous: previous.buffer, current: buffer, sequence: sequence,
+                           previousSequence: previous.sequence, streamEpoch: streamEpoch) {
             frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch)
             lastSourceSequence = sequence
             lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode)
@@ -986,8 +996,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         subsequentPresentation: subsequentCost,
                         sourceEndpoint: sourceCost ?? 0,
                         phases: phaseFractions, pairPeriod: pair.period)
-                    let earliest = CACurrentMediaTime() + (generationCost ?? 0.002) + slot * 0.1
                     let displaySlot = displayFPS > 0 ? 1 / displayFPS : slot
+                    // VT inference has completion jitter outside the GPU timestamps. Give
+                    // its expensive tier one refresh of lead; keep the cheap flow path tight.
+                    let lead = settings.frameInterpolation == .quality && pair.period >= 0.025
+                        ? displaySlot : slot * 0.1
+                    let earliest = CACurrentMediaTime() + (generationCost ?? 0.002) + lead
                     let nextPairSlot = scheduledSourceUntil + slot
                     let target = nextPairSlot >= earliest ? nextPairSlot :
                         displayTargetTime + max(0, ceil((earliest - displayTargetTime) / displaySlot)) * displaySlot
@@ -1104,19 +1118,18 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // This is backing-store size; scaled display modes can differ from native panel pixels.
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
         let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
-        let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
-        // Every generated midpoint uses its measured working size and one final resize.
-        // Otherwise a reduced midpoint can fall through the >3x spatial wrapper
-        // guard into expensive Lanczos, undoing the purpose of the lighter tier.
-        // A generated midpoint is a blended frame: it carries less real detail than a
-        // source frame by construction, so running it through the full spatial enlargement
-        // spends the biggest part of the pair budget on pixels the blend cannot justify.
-        // Measured on this Mac at Match Display, the sharp tier's 1080p midpoint plus the
-        // full enlargement to 3024x1701 cost about 36-40 ms against a 30 ms pair budget:
-        // every pair missed its slot and the output visibly stuttered. The lightweight
-        // final resize brings the same path to about 18 ms, which is what lets a 30->60
-        // pair hold its slot on all tiers. Source endpoints keep the full pipeline, so
-        // every frame that carries real detail is still enlarged at full quality.
+        var targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
+        // Apply a measured spatial limit consistently to pair endpoints and native
+        // fallbacks. Alternating full-size fallbacks with capped endpoints contaminated
+        // the cost history and repeatedly re-triggered cooldown. Interpolation off keeps
+        // the requested target; the advertised midpoint working size never changes.
+        let requestedSpatialScale = max(1, targetLongEdge / sourceLongEdge)
+        let canReduceSpatial = interpolationRequested && requestedSpatialScale > 1.01
+        if interpolationRequested, let cap = interpolationSpatialScale {
+            targetLongEdge = min(targetLongEdge, (sourceLongEdge * cap).rounded())
+        }
+        // Generated frames use their inference size plus a final resize. Source frames
+        // retain the selected spatial engine at the current measured spatial limit.
         let smoothMidpoint = generatedMidpoint
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
@@ -1422,7 +1435,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         phases: phasesForCost, pairPeriod: costPairPeriod)
                     let individualLimit = measuredSlot * (wasGenerationBatch
                         ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
-                    if !succeeded || (!expectedSettings.forceFrameInterpolation && !warming && (wasGenerationBatch || wasMidpoint || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
+                    // Force keeps trying but must still adapt successful, over-budget
+                    // work. It cannot remove a GPU error or an actual display deadline.
+                    if !succeeded || (!warming && (wasGenerationBatch || wasMidpoint || wasEndpoint) && measuredSlot > 0 && ((measuredCost ?? 0) > individualLimit || pairOverBudget)) {
                         // A successful midpoint already owns a fixed endpoint. Complete
                         // that pair even when its measured cost disables the NEXT pair.
                         // GPU errors invalidate the pair; age/epoch guards still apply.
@@ -1434,20 +1449,25 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         // A successful but over-budget endpoint does not erase recent
                         // activity. Without another successful pair its TTL expires.
-                        let lower = measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
-                        // A tier that keeps missing its budget steps its inference size down so
-                        // the pair fits the slot again. Quality used to keep its advertised 1080p
-                        // cap and only retry after a cooldown, which on a source whose 1080p
-                        // midpoint costs more than the slot meant every pair ran at the deadline:
-                        // the output looked stuttery and the caption only ever said the tier was
-                        // over budget. Stepping down is the same measured response the cheaper
-                        // tiers use, and recordComfortablePresentedPair still raises it back once
-                        // steady pairs prove the smaller size is comfortable.
-                        if succeeded, let lower,
-                           expectedSettings.frameInterpolation == .efficient
-                           || expectedSettings.frameInterpolation == .quality {
+                        // High/Medium keep their advertised inference resolution. Spatial
+                        // work is the first lever; only Low may lower inference resolution.
+                        let lower = expectedSettings.frameInterpolation == .efficient
+                            ? measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
+                            : nil
+                        let spatialScale = self.interpolationSpatialScale ?? requestedSpatialScale
+                        let forcedContinuation = succeeded && expectedSettings.forceFrameInterpolation
+                            && lower == nil && (!canReduceSpatial || spatialScale <= 1.01)
+                        if succeeded, canReduceSpatial, spatialScale > 1.01 {
+                            self.interpolationSpatialScale = spatialScale > 1.25 ? 1.25 : 1.0
+                            self.cooldownUntil = CACurrentMediaTime() + 0.1
+                        } else if succeeded, let lower {
                             self.adaptiveLongEdge = lower
                             self.cooldownUntil = CACurrentMediaTime() + 0.1
+                        } else if forcedContinuation {
+                            // Force keeps trying once all quality-preserving levers are spent.
+                            // Retain measurements for deadline planning instead of repeatedly
+                            // pausing two seconds and recalibrating successful commands.
+                            self.cooldownUntil = 0
                         } else {
                             self.cooldownUntil = CACurrentMediaTime() + FrameInterpolationPolicy.overloadCooldownSeconds
                         }
@@ -1462,14 +1482,21 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // Clearing only the midpoint side left stale native samples driving
                         // the schedule, which kept rejecting pairs and so never produced a
                         // fresh sample to replace them.
-                        self.generationBatchCosts.removeAll(); self.generatedPresentationCosts.removeAll(); self.nativeCosts.removeAll()
-                        self.generationBatchGPUCosts.removeAll()
-                        self.calibrationWarmupsRemaining = 2
+                        if !forcedContinuation {
+                            self.generationBatchCosts.removeAll(); self.generatedPresentationCosts.removeAll(); self.nativeCosts.removeAll()
+                            self.generationBatchGPUCosts.removeAll()
+                            self.calibrationWarmupsRemaining = 2
+                        }
                         self.comfortableMidpoints = 0
                         #if MONIVIEW_PREVIEW_TESTING
                         self.trace("COST fail seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) endpoint=\(wasEndpoint) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
                         #endif
-                        frameStore.setInterpolationState(self.cooldownReason ?? (expectedSettings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率"))
+                        let overloadState = expectedSettings.frameInterpolation == .quality ? "清晰档超预算，保留原始画面" : "处理超预算，暂用原始帧率"
+                        if forcedContinuation {
+                            self.publishCaption(preparing: overloadState)
+                        } else {
+                            frameStore.setInterpolationState(self.cooldownReason ?? overloadState)
+                        }
                     }
                 }
                 if !succeeded && self.awaitingSourcePresentation?.sequence == frameSequence {
