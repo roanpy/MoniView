@@ -152,6 +152,10 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var streamGeneration: UInt64?
     private var generation: UInt64 = 0
     private var configuredSize = CGSize.zero
+    /// Ingest token issued by the client for the stream this adapter currently serves. Nil while
+    /// no stream is installed, so a frame from a stopped stream can never be handed over as one
+    /// belonging to the current input.
+    private var frameIngestToken: UInt64?
     /// Set once startCapture() returned, so the configured size is known.
     private var startInstalled = false
     /// Set when the current stream delivered a complete frame. Frames can arrive while
@@ -206,7 +210,11 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    func start(windowID: UInt32) {
+    /// Starts a stream for a window. The ingest token belongs to this stream: it is handed to the
+    /// frame sink with every frame, and the client's mailbox refuses a frame whose token is no
+    /// longer the current one, which is what keeps a replaced window's frame out of a preview that
+    /// the switch already cleared.
+    func start(windowID: UInt32, ingestToken: UInt64) {
         stateLock.lock()
         generation &+= 1
         let expected = generation
@@ -214,6 +222,7 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = nil
         streamGeneration = nil
         configuredSize = .zero
+        frameIngestToken = ingestToken
         startInstalled = false
         deliveredPicture = false
         stateValue = .starting
@@ -236,6 +245,7 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = nil
         streamGeneration = nil
         configuredSize = .zero
+        frameIngestToken = nil
         startInstalled = false
         deliveredPicture = false
         stateValue = .stopped
@@ -470,15 +480,22 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         promoteToRunning(matching: stream)
     }
 
-    /// True when a frame carrying this stream generation still belongs to the stream this
-    /// adapter serves. It lets a client drop a frame that passed the callback check just before
-    /// a stop or restart and was delivered just after it, instead of letting the previous
-    /// window refill a preview that was already cleared.
-    func acceptsFrame(generation frameGeneration: UInt64) -> Bool {
+    /// The ingest token issued for the stream that produced a frame, or nil when this adapter no
+    /// longer serves that stream. The client passes the token to its mailbox, which refuses a
+    /// token it did not issue for the current input, so a frame that passed this adapter's check
+    /// just before a stop, restart or source switch cannot refill a preview that was cleared after
+    /// it.
+    func ingestToken(forGeneration frameGeneration: UInt64) -> UInt64? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard acceptsDeliveryLocked() else { return false }
-        return streamGeneration == frameGeneration
+        guard acceptsDeliveryLocked(), streamGeneration == frameGeneration else { return nil }
+        return frameIngestToken
+    }
+
+    /// True when a frame carrying this stream generation still belongs to the stream this
+    /// adapter serves.
+    func acceptsFrame(generation frameGeneration: UInt64) -> Bool {
+        ingestToken(forGeneration: frameGeneration) != nil
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

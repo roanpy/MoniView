@@ -17,6 +17,44 @@ enum CaptureSourceKind: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
 }
 
+/// Serializes which source owns the preview with the ingest of its frames.
+///
+/// A switch publishes the new owner, clears the mailbox and starts the new input in one critical
+/// section; every frame is written in another. A frame from a source that lost the preview is
+/// therefore refused instead of being stored and retracted afterwards, and a frame stored before
+/// the switch is cleared by it. Checking, writing and then reverting left a window in which the
+/// wrong frame was already renderable and pairable while the retraction could no longer stop a
+/// draw that had already been submitted.
+final class PreviewIngestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var owner: CaptureSourceKind = .device
+
+    /// Runs the body while the expected source owns the preview, atomically with respect to a
+    /// switch. Returns nil when another source owns it, so the caller writes nothing at all.
+    func run<Value>(forOwner expected: CaptureSourceKind, _ body: () -> Value) -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard owner == expected else { return nil }
+        return body()
+    }
+
+    /// Publishes a new owner and runs the switch body in the same critical section, so no frame
+    /// can be ingested between the two.
+    @discardableResult
+    func switchOwner<Value>(to newOwner: CaptureSourceKind, _ body: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        owner = newOwner
+        return body()
+    }
+
+    /// The owner, read atomically. For queries and reporting only; frame ingest uses run(forOwner:).
+    var currentOwner: CaptureSourceKind {
+        lock.lock(); defer { lock.unlock() }
+        return owner
+    }
+}
+
 struct CaptureFormatOption: Identifiable, Hashable {
     let id: Int
     let width: Int
@@ -196,6 +234,11 @@ final class LatestVideoFrame {
     private var lastGeneratedPresentationAt: TimeInterval?
     /// Stream epoch a pending blank-preview request belongs to. See clear(blankPreview:).
     private var blankRequestEpoch: UInt64?
+    /// Authorization for frames that may enter the mailbox. Starting a new input advances it, so a
+    /// frame produced by the stream that lost the preview cannot be written afterwards: the check
+    /// and the write share this lock instead of being a check-write-retract sequence whose middle
+    /// a source switch can interleave.
+    private var ingestToken: UInt64 = 0
     private var interpolationCostMS = 0.0
     private var interpolationBudgetMS = 0.0
     private var interpolationWorkingSize: String?
@@ -218,12 +261,33 @@ final class LatestVideoFrame {
     private var timings: [Double] = []
     private var gpuTimings: [Double] = []
 
-    /// Stores the newest frame and returns the sequence number it was stored under. The number
-    /// identifies the frame for discardFrame(sequence:), which a client uses when the frame
-    /// turns out to belong to a source that lost the preview while it was being written.
+    /// Stores the newest frame and returns the sequence number it was stored under.
     @discardableResult
     func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid, formatDescription: CMFormatDescription? = nil) -> UInt64 {
         lock.lock()
+        let stored = storeLocked(pixelBuffer, pts: pts, formatDescription: formatDescription)
+        lock.unlock()
+        publish(pixelBuffer, pts: pts, stored: stored)
+        return stored.sequence
+    }
+    /// Stores a frame only while the token is the one this mailbox issued for the current input.
+    /// Returns nil when the frame is refused. The ownership decision and the write happen under
+    /// the same lock, so a frame produced by a stream that lost the preview is refused here
+    /// instead of being stored first and retracted after the switch: a draw can no longer pick up
+    /// an old source's frame in the window between the check and the retraction.
+    @discardableResult
+    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid,
+             formatDescription: CMFormatDescription? = nil, token: UInt64) -> UInt64? {
+        lock.lock()
+        guard token == ingestToken else { lock.unlock(); return nil }
+        let stored = storeLocked(pixelBuffer, pts: pts, formatDescription: formatDescription)
+        lock.unlock()
+        publish(pixelBuffer, pts: pts, stored: stored)
+        return stored.sequence
+    }
+    /// Caller holds the lock. Applies the frame to the mailbox state.
+    private func storeLocked(_ pixelBuffer: CVPixelBuffer, pts: CMTime,
+                             formatDescription: CMFormatDescription?) -> (sequence: UInt64, epoch: UInt64, notify: (() -> Void)?) {
         let sameSize = buffer.map { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pixelBuffer) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pixelBuffer) } ?? false
         let interval = CMTimeGetSeconds(CMTimeSubtract(pts, self.pts))
         if sameSize, self.pts.isNumeric, pts.isNumeric, interval.isFinite, interval >= 1 / 240.0, interval <= 0.1 {
@@ -247,35 +311,14 @@ final class LatestVideoFrame {
         receivedAt = DispatchTime.now().uptimeNanoseconds
         sequence &+= 1
         captured += 1
-        let callback = frameHandler
-        let inputSequence = sequence
-        let inputEpoch = streamEpoch
-        lock.unlock()
-        inputContentCadence.submit(pixelBuffer, presentationTime: pts,
-                                   sequence: inputSequence, streamEpoch: inputEpoch)
-        callback?()
-        return inputSequence
+        return (sequence, streamEpoch, frameHandler)
     }
-    /// Removes a frame the mailbox just accepted, when it turned out to belong to a superseded
-    /// source, and re-arms the blank that source switch requested. Only the frame carrying this
-    /// sequence is removed, so a newer frame that arrived meanwhile is kept.
-    func discardFrame(sequence expected: UInt64) {
-        lock.lock()
-        guard sequence == expected else { lock.unlock(); return }
-        buffer = nil
-        formatDescription = nil
-        previous = nil
-        pts = .invalid
-        sequence &+= 1
-        sourceIntervals.removeAll(keepingCapacity: true)
-        lastGeneratedPresentationAt = nil
-        inputContentCadence.reset(streamEpoch: streamEpoch)
-        // A switch owns the preview again: the blank it requested must be restored, and it must
-        // be valid for the current stream epoch in case the discarded frame advanced it.
-        blankRequestEpoch = streamEpoch
-        let callback = frameHandler
-        lock.unlock()
-        callback?()
+    /// Publishes a stored frame to the cadence monitor and the renderer.
+    private func publish(_ pixelBuffer: CVPixelBuffer, pts: CMTime,
+                         stored: (sequence: UInt64, epoch: UInt64, notify: (() -> Void)?)) {
+        inputContentCadence.submit(pixelBuffer, presentationTime: pts,
+                                   sequence: stored.sequence, streamEpoch: stored.epoch)
+        stored.notify?()
     }
     /// Input-side measurement remains valid when rendering skips or pauses drawing.
     func inputContentCadenceSnapshot() -> InputContentCadenceSnapshot? {
@@ -460,6 +503,15 @@ final class LatestVideoFrame {
         interpolationState = forced ? "强制插帧运行中" : "插帧运行中"
         return true
     }
+    /// Publishes the running caption for a pair whose midpoint reached the display, and returns
+    /// whether it was published. The evidence is that generated midpoint, never the later source
+    /// endpoint: an endpoint that presents after a fallback reason does not prove the engine
+    /// generated anything since the reason was stated, so the pair may only re-announce running
+    /// from the midpoint's own presentation time.
+    @discardableResult
+    func publishRunningForPresentedPair(forced: Bool, midpointPresentedAt midpointTime: TimeInterval) -> Bool {
+        publishInterpolationRunning(forced: forced, evidence: midpointTime)
+    }
     /// True while the renderer still owes a blank frame for the most recent source switch.
     var isBlankRequestPending: Bool { lock.lock(); defer { lock.unlock() }; return blankRequestEpoch != nil }
     /// Takes the pending blank request and reports the stream epoch it belongs to. Nil means
@@ -475,18 +527,48 @@ final class LatestVideoFrame {
         return requestedEpoch
     }
     /// Puts a blank request back after the drawable could not be cleared, so the next render
-    /// retries it. A request that no longer belongs to the current stream is dropped: a late
+    /// retries it. Returns false when the request no longer belongs to the current input: a late
     /// callback from a superseded source must not open a blank on the new one.
-    func rearmBlankRequest(epoch: UInt64) {
+    @discardableResult
+    func rearmBlankRequest(epoch: UInt64) -> Bool {
         lock.lock()
-        if epoch == streamEpoch, buffer == nil { blankRequestEpoch = epoch }
-        lock.unlock()
+        defer { lock.unlock() }
+        guard epoch == streamEpoch, buffer == nil else { return false }
+        blankRequestEpoch = epoch
+        return true
+    }
+    /// True while a blank for this input epoch is still the right thing to draw: the epoch is the
+    /// current one and no frame has taken the mailbox over. A blank registration for an epoch that
+    /// a newer stream replaced must not be retried or retired, because that would disturb the
+    /// preview which already moved on.
+    func isBlankStillNeeded(forEpoch epoch: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return epoch == streamEpoch && buffer == nil
     }
     /// Clears the mailbox. blankPreview additionally asks the renderer to blank the drawable,
     /// because the last presented frame would otherwise stay on screen while the new source
     /// has not delivered anything.
     func clear(blankPreview: Bool = false) {
         lock.lock()
+        let callback = clearLocked(blankPreview: blankPreview)
+        lock.unlock()
+        callback?()
+    }
+    /// Starts a new input: invalidates every token issued to the previous one, clears the mailbox
+    /// and returns the token the new input must present. Issued and cleared in one critical
+    /// section, so a frame carrying the old token can never land after the clear.
+    @discardableResult
+    func beginInput(blankPreview: Bool) -> UInt64 {
+        lock.lock()
+        ingestToken &+= 1
+        let token = ingestToken
+        let callback = clearLocked(blankPreview: blankPreview)
+        lock.unlock()
+        callback?()
+        return token
+    }
+    /// Caller holds the lock. Returns the frame handler to notify after unlocking.
+    private func clearLocked(blankPreview: Bool) -> (() -> Void)? {
         buffer = nil
         formatDescription = nil
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
@@ -499,10 +581,8 @@ final class LatestVideoFrame {
         blankRequestEpoch = blankPreview ? streamEpoch : nil
         inputContentCadence.reset(streamEpoch: streamEpoch)
         level = 0; lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
-        let callback = blankPreview ? frameHandler : nil
-        lock.unlock()
-        // Request the blanking draw now: nothing else would ask for one until a frame arrives.
-        callback?()
+        // The blanking draw is requested now: nothing else would ask for one until a frame arrives.
+        return blankPreview ? frameHandler : nil
     }
     func markRendered(receivedAt: UInt64, gpuMS: Double) {
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - receivedAt) / 1_000_000
@@ -722,19 +802,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var macWindowCapture: MacWindowCapture?
     /// Set while a Mac-window session owns the preview, so device paths stay inactive.
     private var isMacWindowSourceActive = false
-    /// Which source owns the preview, mirrored under a lock for the capture callbacks that run
-    /// on their own queues. A source switch clears the mailbox and requests a blank; a frame the
-    /// previous source already pushed into its own queue must not refill the mailbox or cancel
-    /// that blank.
-    private let previewOwnerLock = NSLock()
-    private var previewOwner: CaptureSourceKind = .device
-    private var previewOwnerKind: CaptureSourceKind {
-        previewOwnerLock.lock(); defer { previewOwnerLock.unlock() }
-        return previewOwner
-    }
-    private func publishPreviewOwner(_ kind: CaptureSourceKind) {
-        previewOwnerLock.lock(); previewOwner = kind; previewOwnerLock.unlock()
-    }
+    /// Serializes the preview's owner with the ingest of capture frames. Capture callbacks run on
+    /// their own queues, so a frame the previous source already pushed must be refused rather than
+    /// written after the switch cleared the mailbox. See PreviewIngestGate.
+    private let ingestGate = PreviewIngestGate()
     /// Main-queue mirror of ScreenCaptureKit state; starting alone is not recordable.
     private var macWindowCaptureIsRunning = false
     private var configuredMacWindowSize = CGSize.zero
@@ -815,11 +886,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     /// Apply the stored source choice. Only one source may own the preview.
     private func applySourceKind() {
-        // Published before any teardown so a capture callback that is already in flight sees the
-        // new owner and drops its frame instead of refilling the mailbox this switch clears.
-        publishPreviewOwner(sourceKind)
         switch sourceKind {
         case .device:
+            // Published before any teardown so a capture callback that is already in flight sees
+            // the new owner and drops its frame instead of refilling the mailbox this clears.
+            beginPreviewInput(owner: .device)
             stopMacWindowCapture()
             selectedVideoID = selectedVideoID ?? UserDefaults.standard.string(forKey: "device.lastVideo")
             selectVideoDevice(id: selectedVideoID)
@@ -834,7 +905,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // rather than only in restartMacWindowCapture() also covers enumeration that fails
             // or returns no window at all: those paths never reach a restart, and the device
             // picture and its pair readout would otherwise stay on screen behind the mask.
-            frames.clear(blankPreview: true)
+            beginPreviewInput(owner: .macWindow)
             frames.setInterpolationState(L10n.text("等待窗口画面"))
             videoConfiguration.advance()
             sessionQueue.async { [weak self] in
@@ -851,6 +922,16 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             refreshAudioDevices()
             refreshMacWindows()
         }
+    }
+
+    /// Starts a new preview input: publishes the owner and clears the mailbox with a fresh ingest
+    /// token in one critical section, so no capture callback can write between the two and no
+    /// frame carrying the previous token can land after the clear. Returns the token the new input
+    /// must present. The device path relies on the owner gate instead, because an AVFoundation
+    /// frame carries no producer identity to compare against.
+    @discardableResult
+    private func beginPreviewInput(owner: CaptureSourceKind, blankPreview: Bool = true) -> UInt64 {
+        ingestGate.switchOwner(to: owner) { frames.beginInput(blankPreview: blankPreview) }
     }
 
     func refreshMacWindows() {
@@ -910,16 +991,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         macWindowCaptureIsRunning = false
         configuredMacWindowSize = .zero
         isRunning = false
-        // A new window source owns the preview only once it delivers a picture. Until then
-        // the previous source's frame, pair pairings and readouts must not stay visible, or
-        // the preview contradicts the waiting mask.
-        frames.clear(blankPreview: true)
+        // A new window source owns the preview only once it delivers a picture. The token issued
+        // here invalidates the stream being replaced, and the clear inside it drops the frame, pair
+        // and readout of the previous source, so neither an in-flight frame from the old window nor
+        // the old picture itself can follow this switch.
+        let ingestToken = beginPreviewInput(owner: .macWindow)
         frames.setInterpolationState(L10n.text("等待窗口画面"))
         // The window stream replaces any device stream in the same preview pipeline.
         #if MONIVIEW_CAPTURE_TESTING
         windowCaptureStartCountForTesting += 1
         #endif
-        capture.start(windowID: windowID)
+        capture.start(windowID: windowID, ingestToken: ingestToken)
         let option = macWindowOptions.first { $0.id == windowID }
         deviceName = option.map { $0.title.isEmpty ? $0.applicationName : $0.title } ?? L10n.text("Mac 窗口")
         resolution = option.map { "\($0.width) × \($0.height)" } ?? "—"
@@ -931,25 +1013,19 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         selectedFPS = 0
     }
 
-    /// Window frames arrive on the ScreenCaptureKit callback queue. A frame is ingested only
-    /// while the adapter still serves the stream that produced it: a source switch clears the
-    /// mailbox and requests a blank, and a frame that passed the adapter's check just before
-    /// that switch must not refill the mailbox, cancel the blank or put the previous window
-    /// back on screen.
+    /// Window frames arrive on the ScreenCaptureKit callback queue. The adapter hands over the
+    /// token issued for the stream that produced the frame, and the mailbox accepts the frame only
+    /// while that token is still the current one. A source switch or a new window issued a newer
+    /// token, so an in-flight frame from the previous window is refused inside the mailbox instead
+    /// of being stored and retracted after it could already be drawn or paired.
     private func ingestMacWindowFrame(_ sample: CMSampleBuffer, generation: UInt64, from source: MacWindowCapture) {
         guard let buffer = CMSampleBufferGetImageBuffer(sample),
-              source.acceptsFrame(generation: generation) else { return }
+              let token = source.ingestToken(forGeneration: generation) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         // Same handoff as the capture-device path: the preview keeps only the newest buffer and
         // the recorder receives the original sample buffer.
-        let sequence = frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample))
-        // The switch can land between the check above and this write. The frame then belongs to
-        // a source that no longer owns the preview, so the mailbox drops it again and the blank
-        // the switch requested is restored.
-        guard source.acceptsFrame(generation: generation) else {
-            frames.discardFrame(sequence: sequence)
-            return
-        }
+        guard frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample),
+                         token: token) != nil else { return }
         recorder.append(sample, video: true)
     }
 
@@ -980,7 +1056,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             configuredMacWindowSize = .zero
             macWindowStatus = message
             isRunning = false
-            frames.clear(blankPreview: true)
+            // One critical section with the ingest, so a frame the failed stream still had in
+            // flight cannot land after this clear.
+            ingestGate.switchOwner(to: .macWindow) { frames.clear(blankPreview: true) }
             frames.setInterpolationState(L10n.text("等待窗口画面"))
             // A closed window is expected during normal use; refresh the list instead
             // of leaving a dead preview. Finalize an active file before enumerating again.
@@ -1010,7 +1088,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // under a mask that says there is nothing to show. A switch to the device source blanks
         // through selectVideoDevice() instead, which owns the preview by then.
         if sourceKind == .macWindow {
-            frames.clear(blankPreview: true)
+            // A fresh token also refuses the frames the stopped stream still has in flight.
+            beginPreviewInput(owner: .macWindow)
             frames.setInterpolationState(L10n.text("等待窗口画面"))
         }
     }
@@ -1114,10 +1193,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         resetContentRateObservation()
         let generation = videoConfiguration.advance()
         if let id { UserDefaults.standard.set(id, forKey: "device.lastVideo") }
-        // The previous device's picture must not stay on screen while the new device has
-        // not delivered its first frame; the waiting overlay alone left the stale drawable
-        // visible behind a translucent mask.
-        frames.clear(blankPreview: true)
+        // The previous device's picture must not stay on screen while the new device has not
+        // delivered its first frame; the waiting overlay alone left the stale drawable visible
+        // behind a translucent mask.
+        beginPreviewInput(owner: .device)
         let device = Self.devices(.video).first { $0.uniqueID == id }
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -1149,13 +1228,15 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.reconcileCaptureSessionRunning()
                     if previousDeviceID != id {
                         // The previous device stops delivering only once this configuration
-                        // commits. A frame already in flight could have refilled the mailbox
-                        // after the switch cleared it, so the clear is re-asserted now that the
-                        // old input is gone; the switch's blank stays requested until a frame
-                        // for the new device arrives.
+                        // commits, and the owner is still the device, so a frame already queued
+                        // for the old input would pass the ingest check. The queue is drained
+                        // here and the mailbox cleared afterwards, so none of those frames can
+                        // survive the switch; the blank stays requested until a frame from the
+                        // new device arrives.
+                        self.videoQueue.sync {}
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.videoConfiguration.isCurrent(generation), self.sourceKind == .device else { return }
-                            self.frames.clear(blankPreview: true)
+                            self.ingestGate.switchOwner(to: .device) { self.frames.clear(blankPreview: true) }
                         }
                     }
                     // The session negotiates its own preset format at commit/start, and a format
@@ -1827,21 +1908,23 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         stopRecording()
     }
 
+    /// Stores a device frame only while the device still owns the preview. The ownership check and
+    /// the write are one critical section with the switch that publishes the new owner and clears
+    /// the mailbox, so a frame from a card that lost the preview is refused instead of being
+    /// stored first and retracted after a draw could already have used it.
+    @discardableResult
+    func ingestDeviceFrame(_ sampleBuffer: CMSampleBuffer, buffer: CVPixelBuffer) -> Bool {
+        ingestGate.run(forOwner: .device) {
+            _ = frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                           formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
+            recorder.append(sampleBuffer, video: true)
+            return true
+        } ?? false
+    }
+
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            // Only the source that owns the preview may write into the mailbox. A switch to the
-            // window source removes the device input asynchronously, so the session can deliver
-            // one more frame; it must not refill the cleared mailbox, cancel the switch's blank
-            // or put the card's picture back on screen.
-            guard previewOwnerKind == .device else { return }
-            let sequence = frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
-            // The switch can land between that check and this write, in which case the frame
-            // belongs to the source that lost the preview.
-            guard previewOwnerKind == .device else {
-                frames.discardFrame(sequence: sequence)
-                return
-            }
-            recorder.append(sampleBuffer, video: true)
+            ingestDeviceFrame(sampleBuffer, buffer: buffer)
         } else if output === audioOutput {
             #if MONIVIEW_CAPTURE_TESTING
             audioSampleObserverForTesting?(sampleBuffer)

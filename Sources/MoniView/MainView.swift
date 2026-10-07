@@ -612,7 +612,8 @@ struct MainView: View {
 
             settingsToggle("低延迟模式", isOn: $capture.picture.lowLatency)
                 .help(L10n.text("按实际显示尺寸处理，优先保持实时帧率；目标是放大上限。"))
-            labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f")
+            labeledSlider("增强强度", value: $capture.picture.enhancementStrength, range: 0...1, format: "%.2f",
+                          fieldWidth: enhancementFieldWidth)
             labeledPicker("放大方式", selection: Binding(
                 get: { capture.picture.upscaleMethod.availableMethod(aiSupported: AIUpscalerSupport.isSupported && capture.picture.frameInterpolation == .off) },
                 set: { capture.picture.upscaleMethod = $0 }),
@@ -952,12 +953,16 @@ struct MainView: View {
                 ProgressView(value: audioLevelValue)
                     .progressViewStyle(.linear)
                     .tint(Color(hex: 0xec8718))
-                    .frame(width: 54)
+                    // Fixed width: the percentage label beside it changes between one and three
+                    // glyphs, and a flexible bar was re-laid-out with it, so the meter visibly
+                    // grew and shrank once per second.
+                    .frame(width: 54, alignment: .leading)
                     .accessibilityLabel(L10n.text("电平"))
                     .accessibilityValue("\(Int(audioLevelValue * 100))%")
                 Text("\(Int(audioLevelValue * 100))%")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color(hex: 0xaaa199))
+                    .frame(width: 26, alignment: .trailing)
             }
         }
         .padding(.vertical, 2)
@@ -978,20 +983,35 @@ struct MainView: View {
         .foregroundStyle(Color(hex: 0xf3ece5))
     }
 
-    private func labeledSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, format: String) -> some View {
+    /// Width of the picker fields in this panel. A slider given this field width puts its track
+    /// on exactly the same column as the pickers beneath it, so those rows share one right edge
+    /// instead of the track running wider than every box below it.
+    private var enhancementFieldWidth: CGFloat { 170 }
+
+    /// A labelled slider. The default form runs the track to the panel edge, which suits a
+    /// column of sliders such as the colour panel. Passing a field width instead right-aligns
+    /// the whole caption-value-track group onto the picker column beneath it.
+    private func labeledSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+                               format: String, fieldWidth: CGFloat? = nil) -> some View {
         HStack(spacing: 9) {
             Text(L10n.text(title))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color(hex: 0xc8bfb7))
                 .frame(width: Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true ? 58 : 96, alignment: .leading)
+            if fieldWidth != nil { Spacer(minLength: 8) }
             Text(String(format: format, value.wrappedValue))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(Color(hex: 0xaaa199))
                 .frame(width: 42, alignment: .trailing)
-            Slider(value: value, in: range)
+            let track = Slider(value: value, in: range)
                 .tint(Color(hex: 0xec8718))
                 .accessibilityLabel(L10n.text(title))
                 .accessibilityValue(String(format: format, value.wrappedValue))
+            if let fieldWidth {
+                track.frame(width: fieldWidth)
+            } else {
+                track
+            }
         }
     }
 

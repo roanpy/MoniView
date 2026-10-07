@@ -138,6 +138,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private(set) var drawableWaitMS: [Double] = []
     private(set) var displayTickTimes: [Double] = []
     var suppressPresentedCallbacks = false // failure injection, absent from production builds
+    /// Failure injection for the clearing draw alone, so a test can lose its presentation callback
+    /// while the frame path stays healthy. Absent from production builds.
+    var suppressBlankPresentedCallbacks = false
     #endif
     #if MONIVIEW_PREVIEW_TESTING
     private func trace(_ value: String) { if ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" { print(value) } }
@@ -153,6 +156,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var blankRetryScheduled = false
     /// How long a submitted blank may wait for its presentation callback before it is retried.
     private static let blankPresentationDeadline: Double = 0.25
+    /// Clearing attempts allowed before the layer is retired through the presentation-recovery
+    /// path. Bounds both a repeated GPU failure and a repeatedly lost presentation callback.
+    private static let maximumBlankPresentationAttempts = 2
     /// Compares the fields that decide whether an already-scheduled frame pair is still
     /// valid. Colour and sharpness are deliberately excluded: they change what the
     /// endpoint looks like, not when it presents, so switching a preset must not cancel a
@@ -438,6 +444,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
+        // A blank registration belongs to the input that was replaced: its next confirm, failure or
+        // timeout must not rebuild the layer the new stream is drawing into.
+        clearBlankTracking()
         queuedFrames.removeAll(); presentedMidpoint = nil; lastSourceSequence = nil
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
         frames.setActiveMultiplier(nil)
@@ -1096,16 +1105,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
         let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
         let targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
-        // Smooth midpoints use their measured working size and one final resize.
+        // Every generated midpoint uses its measured working size and one final resize.
         // Otherwise a reduced midpoint can fall through the >3x spatial wrapper
         // guard into expensive Lanczos, undoing the purpose of the lighter tier.
         // A generated midpoint is a blended frame: it carries less real detail than a
-        // source frame by construction. Running it through the full spatial enlargement
-        // therefore spends the biggest part of the pair budget on pixels the blend cannot
-        // justify. Both cheap tiers keep the lightweight final resize instead, which is
-        // what lets 30->60 hold its slot; only the explicitly sharp tier scales a midpoint.
+        // source frame by construction, so running it through the full spatial enlargement
+        // spends the biggest part of the pair budget on pixels the blend cannot justify.
+        // Measured on this Mac at Match Display, the sharp tier's 1080p midpoint plus the
+        // full enlargement to 3024x1701 cost about 36-40 ms against a 30 ms pair budget:
+        // every pair missed its slot and the output visibly stuttered. The lightweight
+        // final resize brings the same path to about 18 ms, which is what lets a 30->60
+        // pair hold its slot on all tiers. Source endpoints keep the full pipeline, so
+        // every frame that carries real detail is still enlarged at full quality.
         let smoothMidpoint = generatedMidpoint
-            && (settings.frameInterpolation == .efficient || settings.frameInterpolation == .flowBlend)
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
@@ -1226,6 +1238,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     if accepted, generationIsCurrent {
                         presentedFrameStore.recordGeneratedPresentationEvidence(streamEpoch: streamEpoch, at: time)
                         if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
+                            // This frame is the generated one, so its own presentation is the
+                            // evidence.
                             presentedFrameStore.publishInterpolationRunning(
                                 forced: self.settings.forceFrameInterpolation, evidence: time)
                         }
@@ -1248,9 +1262,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // Steadily presented pairs prove interpolation is running; the label
                         // must not depend on sub-vsync phase. The stricter deadline check
                         // remains the quality gate for adaptive step-ups.
+                        //
+                        // The evidence is the midpoint's presentation, not this endpoint's: the
+                        // endpoint is the source frame, and a pair that a fallback reason sent
+                        // native while its already-scheduled endpoint presents later must keep
+                        // that reason instead of announcing running again.
                         if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
-                            presentedFrameStore.publishInterpolationRunning(
-                                forced: self.settings.forceFrameInterpolation, evidence: time)
+                            presentedFrameStore.publishRunningForPresentedPair(
+                                forced: self.settings.forceFrameInterpolation, midpointPresentedAt: midpoint.time)
                         }
                         if ContentCadencePolicy.presentedPairIsTimely(
                             midpointTime: midpoint.time, midpointDeadline: midpoint.deadline,
@@ -1416,9 +1435,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // A successful but over-budget endpoint does not erase recent
                         // activity. Without another successful pair its TTL expires.
                         let lower = measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
-                        // Only Smooth changes inference resolution. Quality retains its
-                        // advertised 1080p cap and retries after a bounded cooldown.
-                        if succeeded, expectedSettings.frameInterpolation == .efficient, let lower {
+                        // A tier that keeps missing its budget steps its inference size down so
+                        // the pair fits the slot again. Quality used to keep its advertised 1080p
+                        // cap and only retry after a cooldown, which on a source whose 1080p
+                        // midpoint costs more than the slot meant every pair ran at the deadline:
+                        // the output looked stuttery and the caption only ever said the tier was
+                        // over budget. Stepping down is the same measured response the cheaper
+                        // tiers use, and recordComfortablePresentedPair still raises it back once
+                        // steady pairs prove the smaller size is comfortable.
+                        if succeeded, let lower,
+                           expectedSettings.frameInterpolation == .efficient
+                           || expectedSettings.frameInterpolation == .quality {
                             self.adaptiveLongEdge = lower
                             self.cooldownUntil = CACurrentMediaTime() + 0.1
                         } else {
@@ -1501,14 +1528,33 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // second loss the layer is retired so SwiftUI builds a fresh one. An older generation's
         // callback cannot confirm or clear the new blank because the epoch must match.
         drawable.addPresentedHandler { [weak self] presented in
+            #if MONIVIEW_PREVIEW_TESTING
+            guard !(self?.suppressBlankPresentedCallbacks ?? false) else { return }
+            #endif
             guard presented.presentedTime > 0 else { return }
             DispatchQueue.main.async { self?.confirmBlankPresentation(epoch: epoch) }
         }
         blankPresentationAttempts += 1
-        blankPresentationInFlight = (epoch, CACurrentMediaTime() + Self.blankPresentationDeadline)
+        let deadline = CACurrentMediaTime() + Self.blankPresentationDeadline
+        blankPresentationInFlight = (epoch, deadline)
+        scheduleBlankDeadline(epoch: epoch, deadline: deadline)
         command.commit()
         forceDraw = false
         frames.setPreviewState("no-input")
+    }
+
+    /// Wakes the renderer for the blank's own deadline. The display link only runs while
+    /// interpolation is on, so a lost presentation callback must be able to trigger its retry
+    /// without any input frame arriving.
+    private func scheduleBlankDeadline(epoch: UInt64, deadline: Double) {
+        let delay = max(0, deadline - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let inFlight = self.blankPresentationInFlight,
+                  inFlight.epoch == epoch, CACurrentMediaTime() >= inFlight.deadline else { return }
+            if self.retryLostBlankIfNeeded() { return }
+            self.forceDraw = true
+            self.requestRender()
+        }
     }
 
     /// Clears the blank record once its own presentation callback arrives. Only the epoch that
@@ -1516,6 +1562,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// blank it did not present.
     private func confirmBlankPresentation(epoch: UInt64) {
         guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return }
+        clearBlankTracking()
+    }
+
+    /// Forgets the blank registration and its attempt count. Called when the registration belongs
+    /// to an input that a newer stream replaced, so a stale confirm, failure or timeout cannot
+    /// retire the layer the new stream is presenting into.
+    private func clearBlankTracking() {
         blankPresentationInFlight = nil
         blankPresentationAttempts = 0
     }
@@ -1524,11 +1577,36 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// generation that submitted it may reclaim the request, so an older switch's failure cannot
     /// touch the blank a newer one installed.
     private func failBlankPresentation(epoch: UInt64) {
-        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return }
+        // A repeated GPU failure takes the same bounded path as a lost callback: retry, and after
+        // the attempt limit retire the layer instead of resubmitting the same failing command.
+        abandonBlankPresentation(epoch: epoch)
+    }
+
+    /// Ends the registration of a blank that could not be presented and schedules its retry.
+    /// Returns true when the layer was retired instead, so the caller stops drawing into it.
+    @discardableResult
+    private func abandonBlankPresentation(epoch: UInt64) -> Bool {
+        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return false }
         blankPresentationInFlight = nil
+        // Only a blank that is still the current one may be retried: a newer stream, or a picture
+        // that took the mailbox over, makes this registration obsolete and retrying it would
+        // disturb a preview that already recovered.
+        guard frames.isBlankStillNeeded(forEpoch: epoch) else {
+            blankPresentationAttempts = 0
+            return false
+        }
         frames.rearmBlankRequest(epoch: epoch)
         forceDraw = true
         requestRender()
+        guard blankPresentationAttempts >= Self.maximumBlankPresentationAttempts else { return false }
+        blankPresentationAttempts = 0
+        retiringForPresentationFailure = true
+        comfortableMidpoints = 0
+        interpolationLink?.invalidate(); queuedFrames.removeAll()
+        frames.setActiveMultiplier(nil)
+        frames.setInterpolationState("呈现中断，重建预览")
+        onPresentationRecovery?()
+        return true
     }
 
     /// Schedules one delayed retry for a blank that could not be submitted at all. Delaying it
@@ -1552,18 +1630,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// when the layer was retired, so the caller stops drawing into it.
     private func retryLostBlankIfNeeded() -> Bool {
         guard let blank = blankPresentationInFlight, CACurrentMediaTime() > blank.deadline else { return false }
-        blankPresentationInFlight = nil
-        frames.rearmBlankRequest(epoch: blank.epoch)
-        forceDraw = true
-        guard blankPresentationAttempts >= 2 else { return false }
-        blankPresentationAttempts = 0
-        retiringForPresentationFailure = true
-        comfortableMidpoints = 0
-        interpolationLink?.invalidate(); queuedFrames.removeAll()
-        frames.setActiveMultiplier(nil)
-        frames.setInterpolationState("呈现中断，重建预览")
-        onPresentationRecovery?()
-        return true
+        return abandonBlankPresentation(epoch: blank.epoch)
     }
 }
 
