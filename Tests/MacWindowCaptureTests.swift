@@ -19,6 +19,8 @@ private final class Counter {
     private var dropped = 0
     private var statusCounts: [String: Int] = [:]
     private var signatures: [UInt64] = []
+    private var generations = Set<UInt64>()
+    private var rejectedDeliveries = 0
     private(set) var states: [MacWindowCapture.State] = []
     private var stateObservations: [(reported: MacWindowCapture.State,
                                      captureState: MacWindowCapture.State?,
@@ -26,7 +28,7 @@ private final class Counter {
                                      deliveredFrames: Int)] = []
     weak var capture: MacWindowCapture?
 
-    func record(sample: CMSampleBuffer) {
+    func record(sample: CMSampleBuffer, generation: UInt64, accepted: Bool) {
         guard let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
         let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
         lock.lock()
@@ -34,7 +36,15 @@ private final class Counter {
         sizes.insert("\(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer))")
         formats.insert(CVPixelBufferGetPixelFormatType(buffer))
         signatures.append(signature(of: buffer))
+        generations.insert(generation)
+        if !accepted { rejectedDeliveries += 1 }
         lock.unlock()
+    }
+    /// Stream generations that delivered frames, and how many deliveries the adapter itself
+    /// rejected at hand-over time.
+    var deliveryGenerations: (generations: Set<UInt64>, rejected: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (generations, rejectedDeliveries)
     }
 
     /// Sampled content signature. Two frames of unchanged content must match, which is
@@ -207,7 +217,10 @@ enum MacWindowCaptureTests {
         // Animated source: frames arrive at the configured size in BGRA with increasing PTS.
         let counter = Counter()
         let capture = MacWindowCapture(
-            frameSink: { counter.record(sample: $0) },
+            frameSink: { sample, generation, source in
+                counter.record(sample: sample, generation: generation,
+                               accepted: source.acceptsFrame(generation: generation))
+            },
             state: { counter.recordState($0) },
             dropped: { counter.recordDrop() })
         counter.capture = capture
@@ -228,10 +241,21 @@ enum MacWindowCaptureTests {
         // Running must describe a delivered picture, not a session that was merely installed.
         check((runningObservation?.deliveredFrames ?? 0) >= 1,
               "Running is published only after the first frame is delivered")
+        // Every frame is handed over with the generation of the stream that produced it, and the
+        // adapter still accepts it at hand-over time. That is what lets a client drop a frame
+        // that passed this check just before a source switch and was delivered just after it.
+        let deliveries = counter.deliveryGenerations
+        check(deliveries.rejected == 0,
+              "Frames delivered for the running stream are accepted (rejected \(deliveries.rejected))")
+        check(deliveries.generations.count == 1,
+              "Every delivered frame carries the running stream's generation (got \(deliveries.generations.count))")
+        let deliveredGeneration = deliveries.generations.first ?? 0
 
         // Stop must stop delivery and report the stopped state.
         capture.stop()
         pump(0.4)
+        check(!capture.acceptsFrame(generation: deliveredGeneration),
+              "A stopped stream rejects the generation its frames carried")
         let afterStop = counter.snapshot.count
         pump(0.6)
         check(counter.snapshot.count == afterStop, "Stop ends frame delivery")
@@ -255,7 +279,10 @@ enum MacWindowCaptureTests {
         pump(0.5)
         let staticCounter = Counter()
         let staticCapture = MacWindowCapture(
-            frameSink: { staticCounter.record(sample: $0) },
+            frameSink: { sample, generation, source in
+                staticCounter.record(sample: sample, generation: generation,
+                                     accepted: source.acceptsFrame(generation: generation))
+            },
             state: { staticCounter.recordState($0) },
             dropped: { staticCounter.recordDrop() })
         staticCounter.capture = staticCapture
@@ -285,7 +312,10 @@ enum MacWindowCaptureTests {
             ?? silentCandidates.min(by: { $0.windowLayer < $1.windowLayer }) {
             let silentCounter = Counter()
             let silentCapture = MacWindowCapture(
-                frameSink: { silentCounter.record(sample: $0) },
+                frameSink: { sample, generation, source in
+                    silentCounter.record(sample: sample, generation: generation,
+                                         accepted: source.acceptsFrame(generation: generation))
+                },
                 state: { silentCounter.recordState($0) },
                 dropped: { silentCounter.recordDrop() })
             silentCounter.capture = silentCapture

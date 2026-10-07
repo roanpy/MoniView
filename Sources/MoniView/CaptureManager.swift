@@ -218,7 +218,11 @@ final class LatestVideoFrame {
     private var timings: [Double] = []
     private var gpuTimings: [Double] = []
 
-    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid, formatDescription: CMFormatDescription? = nil) {
+    /// Stores the newest frame and returns the sequence number it was stored under. The number
+    /// identifies the frame for discardFrame(sequence:), which a client uses when the frame
+    /// turns out to belong to a source that lost the preview while it was being written.
+    @discardableResult
+    func put(_ pixelBuffer: CVPixelBuffer, pts: CMTime = .invalid, formatDescription: CMFormatDescription? = nil) -> UInt64 {
         lock.lock()
         let sameSize = buffer.map { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pixelBuffer) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pixelBuffer) } ?? false
         let interval = CMTimeGetSeconds(CMTimeSubtract(pts, self.pts))
@@ -231,6 +235,8 @@ final class LatestVideoFrame {
             publishedMultiplier = nil
             publishedInterpolationBasisFPS = nil
             publishedInterpolationAt = nil
+            // The new epoch is a new input: nothing generated has reached the display for it.
+            lastGeneratedPresentationAt = nil
             inputContentCadence.reset(streamEpoch: streamEpoch)
             lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
         }
@@ -247,6 +253,28 @@ final class LatestVideoFrame {
         lock.unlock()
         inputContentCadence.submit(pixelBuffer, presentationTime: pts,
                                    sequence: inputSequence, streamEpoch: inputEpoch)
+        callback?()
+        return inputSequence
+    }
+    /// Removes a frame the mailbox just accepted, when it turned out to belong to a superseded
+    /// source, and re-arms the blank that source switch requested. Only the frame carrying this
+    /// sequence is removed, so a newer frame that arrived meanwhile is kept.
+    func discardFrame(sequence expected: UInt64) {
+        lock.lock()
+        guard sequence == expected else { lock.unlock(); return }
+        buffer = nil
+        formatDescription = nil
+        previous = nil
+        pts = .invalid
+        sequence &+= 1
+        sourceIntervals.removeAll(keepingCapacity: true)
+        lastGeneratedPresentationAt = nil
+        inputContentCadence.reset(streamEpoch: streamEpoch)
+        // A switch owns the preview again: the blank it requested must be restored, and it must
+        // be valid for the current stream epoch in case the discarded frame advanced it.
+        blankRequestEpoch = streamEpoch
+        let callback = frameHandler
+        lock.unlock()
         callback?()
     }
     /// Input-side measurement remains valid when rendering skips or pauses drawing.
@@ -294,7 +322,15 @@ final class LatestVideoFrame {
         guard expected == sequence, let previous else { return nil }
         return (previous.0, previous.1, previous.2, pts)
     }
-    func setInterpolationState(_ value: String) { lock.lock(); interpolationState = value; lock.unlock() }
+    /// Publishes a caption that is not a running claim: a preparation state, a fallback reason,
+    /// a GPU error or off. The write time is recorded because a running claim built on older
+    /// presentation evidence must not erase a reason stated after that evidence.
+    func setInterpolationState(_ value: String) {
+        lock.lock()
+        interpolationState = value
+        interpolationReasonAt = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
     private var interpolationMidpointGPUMs = 0.0
     func setInterpolationGPUCost(milliseconds: Double) {
         lock.lock(); interpolationMidpointGPUMs = milliseconds; lock.unlock()
@@ -348,14 +384,24 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }; return displayRates
     }
     func currentInterpolationState() -> String { lock.lock(); defer { lock.unlock() }; return interpolationState }
+    /// Wall time of the most recent caption that was not a running claim. A running claim must
+    /// be backed by presentation evidence newer than this, or a late success callback would
+    /// erase the reason the engine is not running.
+    private var interpolationReasonAt: TimeInterval?
     private var aiUpscaleStatus = ""
     func setAIUpscaleStatus(_ value: String) { lock.lock(); aiUpscaleStatus = value; lock.unlock() }
     func currentAIUpscaleStatus() -> String { lock.lock(); defer { lock.unlock() }; return aiUpscaleStatus }
-    func markGenerated(streamEpoch: UInt64, presentedTime: Double? = nil) {
+    /// Records a generated frame that reached the display. Returns false when the callback
+    /// belongs to a superseded stream, so the caller cannot use it as evidence that the
+    /// current source or configuration is running. It counts the presentation; the evidence the
+    /// caption is built from is recorded separately, because only the caller knows whether the
+    /// callback still belongs to the current render configuration.
+    @discardableResult
+    func markGenerated(streamEpoch: UInt64, presentedTime: Double? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard streamEpoch == self.streamEpoch else { return }
+        guard streamEpoch == self.streamEpoch else { return false }
         generated += 1; recordPresentationTime(presentedTime)
-        lastGeneratedPresentationAt = presentedTime ?? ProcessInfo.processInfo.systemUptime
+        return true
     }
     func markPresentedSource(sequence: UInt64, streamEpoch: UInt64, presentedTime: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
@@ -373,26 +419,68 @@ final class LatestVideoFrame {
         generated = 0; presentedSource = 0
         return value
     }
-    /// Whether a generated frame has actually reached the display recently. The renderer
-    /// publishes a preparation label only while this is false, so bookkeeping warm-up resets
-    /// cannot contradict complete pairs that keep presenting.
-    func hasRecentGeneratedPresentation(
+    /// Timestamp of the most recent generated frame that actually reached the display inside
+    /// the activity window, or nil when nothing generated has presented recently. The renderer
+    /// publishes the running caption from this evidence, so bookkeeping warm-up resets cannot
+    /// contradict complete pairs that keep presenting.
+    ///
+    /// Evidence is bound to the stream epoch it was recorded under: every epoch change clears
+    /// it, so a late callback from a previous source or render configuration cannot vouch for
+    /// the current one.
+    func recentGeneratedPresentationEvidence(
         at now: TimeInterval = ProcessInfo.processInfo.systemUptime,
         lifetime: TimeInterval = LatestVideoFrame.interpolationActivityLifetime
-    ) -> Bool {
+    ) -> TimeInterval? {
         lock.lock(); defer { lock.unlock() }
-        guard let lastGeneratedPresentationAt, now.isFinite, now >= lastGeneratedPresentationAt else { return false }
-        return now - lastGeneratedPresentationAt <= lifetime
+        guard let lastGeneratedPresentationAt, now.isFinite, now >= lastGeneratedPresentationAt,
+              now - lastGeneratedPresentationAt <= lifetime else { return nil }
+        return lastGeneratedPresentationAt
+    }
+    /// Invalidates the presentation evidence. Called when the stream epoch or the render
+    /// configuration changes: nothing generated has reached the display for the new one yet.
+    func clearGeneratedPresentationEvidence() {
+        lock.lock(); lastGeneratedPresentationAt = nil; lock.unlock()
+    }
+    /// Records that a generated frame reached the display for this stream and the render
+    /// configuration the caller is drawing. Only this counts as evidence that the engine runs;
+    /// a late callback from a superseded generation must not vouch for the new one.
+    func recordGeneratedPresentationEvidence(streamEpoch: UInt64, at time: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        guard streamEpoch == self.streamEpoch, time.isFinite else { return }
+        lastGeneratedPresentationAt = time
+    }
+    /// Publishes the running caption from a presentation that reached the display. Returns
+    /// false when a reason was stated after that evidence, so a GPU error or a fallback reason
+    /// keeps the caption until newer evidence proves the engine runs again.
+    @discardableResult
+    func publishInterpolationRunning(forced: Bool, evidence: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard evidence.isFinite else { return false }
+        if let interpolationReasonAt, interpolationReasonAt > evidence { return false }
+        interpolationState = forced ? "强制插帧运行中" : "插帧运行中"
+        return true
     }
     /// True while the renderer still owes a blank frame for the most recent source switch.
     var isBlankRequestPending: Bool { lock.lock(); defer { lock.unlock() }; return blankRequestEpoch != nil }
-    /// Consumes a pending blank request and reports whether the drawable must be blanked.
-    /// A frame that arrived first supersedes it; blanking then would hide a live picture.
-    func consumeBlankRequest() -> Bool {
+    /// Takes the pending blank request and reports the stream epoch it belongs to. Nil means
+    /// there is nothing pending, or a frame for the current stream arrived first and supersedes
+    /// the blank. The caller returns the request with rearmBlankRequest(epoch:) if the clearing
+    /// command could not be submitted, so a failed attempt is retried instead of silently
+    /// leaving the previous source on screen.
+    func consumeBlankRequest() -> UInt64? {
         lock.lock(); defer { lock.unlock() }
-        guard let requestedEpoch = blankRequestEpoch else { return false }
+        guard let requestedEpoch = blankRequestEpoch else { return nil }
         blankRequestEpoch = nil
-        return buffer == nil && requestedEpoch == streamEpoch
+        guard buffer == nil, requestedEpoch == streamEpoch else { return nil }
+        return requestedEpoch
+    }
+    /// Puts a blank request back after the drawable could not be cleared, so the next render
+    /// retries it. A request that no longer belongs to the current stream is dropped: a late
+    /// callback from a superseded source must not open a blank on the new one.
+    func rearmBlankRequest(epoch: UInt64) {
+        lock.lock()
+        if epoch == streamEpoch, buffer == nil { blankRequestEpoch = epoch }
+        lock.unlock()
     }
     /// Clears the mailbox. blankPreview additionally asks the renderer to blank the drawable,
     /// because the last presented frame would otherwise stay on screen while the new source
@@ -634,6 +722,19 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var macWindowCapture: MacWindowCapture?
     /// Set while a Mac-window session owns the preview, so device paths stay inactive.
     private var isMacWindowSourceActive = false
+    /// Which source owns the preview, mirrored under a lock for the capture callbacks that run
+    /// on their own queues. A source switch clears the mailbox and requests a blank; a frame the
+    /// previous source already pushed into its own queue must not refill the mailbox or cancel
+    /// that blank.
+    private let previewOwnerLock = NSLock()
+    private var previewOwner: CaptureSourceKind = .device
+    private var previewOwnerKind: CaptureSourceKind {
+        previewOwnerLock.lock(); defer { previewOwnerLock.unlock() }
+        return previewOwner
+    }
+    private func publishPreviewOwner(_ kind: CaptureSourceKind) {
+        previewOwnerLock.lock(); previewOwner = kind; previewOwnerLock.unlock()
+    }
     /// Main-queue mirror of ScreenCaptureKit state; starting alone is not recordable.
     private var macWindowCaptureIsRunning = false
     private var configuredMacWindowSize = CGSize.zero
@@ -714,6 +815,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     /// Apply the stored source choice. Only one source may own the preview.
     private func applySourceKind() {
+        // Published before any teardown so a capture callback that is already in flight sees the
+        // new owner and drops its frame instead of refilling the mailbox this switch clears.
+        publishPreviewOwner(sourceKind)
         switch sourceKind {
         case .device:
             stopMacWindowCapture()
@@ -725,6 +829,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // conflict: it keeps its own input on the same session, so listening and
             // recording audio survive the switch. The session is stopped only when
             // nothing is left for it to run.
+            //
+            // The window source owns the preview from the moment it is selected. Clearing here
+            // rather than only in restartMacWindowCapture() also covers enumeration that fails
+            // or returns no window at all: those paths never reach a restart, and the device
+            // picture and its pair readout would otherwise stay on screen behind the mask.
+            frames.clear(blankPreview: true)
+            frames.setInterpolationState(L10n.text("等待窗口画面"))
             videoConfiguration.advance()
             sessionQueue.async { [weak self] in
                 guard let self else { return }
@@ -753,14 +864,22 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 // Enumeration may outlive a source switch or the start of a recording.
                 guard self.macWindowRefreshRevision.isCurrent(revision), self.sourceKind == .macWindow, !self.isRecording else { return }
                 self.macWindowOptions = options
-                self.macWindowStatus = options.isEmpty ? L10n.text("没有可选择的窗口") : nil
                 if self.selectedMacWindowID == nil || !options.contains(where: { $0.id == self.selectedMacWindowID }) {
                     let saved = UInt32(UserDefaults.standard.integer(forKey: "source.windowID"))
                     let restored = saved != 0 && options.contains(where: { $0.id == saved }) ? saved : options.first?.id
                     // Assigning triggers restartMacWindowCapture through didSet.
                     self.selectedMacWindowID = restored
-                    if restored == nil { self.stopMacWindowCapture() }
+                    if restored == nil {
+                        // No window to capture: clean up first, then publish why the list is
+                        // empty. The stop path clears the pending status, so setting the reason
+                        // before it left the user with no explanation at all.
+                        self.stopMacWindowCapture()
+                        self.macWindowStatus = L10n.text("没有可选择的窗口")
+                    } else {
+                        self.macWindowStatus = nil
+                    }
                 } else {
+                    self.macWindowStatus = nil
                     self.restartMacWindowCapture()
                 }
             } catch {
@@ -781,13 +900,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         }
         macWindowRefreshRevision.advance()
         let capture = macWindowCapture ?? MacWindowCapture(
-            frameSink: { [weak self] (sample: CMSampleBuffer) in
-                guard let self, let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
-                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                // Same handoff as the capture-device path: the preview keeps only the
-                // newest buffer and the recorder receives the original sample buffer.
-                self.frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample))
-                self.recorder.append(sample, video: true)
+            frameSink: { [weak self] (sample: CMSampleBuffer, generation: UInt64, source: MacWindowCapture) in
+                self?.ingestMacWindowFrame(sample, generation: generation, from: source)
             },
             state: { [weak self] (state: MacWindowCapture.State) in self?.handleMacWindowState(state) },
             dropped: { [weak self] in self?.frames.markDropped() })
@@ -815,6 +929,28 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         frameRateOptions = [0]
         selectedFrameRate = 0
         selectedFPS = 0
+    }
+
+    /// Window frames arrive on the ScreenCaptureKit callback queue. A frame is ingested only
+    /// while the adapter still serves the stream that produced it: a source switch clears the
+    /// mailbox and requests a blank, and a frame that passed the adapter's check just before
+    /// that switch must not refill the mailbox, cancel the blank or put the previous window
+    /// back on screen.
+    private func ingestMacWindowFrame(_ sample: CMSampleBuffer, generation: UInt64, from source: MacWindowCapture) {
+        guard let buffer = CMSampleBufferGetImageBuffer(sample),
+              source.acceptsFrame(generation: generation) else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        // Same handoff as the capture-device path: the preview keeps only the newest buffer and
+        // the recorder receives the original sample buffer.
+        let sequence = frames.put(buffer, pts: pts, formatDescription: CMSampleBufferGetFormatDescription(sample))
+        // The switch can land between the check above and this write. The frame then belongs to
+        // a source that no longer owns the preview, so the mailbox drops it again and the blank
+        // the switch requested is restored.
+        guard source.acceptsFrame(generation: generation) else {
+            frames.discardFrame(sequence: sequence)
+            return
+        }
+        recorder.append(sample, video: true)
     }
 
     private func handleMacWindowState(_ state: MacWindowCapture.State) {
@@ -870,6 +1006,13 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         configuredMacWindowSize = .zero
         macWindowStatus = nil
         isRunning = false
+        // No window stream is left, so its last picture and pair readout must not stay visible
+        // under a mask that says there is nothing to show. A switch to the device source blanks
+        // through selectVideoDevice() instead, which owns the preview by then.
+        if sourceKind == .macWindow {
+            frames.clear(blankPreview: true)
+            frames.setInterpolationState(L10n.text("等待窗口画面"))
+        }
     }
 
     /// Share the recording completion path with the capture-device flow.
@@ -958,6 +1101,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     func selectVideoDevice(id: String?) {
         guard !isRecording else { statusMessage = "停止录制后可更换设备。"; return }
         let previouslyPaired = UserDefaults.standard.string(forKey: "audio.selection") == nil || audioOptions.first(where: { $0.id == selectedAudioID })?.name == deviceName
+        let previousDeviceID = selectedVideoID
         selectedVideoID = id
         // Invalidate the previous device's format list immediately; its indices are not valid for the new device.
         formatOptions = []
@@ -1003,6 +1147,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                     self.session.commitConfiguration()
                     configurationOpen = false
                     self.reconcileCaptureSessionRunning()
+                    if previousDeviceID != id {
+                        // The previous device stops delivering only once this configuration
+                        // commits. A frame already in flight could have refilled the mailbox
+                        // after the switch cleared it, so the clear is re-asserted now that the
+                        // old input is gone; the switch's blank stays requested until a frame
+                        // for the new device arrives.
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, self.videoConfiguration.isCurrent(generation), self.sourceKind == .device else { return }
+                            self.frames.clear(blankPreview: true)
+                        }
+                    }
                     // The session negotiates its own preset format at commit/start, and a format
                     // set inside a session configuration is reverted. Apply the chosen format
                     // directly to the device afterwards; this is verified to stick on UVC hardware.
@@ -1674,7 +1829,18 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output === videoOutput, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
+            // Only the source that owns the preview may write into the mailbox. A switch to the
+            // window source removes the device input asynchronously, so the session can deliver
+            // one more frame; it must not refill the cleared mailbox, cancel the switch's blank
+            // or put the card's picture back on screen.
+            guard previewOwnerKind == .device else { return }
+            let sequence = frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
+            // The switch can land between that check and this write, in which case the frame
+            // belongs to the source that lost the preview.
+            guard previewOwnerKind == .device else {
+                frames.discardFrame(sequence: sequence)
+                return
+            }
             recorder.append(sampleBuffer, video: true)
         } else if output === audioOutput {
             #if MONIVIEW_CAPTURE_TESTING

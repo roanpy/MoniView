@@ -144,6 +144,98 @@ struct CaptureCompatibilityTests {
         precondition(frames.takeDuplicateSkips() == 0, "retired stream skip ignored")
     }
 
+    /// A source switch clears the mailbox and asks for a blank draw. The request must survive a
+    /// draw that could not clear the drawable, must not be cancelled by a frame from the source
+    /// that lost the preview, and must never be re-opened for a newer stream by a late callback.
+    private static func testSourceSwitchClearingAndCaptionEvidence() {
+        let frames = LatestVideoFrame()
+        frames.put(pixelBuffer(), pts: CMTime(value: 0, timescale: 60))
+        frames.clear(blankPreview: true)
+        let switchEpoch = frames.streamGeneration()
+        precondition(frames.isBlankRequestPending, "a source switch requests a blank")
+        precondition(frames.latest() == nil, "a source switch clears the previous source's frame")
+        guard let requestedEpoch = frames.consumeBlankRequest(), requestedEpoch == switchEpoch else {
+            preconditionFailure("the draw takes the blank request for its own stream epoch")
+        }
+        precondition(!frames.isBlankRequestPending, "taking the request clears it")
+        // A draw whose command could not carry the clear puts the request back and is retried.
+        frames.rearmBlankRequest(epoch: requestedEpoch)
+        precondition(frames.isBlankRequestPending, "a failed blank draw re-arms the request")
+        precondition(frames.consumeBlankRequest() == requestedEpoch, "the retry keeps the stream epoch")
+        // A frame for the current stream supersedes the blank.
+        frames.rearmBlankRequest(epoch: switchEpoch)
+        frames.put(pixelBuffer(), pts: CMTime(value: 1, timescale: 60))
+        precondition(frames.consumeBlankRequest() == nil, "a frame that arrived first supersedes the blank")
+        // A late callback from the previous stream must not re-open a blank on the new one.
+        frames.clear(blankPreview: true)
+        let currentEpoch = frames.streamGeneration()
+        precondition(currentEpoch != switchEpoch, "a switch starts a new stream epoch")
+        precondition(frames.consumeBlankRequest() == currentEpoch, "the new switch requests its own blank")
+        frames.rearmBlankRequest(epoch: switchEpoch)
+        precondition(!frames.isBlankRequestPending, "a superseded epoch cannot re-open a blank")
+        // A frame that arrives first cancels the request; when it turns out to belong to a
+        // superseded source it is removed again and the switch's blank is restored.
+        frames.rearmBlankRequest(epoch: currentEpoch)
+        precondition(frames.isBlankRequestPending, "the current epoch can re-arm the blank")
+        let staleSequence = frames.put(pixelBuffer(), pts: CMTime(value: 2, timescale: 60))
+        precondition(frames.consumeBlankRequest() == nil, "the frame supersedes the blank")
+        precondition(!frames.isBlankRequestPending, "the superseded request is gone")
+        frames.discardFrame(sequence: staleSequence)
+        precondition(frames.latest() == nil, "a frame from a superseded source is removed again")
+        precondition(frames.isBlankRequestPending, "discarding it restores the switch's blank")
+        // A newer frame that arrived meanwhile is not discarded with an older sequence.
+        let keptSequence = frames.put(pixelBuffer(), pts: CMTime(value: 3, timescale: 60))
+        frames.discardFrame(sequence: keptSequence &- 1)
+        precondition(frames.latest() != nil, "an older sequence cannot discard a newer frame")
+        print("PASS source-switch blank request: retained through a failed draw, re-armed for the current stream only, and a superseded frame is removed again")
+
+        // Recent generated activity is evidence for the caption, but only for the stream it was
+        // recorded under and only while no newer reason was stated.
+        let evidenceFrames = LatestVideoFrame()
+        evidenceFrames.put(pixelBuffer())
+        let epoch = evidenceFrames.streamGeneration()
+        let now = ProcessInfo.processInfo.systemUptime
+        precondition(evidenceFrames.markGenerated(streamEpoch: epoch, presentedTime: now - 0.5),
+                     "a generated presentation is counted for its own stream")
+        precondition(evidenceFrames.recentGeneratedPresentationEvidence(at: now) == nil,
+                     "counting a presentation is not evidence until the caller binds it to its configuration")
+        evidenceFrames.recordGeneratedPresentationEvidence(streamEpoch: epoch, at: now - 0.5)
+        precondition(evidenceFrames.recentGeneratedPresentationEvidence(at: now) == now - 0.5,
+                     "recent generation is available as evidence")
+        evidenceFrames.recordGeneratedPresentationEvidence(streamEpoch: epoch &+ 7, at: now)
+        precondition(evidenceFrames.recentGeneratedPresentationEvidence(at: now) == now - 0.5,
+                     "a superseded stream cannot record evidence")
+        evidenceFrames.setInterpolationState("GPU错误，保留原始画面")
+        precondition(!evidenceFrames.publishInterpolationRunning(forced: false, evidence: now - 0.5),
+                     "a reason stated after the evidence keeps the caption")
+        precondition(evidenceFrames.currentInterpolationState() == "GPU错误，保留原始画面",
+                     "a late success callback cannot erase a GPU error")
+        precondition(evidenceFrames.publishInterpolationRunning(forced: false, evidence: ProcessInfo.processInfo.systemUptime),
+                     "evidence newer than the reason claims running again")
+        precondition(evidenceFrames.currentInterpolationState() == "插帧运行中")
+        precondition(evidenceFrames.recentGeneratedPresentationEvidence(at: now + 10) == nil,
+                     "evidence expires with the activity window")
+        evidenceFrames.clearGeneratedPresentationEvidence()
+        precondition(evidenceFrames.recentGeneratedPresentationEvidence(at: now) == nil,
+                     "a configuration change drops the evidence")
+        // A layout change advances the stream epoch: the previous epoch is no longer evidence.
+        let layoutFrames = LatestVideoFrame()
+        layoutFrames.put(pixelBuffer())
+        let firstEpoch = layoutFrames.streamGeneration()
+        layoutFrames.recordGeneratedPresentationEvidence(streamEpoch: firstEpoch, at: ProcessInfo.processInfo.systemUptime)
+        precondition(layoutFrames.recentGeneratedPresentationEvidence() != nil,
+                     "evidence is recorded for its own stream")
+        layoutFrames.put(pixelBuffer(width: 32, height: 32))
+        precondition(layoutFrames.recentGeneratedPresentationEvidence() == nil,
+                     "a new input layout drops the previous evidence")
+        precondition(!layoutFrames.markGenerated(streamEpoch: firstEpoch),
+                     "a superseded stream cannot count a presentation")
+        layoutFrames.recordGeneratedPresentationEvidence(streamEpoch: firstEpoch, at: ProcessInfo.processInfo.systemUptime)
+        precondition(layoutFrames.recentGeneratedPresentationEvidence() == nil,
+                     "a superseded stream cannot record evidence")
+        print("PASS caption evidence: bound to its stream, refused for a superseded one, and unable to overwrite a newer reason")
+    }
+
     private static func testOldPictureSettingsJSON() {
         var newSettings = PictureSettings()
         newSettings.frameInterpolation = .balanced
@@ -422,6 +514,7 @@ struct CaptureCompatibilityTests {
             precondition(settings.frameInterpolation == .flowBlend, "Invalid saved quality must recover")
         }
         testPresentationIntervalsAndDuplicateSkips()
+        testSourceSwitchClearingAndCaptionEvidence()
         testOldPictureSettingsJSON()
         testInterpolationHistory()
         testStableSourceFrameRatesAndResets()

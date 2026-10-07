@@ -138,7 +138,12 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// so a few seconds separate "still connecting" from "never supplies a picture".
     static let firstFrameDeadlineSeconds: Double = 3.0
 
-    private let frameSink: (CMSampleBuffer) -> Void
+    /// Frames are handed over with the generation of the stream that produced them. A client
+    /// that clears its preview on a source switch uses it to reject a frame that was accepted
+    /// before the switch and delivered after it, which otherwise refills the cleared mailbox.
+    /// The adapter itself is passed along so the client can re-check ownership after it wrote
+    /// the frame: the switch may land between that check and the write.
+    private let frameSink: (CMSampleBuffer, UInt64, MacWindowCapture) -> Void
     private let stateHandler: (State) -> Void
     private let droppedHandler: () -> Void
     private let queue = DispatchQueue(label: "dev.moniview.sck", qos: .userInteractive)
@@ -165,7 +170,7 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return configuredSize
     }
 
-    init(frameSink: @escaping (CMSampleBuffer) -> Void,
+    init(frameSink: @escaping (CMSampleBuffer, UInt64, MacWindowCapture) -> Void,
          state: @escaping (State) -> Void,
          dropped: @escaping () -> Void) {
         self.frameSink = frameSink
@@ -441,11 +446,12 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // While starting, callbacks are accepted so the first picture can be delivered and
         // justify the running state; a window reported as having no picture is still allowed
         // to recover. Failed and stopped streams are ignored.
+        let callbackGeneration = generation
         let isCurrent = acceptsDeliveryLocked() &&
             MacWindowCapturePolicy.acceptsCallback(callbackStream: stream,
                                                    activeStream: self.stream,
                                                    activeGeneration: streamGeneration,
-                                                   generation: generation)
+                                                   generation: callbackGeneration)
         stateLock.unlock()
         // An accepted callback may finish if stop/restart races after this snapshot.
         // The next callback observes the new generation. Client code runs lock-free
@@ -460,8 +466,19 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // The picture is handed over before running is announced, so a client that reacts to
         // the state already has a frame. Idle, blank and suspended are not pictures: they must
         // not clear a waiting mask.
-        frameSink(sampleBuffer)
+        frameSink(sampleBuffer, callbackGeneration, self)
         promoteToRunning(matching: stream)
+    }
+
+    /// True when a frame carrying this stream generation still belongs to the stream this
+    /// adapter serves. It lets a client drop a frame that passed the callback check just before
+    /// a stop or restart and was delivered just after it, instead of letting the previous
+    /// window refill a preview that was already cleared.
+    func acceptsFrame(generation frameGeneration: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard acceptsDeliveryLocked() else { return false }
+        return streamGeneration == frameGeneration
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

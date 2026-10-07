@@ -145,6 +145,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var scheduledSourceUntil = 0.0
     private var awaitingSourcePresentation: (sequence: UInt64, deadline: Double)?
     private var presentedMidpoint: (sequence: UInt64, time: Double, deadline: Double)?
+    /// A blank draw that was submitted and is waiting for its presentation callback. A callback
+    /// that never arrives re-arms the request, and a second loss retires the layer through the
+    /// same path as a lost frame presentation.
+    private var blankPresentationInFlight: (epoch: UInt64, deadline: Double)?
+    private var blankPresentationAttempts = 0
+    private var blankRetryScheduled = false
+    /// How long a submitted blank may wait for its presentation callback before it is retried.
+    private static let blankPresentationDeadline: Double = 0.25
     /// Compares the fields that decide whether an already-scheduled frame pair is still
     /// valid. Colour and sharpness are deliberately excluded: they change what the
     /// endpoint looks like, not when it presents, so switching a preset must not cancel a
@@ -304,6 +312,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // set (flow 2x/3x to a VideoToolbox 2x tier) must not keep showing the wider step
             // until the next pair happens to run, which may never happen under cooldown.
             frames.setActiveMultiplier(nil)
+            // The old engine's generated presentations say nothing about the new one: nothing
+            // generated has reached the display for this configuration yet.
+            frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
@@ -408,14 +419,35 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             generatedPhaseCount: phases.count)
     }
 
-    /// The caption an interpolation write should publish. A generated frame that reached the
-    /// display inside the activity window is presentation evidence, so the engine is running
-    /// and the caption must say so; only when nothing generated has presented does the
-    /// caller's preparation reason describe the state. This makes the caption converge on
-    /// what the display has actually seen, instead of on bookkeeping that a reset can repeat.
-    private func reconciledInterpolationCaption(preparing: String) -> String {
-        guard frames.hasRecentGeneratedPresentation() else { return preparing }
-        return settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中"
+    /// Publishes the caption the current evidence supports. Evidence is a generated frame that
+    /// reached the display inside the activity window for this stream epoch, so the engine is
+    /// running and the caption must say so; only when no such frame exists does the caller's
+    /// preparation reason describe the state. The frame store also refuses a running claim older
+    /// than a stated reason, so a late success cannot erase a GPU error or a fallback reason.
+    private func publishCaption(preparing: String) {
+        guard let evidence = frames.recentGeneratedPresentationEvidence() else {
+            frames.setInterpolationState(preparing)
+            return
+        }
+        frames.publishInterpolationRunning(forced: settings.forceFrameInterpolation, evidence: evidence)
+    }
+
+    /// Adopts an input stream this view has not seen before. Everything the previous stream
+    /// scheduled is invalid: its queued frames, its pair and its readout, because the new stream
+    /// has not presented anything yet.
+    private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
+        sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
+        adaptiveLongEdge = nil; interpolationDimensions = nil
+        queuedFrames.removeAll(); presentedMidpoint = nil; lastSourceSequence = nil
+        lastUniqueSource = nil; lastGeneratedPresentationTime = 0
+        frames.setActiveMultiplier(nil)
+        // Evidence belongs to the stream it was recorded under. The new stream has presented
+        // nothing yet, so a late callback from the old one cannot claim it is running.
+        frames.clearGeneratedPresentationEvidence()
+        generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
+        scheduledSourceUntil = 0; awaitingSourcePresentation = nil
+        comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
+        lastStrictCheck = nil
     }
 
     private func recordComfortablePresentedPair(slot: Double) {
@@ -450,6 +482,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // window and the cost history, so leaving the last step in place would let the panel
         // name a multiplier from a display this preview no longer draws into.
         frames.setActiveMultiplier(nil)
+        frames.clearGeneratedPresentationEvidence()
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
         scheduledSourceUntil = 0; awaitingSourcePresentation = nil
         queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -488,6 +521,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         queuedFrames.removeAll()
         frames.setActiveMultiplier(nil)
+        // The new output size is a new render configuration: the previous one's presentations
+        // cannot vouch for it.
+        frames.clearGeneratedPresentationEvidence()
         presentedMidpoint = nil
         // Drawables encoded for the old size belong to an invalidated schedule: their
         // late callbacks must not clear the queue or the pair a new size publishes.
@@ -616,19 +652,40 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             onPresentationRecovery?()
             return
         }
+        // A blank that was submitted but never reported as presented may still be showing the
+        // previous picture. Re-arm it before anything else so this draw or the next one retries.
+        if retryLostBlankIfNeeded() { return }
         // A source switch clears the mailbox so the previous source's picture cannot be
         // mistaken for the new one. Blanking the drawable is what actually removes it: an
         // early return left the stale frame visible while the waiting mask said otherwise.
         if frames.isBlankRequestPending {
+            // The switch also starts a new input stream. Adopt it here, before the return below,
+            // or the previous source's queued pair, readout and cooldown would stay in front of
+            // the new source's first frame.
+            let blankEpoch = frames.streamGeneration()
+            if blankEpoch != sourceStreamEpoch { adoptSourceStreamEpoch(blankEpoch) }
             guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else {
                 // No drawable right now: keep the request and retry on the next render.
                 forceDraw = true
+                scheduleBlankRetry()
                 return
             }
-            if frames.consumeBlankRequest() {
-                presentBlankFrame(drawable, command: command)
+            // The encoder is what can fail here. The request is taken only once the command can
+            // really carry the clear, so a failed encoder does not consume it as if the drawable
+            // had been cleared.
+            guard let encoder = command.makeRenderCommandEncoder(
+                descriptor: Self.blankRenderPass(for: drawable, clearColor: clearColor)) else {
+                forceDraw = true
+                scheduleBlankRetry()
                 return
             }
+            if let requestedEpoch = frames.consumeBlankRequest() {
+                presentBlankFrame(drawable, command: command, encoder: encoder, epoch: requestedEpoch)
+                return
+            }
+            // A frame for the current stream arrived first and supersedes the blank. The empty
+            // command is dropped and that frame is drawn by the path below.
+            encoder.endEncoding()
         }
         guard let initial = frames.latestSnapshot() else { frames.setPreviewState("no-input"); return }
         var (buffer, sequence, receivedAt) = (initial.buffer, initial.sequence, initial.receivedAt)
@@ -639,17 +696,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // present natively, but must not become the next pair's timing reference.
         var uniqueReferenceEligible = true
         let streamEpoch = initial.streamEpoch
-        if streamEpoch != sourceStreamEpoch {
-            sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
-            adaptiveLongEdge = nil; interpolationDimensions = nil
-            queuedFrames.removeAll(); presentedMidpoint = nil; lastSourceSequence = nil
-            lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-            frames.setActiveMultiplier(nil)
-            generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
-            scheduledSourceUntil = 0; awaitingSourcePresentation = nil
-            comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
-            lastStrictCheck = nil
-        }
+        if streamEpoch != sourceStreamEpoch { adoptSourceStreamEpoch(streamEpoch) }
         let size = drawableSize
         guard size.width > 0, size.height > 0 else { return }
         // GPU completion does not mean a future drawable has reached the display.
@@ -690,6 +737,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     cooldownUntil = now + FrameInterpolationPolicy.overloadCooldownSeconds
                     frames.setActiveMultiplier(nil)
                 }
+                frames.clearGeneratedPresentationEvidence()
             } else if (now - Double(queued.receivedAt) / 1_000_000_000) > 3 * queued.sourcePeriod {
                 // A queued frame older than three source periods is stale: its moment has passed.
                 // Rebasing it would push a picture the source has already moved past into the
@@ -884,7 +932,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 }
                 interpolator.prepare(width: dimensions.width, height: dimensions.height)
                 if !interpolator.isReady {
-                    frames.setInterpolationState(reconciledInterpolationCaption(preparing: "插帧准备中"))
+                    publishCaption(preparing: "插帧准备中")
                 }
                 if interpolator.isReady {
                     // Exact-dedup mode has a real unique-endpoint PTS interval for this pair.
@@ -1027,7 +1075,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     }
                 }
             } else if !inputCadenceReady {
-                frames.setInterpolationState(reconciledInterpolationCaption(preparing: "插帧准备中"))
+                publishCaption(preparing: "插帧准备中")
             }
         } else { frames.setInterpolationState("关闭") }
         // A native fallback must also follow any already scheduled endpoint.
@@ -1170,14 +1218,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 // Presentation counts exclude failed/retired-stream drawables and
                 // settings/resize redraws of the same captured frame.
                 if wasGenerated {
-                    presentedFrameStore.markGenerated(streamEpoch: streamEpoch, presentedTime: time)
-                    // A generated frame reached the display. That is the caption's evidence,
-                    // so it is stated here, before the render-generation bookkeeping below can
-                    // drop the callback: a late callback may still describe a pair that really
-                    // presented. Only live settings may veto it, so turning interpolation off
-                    // keeps its own caption.
-                    if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
-                        presentedFrameStore.setInterpolationState(self.settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中")
+                    // The caption is only evidence when this presentation was accepted for the
+                    // current stream and this render generation. A callback from a superseded
+                    // source or engine must not label the new one as running, and live settings
+                    // still veto it so turning interpolation off keeps its own caption.
+                    let accepted = presentedFrameStore.markGenerated(streamEpoch: streamEpoch, presentedTime: time)
+                    if accepted, generationIsCurrent {
+                        presentedFrameStore.recordGeneratedPresentationEvidence(streamEpoch: streamEpoch, at: time)
+                        if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
+                            presentedFrameStore.publishInterpolationRunning(
+                                forced: self.settings.forceFrameInterpolation, evidence: time)
+                        }
                     }
                 }
                 else { presentedFrameStore.markPresentedSource(sequence: presentedSequence, streamEpoch: streamEpoch, presentedTime: time) }
@@ -1197,7 +1248,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // Steadily presented pairs prove interpolation is running; the label
                         // must not depend on sub-vsync phase. The stricter deadline check
                         // remains the quality gate for adaptive step-ups.
-                        presentedFrameStore.setInterpolationState(self.settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中")
+                        if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
+                            presentedFrameStore.publishInterpolationRunning(
+                                forced: self.settings.forceFrameInterpolation, evidence: time)
+                        }
                         if ContentCadencePolicy.presentedPairIsTimely(
                             midpointTime: midpoint.time, midpointDeadline: midpoint.deadline,
                             endpointTime: time,
@@ -1314,7 +1368,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationState(self.reconciledInterpolationCaption(preparing: "插帧准备中"))
+                            self.publishCaption(preparing: "插帧准备中")
                         } else if wasGenerationBatch {
                             self.generationBatchCosts.append(cost); self.generationBatchCosts = Array(self.generationBatchCosts.suffix(32))
                             self.generationBatchGPUCosts.append(gpuMS); self.generationBatchGPUCosts = Array(self.generationBatchGPUCosts.suffix(32))
@@ -1416,19 +1470,100 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode, midpoint: generatedMidpoint)
     }
 
-    /// Clears the drawable. Used while a source has not delivered its first frame, so the
-    /// previous source's picture cannot stay on screen behind the waiting mask.
-    private func presentBlankFrame(_ drawable: CAMetalDrawable, command: MTLCommandBuffer) {
+    /// The clearing pass for a blank draw. Building it beside the encoder creation keeps a
+    /// failure there from consuming a request whose drawable was never cleared.
+    private static func blankRenderPass(for drawable: CAMetalDrawable, clearColor: MTLClearColor) -> MTLRenderPassDescriptor {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = clearColor
-        command.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        return pass
+    }
+
+    /// Clears the drawable, using the encoder the caller already created for it. Used while a
+    /// source has not delivered its first frame, so the previous source's picture cannot stay on
+    /// screen behind the waiting mask.
+    private func presentBlankFrame(_ drawable: CAMetalDrawable, command: MTLCommandBuffer,
+                                   encoder: MTLRenderCommandEncoder, epoch: UInt64) {
+        encoder.endEncoding()
+        // A failed command leaves whatever was on screen untouched, so the clear still has to
+        // happen: re-arm the request and draw again.
+        command.addCompletedHandler { [weak self] completed in
+            guard completed.status != .completed else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.failBlankPresentation(epoch: epoch)
+            }
+        }
         command.present(drawable)
+        // A lost presentation callback is a failure like any other: it is retried, and after a
+        // second loss the layer is retired so SwiftUI builds a fresh one. An older generation's
+        // callback cannot confirm or clear the new blank because the epoch must match.
+        drawable.addPresentedHandler { [weak self] presented in
+            guard presented.presentedTime > 0 else { return }
+            DispatchQueue.main.async { self?.confirmBlankPresentation(epoch: epoch) }
+        }
+        blankPresentationAttempts += 1
+        blankPresentationInFlight = (epoch, CACurrentMediaTime() + Self.blankPresentationDeadline)
         command.commit()
         forceDraw = false
         frames.setPreviewState("no-input")
+    }
+
+    /// Clears the blank record once its own presentation callback arrives. Only the epoch that
+    /// was submitted may do that, so a late callback from a superseded source cannot report a
+    /// blank it did not present.
+    private func confirmBlankPresentation(epoch: UInt64) {
+        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return }
+        blankPresentationInFlight = nil
+        blankPresentationAttempts = 0
+    }
+
+    /// A clearing command that did not complete leaves the previous picture on screen. Only the
+    /// generation that submitted it may reclaim the request, so an older switch's failure cannot
+    /// touch the blank a newer one installed.
+    private func failBlankPresentation(epoch: UInt64) {
+        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return }
+        blankPresentationInFlight = nil
+        frames.rearmBlankRequest(epoch: epoch)
+        forceDraw = true
+        requestRender()
+    }
+
+    /// Schedules one delayed retry for a blank that could not be submitted at all. Delaying it
+    /// keeps a layer without a drawable from spinning on the main queue, while still retrying
+    /// without waiting for a frame: a source that never delivers one is exactly the case this
+    /// clearing exists for.
+    private func scheduleBlankRetry() {
+        guard !blankRetryScheduled else { return }
+        blankRetryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            self.blankRetryScheduled = false
+            self.forceDraw = true
+            self.requestRender()
+        }
+    }
+
+    /// Retries a blank whose presentation callback never arrived. The request is re-armed so the
+    /// next draw clears again; when that keeps failing the layer is retired through the existing
+    /// presentation-recovery path rather than left showing the previous picture. Returns true
+    /// when the layer was retired, so the caller stops drawing into it.
+    private func retryLostBlankIfNeeded() -> Bool {
+        guard let blank = blankPresentationInFlight, CACurrentMediaTime() > blank.deadline else { return false }
+        blankPresentationInFlight = nil
+        frames.rearmBlankRequest(epoch: blank.epoch)
+        forceDraw = true
+        guard blankPresentationAttempts >= 2 else { return false }
+        blankPresentationAttempts = 0
+        retiringForPresentationFailure = true
+        comfortableMidpoints = 0
+        interpolationLink?.invalidate(); queuedFrames.removeAll()
+        frames.setActiveMultiplier(nil)
+        frames.setInterpolationState("呈现中断，重建预览")
+        onPresentationRecovery?()
+        return true
     }
 }
 

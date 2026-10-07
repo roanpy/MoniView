@@ -382,14 +382,14 @@ stats.setEventHandler {
            Double(sourcePresentations) / cadWindowDuration >= expectedContentFPS * 0.9 {
             restartPassWindows += 1
         }
-        // Throughput alone let a run present complete pairs while the caption still claimed
-        // the engine was preparing. A window that presented anything must not describe
-        // itself as still preparing.
-        if gen > 0 || sourcePresentations > 0 {
+        // The caption is judged by current evidence, not by how many frames moved: a window that
+        // presented source frames only can honestly report a preparation state, while a generated
+        // frame that reached the display for this stream may not be described as still preparing.
+        if let evidence = frames.recentGeneratedPresentationEvidence() {
             restartCaptionWindows += 1
             let caption = frames.currentInterpolationState()
             if caption.contains("准备中") {
-                restartCaptionContradictions.append("tick=\(tick) state=\(caption) source=\(sourcePresentations) generated=\(gen)")
+                restartCaptionContradictions.append("tick=\(tick) state=\(caption) evidence=\(String(format: "%.3f", evidence)) source=\(sourcePresentations) generated=\(gen)")
             }
         }
     }
@@ -424,6 +424,10 @@ stats.setEventHandler {
         if testEngineSwitch {
             preview.settings.frameInterpolation = .quality
             preview.configureInterpolation(); preview.requestRender()
+            // The engine switch invalidates the evidence the previous engine recorded: the new
+            // engine has not presented anything yet.
+            precondition(frames.recentGeneratedPresentationEvidence() == nil,
+                         "an engine switch kept the previous engine's evidence")
         } else {
             // A steady run must clear the published pair at once, not after the window.
             let hadActivity = frames.currentInterpolationActivity() != nil
@@ -468,6 +472,19 @@ stats.setEventHandler {
     if testRestart && tick == 30 {
         preview.settings.frameInterpolation = .off
         preview.configureInterpolation(); preview.requestRender()
+        // Switching the engine off must invalidate the evidence the previous configuration
+        // recorded; nothing generated has presented for the disabled one.
+        precondition(frames.recentGeneratedPresentationEvidence() == nil,
+                     "switching the engine off kept the previous configuration's evidence")
+    }
+    if testRestart, tick > 30, tick < finishAt {
+        // Reverse direction: a success callback from the generation that was switched off may
+        // still arrive, and it must not label the disabled engine as running.
+        let caption = frames.currentInterpolationState()
+        precondition(!caption.contains("运行中"),
+                     "a superseded generation labelled the disabled engine as running: tick=\(tick) state=\(caption)")
+        precondition(frames.recentGeneratedPresentationEvidence() == nil,
+                     "a superseded generation left presentation evidence behind: tick=\(tick)")
     }
     if tick == finishAt {
         if requireCadence {
