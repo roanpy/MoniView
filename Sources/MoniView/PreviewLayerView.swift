@@ -268,6 +268,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// The refresh rate this view follows. window.screen can be nil for a moment while the
+    /// window moves or is re-created; both the display link and the interpolation
+    /// configuration must resolve the same way, or they disagree on every tick. That
+    /// disagreement reset the interpolation session at the display rate: generated pair
+    /// history, warm-up and the presentation epoch were cleared while frames kept presenting,
+    /// so the caption could stay on a preparation label through steady output.
+    private var reportedDisplayCap: Float {
+        let reported = window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
+        return Float(reported > 0 ? reported : 60)
+    }
+
     /// A weak target avoids the CADisplayLink -> view retain cycle. NSView's link follows
     /// the actual display across window moves and stops callbacks while hidden.
     func configureInterpolation() {
@@ -325,8 +336,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 link.add(to: .main, forMode: .common)
                 interpolationLink = link
             }
-            let reported = window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
-            let cap = Float(reported > 0 ? reported : 60)
+            let cap = reportedDisplayCap
             if cap != configuredDisplayCap {
                 interpolationLink?.preferredFrameRateRange = CAFrameRateRange(minimum: min(30, cap), maximum: cap, preferred: cap)
                 configuredDisplayCap = cap
@@ -347,7 +357,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         displayTickTimes.append(CACurrentMediaTime())
         if displayTickTimes.count > 6000 { displayTickTimes.removeFirst(displayTickTimes.count - 6000) }
         #endif
-        let currentCap = Float(window?.screen?.maximumFramesPerSecond ?? 60)
+        let currentCap = reportedDisplayCap
         if currentCap > 0 && currentCap != configuredDisplayCap { resetInterpolationForDisplay() }
         displayTargetTime = link.targetTimestamp
         let interval = link.targetTimestamp - link.timestamp
@@ -396,6 +406,16 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         return FrameInterpolationPolicy.pairCost(generationBatch: generation,
             subsequentPresentation: subsequent, sourceEndpoint: source,
             generatedPhaseCount: phases.count)
+    }
+
+    /// The caption an interpolation write should publish. A generated frame that reached the
+    /// display inside the activity window is presentation evidence, so the engine is running
+    /// and the caption must say so; only when nothing generated has presented does the
+    /// caller's preparation reason describe the state. This makes the caption converge on
+    /// what the display has actually seen, instead of on bookkeeping that a reset can repeat.
+    private func reconciledInterpolationCaption(preparing: String) -> String {
+        guard frames.hasRecentGeneratedPresentation() else { return preparing }
+        return settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中"
     }
 
     private func recordComfortablePresentedPair(slot: Double) {
@@ -481,6 +501,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Called on the main thread after a draw finishes: only ask for another draw when the
     /// newest frame or the current settings actually differ from what was submitted.
     private func requestRenderIfStateChanged() {
+        // A source switch still owes a blank draw; nothing else would ask for one while the
+        // new source has no frame.
+        if frames.isBlankRequestPending { requestRender(); return }
         guard let (_, sequence, _) = frames.latest() else { return }
         let key = RenderKey(sequence: sequence, settings: settings, size: drawableSize, aspect: aspectMode)
         // A forced draw that was deferred behind an in-flight GPU command still has to happen.
@@ -592,6 +615,20 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             frames.setInterpolationState("呈现中断，重建预览")
             onPresentationRecovery?()
             return
+        }
+        // A source switch clears the mailbox so the previous source's picture cannot be
+        // mistaken for the new one. Blanking the drawable is what actually removes it: an
+        // early return left the stale frame visible while the waiting mask said otherwise.
+        if frames.isBlankRequestPending {
+            guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else {
+                // No drawable right now: keep the request and retry on the next render.
+                forceDraw = true
+                return
+            }
+            if frames.consumeBlankRequest() {
+                presentBlankFrame(drawable, command: command)
+                return
+            }
         }
         guard let initial = frames.latestSnapshot() else { frames.setPreviewState("no-input"); return }
         var (buffer, sequence, receivedAt) = (initial.buffer, initial.sequence, initial.receivedAt)
@@ -846,7 +883,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2
                 }
                 interpolator.prepare(width: dimensions.width, height: dimensions.height)
-                if !interpolator.isReady { frames.setInterpolationState("插帧准备中") }
+                if !interpolator.isReady {
+                    frames.setInterpolationState(reconciledInterpolationCaption(preparing: "插帧准备中"))
+                }
                 if interpolator.isReady {
                     // Exact-dedup mode has a real unique-endpoint PTS interval for this pair.
                     // Use it to select 2x/3x directly; render-sampled repeat windows can miss
@@ -987,7 +1026,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         frames.setInterpolationState("呈现节奏调整")
                     }
                 }
-            } else if !inputCadenceReady { frames.setInterpolationState("插帧准备中") }
+            } else if !inputCadenceReady {
+                frames.setInterpolationState(reconciledInterpolationCaption(preparing: "插帧准备中"))
+            }
         } else { frames.setInterpolationState("关闭") }
         // A native fallback must also follow any already scheduled endpoint.
         if endpointPresentation == nil && CACurrentMediaTime() < lastPresentationTime {
@@ -1128,7 +1169,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 }
                 // Presentation counts exclude failed/retired-stream drawables and
                 // settings/resize redraws of the same captured frame.
-                if wasGenerated { presentedFrameStore.markGenerated(streamEpoch: streamEpoch, presentedTime: time) }
+                if wasGenerated {
+                    presentedFrameStore.markGenerated(streamEpoch: streamEpoch, presentedTime: time)
+                    // A generated frame reached the display. That is the caption's evidence,
+                    // so it is stated here, before the render-generation bookkeeping below can
+                    // drop the callback: a late callback may still describe a pair that really
+                    // presented. Only live settings may veto it, so turning interpolation off
+                    // keeps its own caption.
+                    if self.settings.enhancementEnabled, self.settings.frameInterpolation != .off {
+                        presentedFrameStore.setInterpolationState(self.settings.forceFrameInterpolation ? "强制插帧运行中" : "插帧运行中")
+                    }
+                }
                 else { presentedFrameStore.markPresentedSource(sequence: presentedSequence, streamEpoch: streamEpoch, presentedTime: time) }
                 #if MONIVIEW_PREVIEW_TESTING
                 self.onPresentation?(presentedSequence, wasGenerated, time)
@@ -1263,7 +1314,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationState("插帧准备中")
+                            frameStore.setInterpolationState(self.reconciledInterpolationCaption(preparing: "插帧准备中"))
                         } else if wasGenerationBatch {
                             self.generationBatchCosts.append(cost); self.generationBatchCosts = Array(self.generationBatchCosts.suffix(32))
                             self.generationBatchGPUCosts.append(gpuMS); self.generationBatchGPUCosts = Array(self.generationBatchGPUCosts.suffix(32))
@@ -1363,6 +1414,21 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // Doing this earlier lost the frame on any path that returns before submission.
         if consumedQueueHead, !queuedFrames.isEmpty { queuedFrames.removeFirst() }
         lastSubmitted = RenderKey(sequence: sequence, settings: settings, size: size, aspect: aspectMode, midpoint: generatedMidpoint)
+    }
+
+    /// Clears the drawable. Used while a source has not delivered its first frame, so the
+    /// previous source's picture cannot stay on screen behind the waiting mask.
+    private func presentBlankFrame(_ drawable: CAMetalDrawable, command: MTLCommandBuffer) {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = clearColor
+        command.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        command.present(drawable)
+        command.commit()
+        forceDraw = false
+        frames.setPreviewState("no-input")
     }
 }
 

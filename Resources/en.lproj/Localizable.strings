@@ -226,6 +226,7 @@
 "需要在系统设置中允许屏幕录制" = "Allow Screen Recording in System Settings";
 "没有可选择的窗口" = "No window available";
 "所选窗口已关闭" = "The selected window closed";
+"所选窗口没有画面" = "The selected window has no picture";
 "窗口捕获失败：%@" = "Window capture failed: %@";
 "正在连接窗口…" = "Connecting to window…";
 "插帧关闭：以下质量与高级选项不生效。" = "Interpolation is off; the quality and advanced options below have no effect.";

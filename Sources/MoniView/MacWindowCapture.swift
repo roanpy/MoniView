@@ -63,6 +63,23 @@ enum MacWindowCapturePolicy {
         min(240, max(30, reportedRate > 0 ? reportedRate : 60))
     }
 
+    /// System chrome owns only the desktop picture, the Dock, the menu bar and the window
+    /// manager's own surfaces. They pass the size filter - the wallpaper is the size of the
+    /// display - but they carry no user content, so offering them as a source left the
+    /// preview on the previous source while the readout claimed a running capture.
+    static let systemChromeBundleIdentifiers: Set<String> = [
+        "com.apple.WindowManager",
+        "com.apple.dock",
+        "com.apple.wallpaper.agent",
+        "com.apple.controlcenter",
+        "com.apple.notificationcenterui"
+    ]
+
+    static func isSystemChromeWindow(bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return systemChromeBundleIdentifiers.contains(bundleIdentifier)
+    }
+
     static func acceptsCallback<Stream: AnyObject>(
         callbackStream: Stream,
         activeStream: Stream?,
@@ -79,6 +96,10 @@ enum MacWindowCaptureError: LocalizedError {
     case permissionDenied
     case noWindows
     case windowUnavailable
+    /// The stream started, but the window never delivered a picture. A window can accept a
+    /// ScreenCaptureKit session and stay silent forever, which is not the same failure as a
+    /// closed window and must not be reported as a running capture.
+    case noPicture
     case startFailed(String)
 
     var errorDescription: String? {
@@ -86,6 +107,7 @@ enum MacWindowCaptureError: LocalizedError {
         case .permissionDenied: return L10n.text("需要在系统设置中允许屏幕录制")
         case .noWindows: return L10n.text("没有可选择的窗口")
         case .windowUnavailable: return L10n.text("所选窗口已关闭")
+        case .noPicture: return L10n.text("所选窗口没有画面")
         case .startFailed(let detail): return L10n.format("窗口捕获失败：%@", detail)
         }
     }
@@ -103,9 +125,18 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         case idle
         case starting
         case running
+        /// The stream is installed but delivered no picture within the first-frame
+        /// deadline. Distinct from a hard failure so the client can report the reason
+        /// without reconnecting the same window in a loop.
+        case noPicture
         case failed(String)
         case stopped
     }
+
+    /// How long a started stream may stay silent before its window is reported as having no
+    /// picture. ScreenCaptureKit delivers an initial frame for every window that has content,
+    /// so a few seconds separate "still connecting" from "never supplies a picture".
+    static let firstFrameDeadlineSeconds: Double = 3.0
 
     private let frameSink: (CMSampleBuffer) -> Void
     private let stateHandler: (State) -> Void
@@ -116,6 +147,11 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var streamGeneration: UInt64?
     private var generation: UInt64 = 0
     private var configuredSize = CGSize.zero
+    /// Set once startCapture() returned, so the configured size is known.
+    private var startInstalled = false
+    /// Set when the current stream delivered a complete frame. Frames can arrive while
+    /// startCapture() is still awaited, so running requires this and startInstalled.
+    private var deliveredPicture = false
     private var stateValue: State = .idle
     var state: State {
         stateLock.lock()
@@ -139,7 +175,8 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Windows eligible as a source: real application windows with a usable size,
-    /// excluding our own output so the enhanced copy never captures itself.
+    /// excluding our own output so the enhanced copy never captures itself, and system
+    /// chrome that has no user content to show.
     static func availableWindows(excludingBundleID: String?) async throws -> [MacWindowOption] {
         let content: SCShareableContent
         do {
@@ -150,6 +187,7 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let options = content.windows.compactMap { window -> MacWindowOption? in
             let bundle = window.owningApplication?.bundleIdentifier
             if let excludingBundleID, bundle == excludingBundleID { return nil }
+            if MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: bundle) { return nil }
             guard window.frame.width >= 160, window.frame.height >= 120 else { return nil }
             let name = window.owningApplication?.applicationName ?? ""
             // System chrome is not a meaningful capture target.
@@ -171,6 +209,8 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = nil
         streamGeneration = nil
         configuredSize = .zero
+        startInstalled = false
+        deliveredPicture = false
         stateValue = .starting
         enqueueStateLocked(.starting, generation: expected)
         stateLock.unlock()
@@ -191,6 +231,8 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = nil
         streamGeneration = nil
         configuredSize = .zero
+        startInstalled = false
+        deliveredPicture = false
         stateValue = .stopped
         enqueueStateLocked(.stopped, generation: expected)
         stateLock.unlock()
@@ -253,6 +295,15 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
             candidateStream = nil
+            // startCapture() returning only proves the session was installed. The first
+            // complete frame proves the window actually supplies a picture, so running is
+            // published from the callback below, never from here. A window that stays silent
+            // - the desktop picture, the window manager's own surfaces - is reported instead
+            // of leaving the client on a running state it cannot back with frames.
+            let firstFrameDeadline = DispatchWorkItem { [weak self] in
+                self?.reportMissingFirstFrame(generation: expected)
+            }
+            queue.asyncAfter(deadline: .now() + Self.firstFrameDeadlineSeconds, execute: firstFrameDeadline)
         } catch {
             let detail = MacWindowCaptureError.startFailed(error.localizedDescription).localizedDescription
             _ = transition(to: .failed(detail), generation: expected,
@@ -291,6 +342,9 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    /// Records the size frames are delivered at and completes the start. Running is published
+    /// here only if a picture already arrived while startCapture() was awaited - the size must
+    /// be known before the client can be told the source runs.
     private func activate(_ candidate: SCStream, configuredSize size: CGSize, generation expected: UInt64) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -300,9 +354,47 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                                                      activeGeneration: streamGeneration,
                                                      generation: generation) else { return false }
         self.configuredSize = size
-        stateValue = .running
-        enqueueStateLocked(.running, generation: expected)
+        startInstalled = true
+        if deliveredPicture {
+            stateValue = .running
+            enqueueStateLocked(.running, generation: expected)
+        }
         return true
+    }
+
+    /// Publishes running once the active stream has delivered a picture and the start has
+    /// completed. Publishing earlier would announce a picture the client cannot show.
+    private func promoteToRunning(matching candidate: SCStream) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard stateValue == .starting || stateValue == .noPicture,
+              MacWindowCapturePolicy.acceptsCallback(callbackStream: candidate,
+                                                     activeStream: stream,
+                                                     activeGeneration: streamGeneration,
+                                                     generation: generation) else { return }
+        deliveredPicture = true
+        guard startInstalled else { return }
+        stateValue = .running
+        enqueueStateLocked(.running, generation: generation)
+    }
+
+    /// A stream that has not delivered a picture is not a running source. Say so instead of
+    /// letting a silent window look like a working one, and leave the stream installed: a
+    /// window that starts presenting later recovers without the user selecting it again.
+    private func reportMissingFirstFrame(generation expected: UInt64) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == expected, stateValue == .starting, !deliveredPicture else { return }
+        stateValue = .noPicture
+        enqueueStateLocked(.noPicture, generation: expected)
+    }
+
+    /// True while the installed stream may deliver frames. Caller holds stateLock.
+    private func acceptsDeliveryLocked() -> Bool {
+        switch stateValue {
+        case .starting, .noPicture, .running: return true
+        case .idle, .failed, .stopped: return false
+        }
     }
 
     private func transition(to newState: State, generation expected: UInt64,
@@ -346,7 +438,10 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
               let statusRaw = attachments.first?[.status] as? Int,
               let status = SCFrameStatus(rawValue: statusRaw) else { return }
         stateLock.lock()
-        let isCurrent = stateValue == .running &&
+        // While starting, callbacks are accepted so the first picture can be delivered and
+        // justify the running state; a window reported as having no picture is still allowed
+        // to recover. Failed and stopped streams are ignored.
+        let isCurrent = acceptsDeliveryLocked() &&
             MacWindowCapturePolicy.acceptsCallback(callbackStream: stream,
                                                    activeStream: self.stream,
                                                    activeGeneration: streamGeneration,
@@ -356,14 +451,17 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // The next callback observes the new generation. Client code runs lock-free
         // so it can safely query or change capture state synchronously.
         guard isCurrent else { return }
-        guard status == .complete else {
+        guard status == .complete, CMSampleBufferGetImageBuffer(sampleBuffer) != nil else {
             // Unchanged content: the compositor re-sent the previous surface.
             // Counting it as dropped keeps cadence and duplicate statistics honest.
             if status == .idle { droppedHandler() }
             return
         }
-        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else { return }
+        // The picture is handed over before running is announced, so a client that reacts to
+        // the state already has a frame. Idle, blank and suspended are not pictures: they must
+        // not clear a waiting mask.
         frameSink(sampleBuffer)
+        promoteToRunning(matching: stream)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

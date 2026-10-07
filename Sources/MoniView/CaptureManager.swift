@@ -190,6 +190,12 @@ final class LatestVideoFrame {
     }
     private var lastPresentedSource: (sequence: UInt64, streamEpoch: UInt64)?
     private var interpolationState = "关闭"
+    /// Wall time of the most recent generated frame that actually reached the display.
+    /// Coupled with the output frames it authorises, it keeps a warm-up label from
+    /// contradicting complete pairs that keep presenting.
+    private var lastGeneratedPresentationAt: TimeInterval?
+    /// Stream epoch a pending blank-preview request belongs to. See clear(blankPreview:).
+    private var blankRequestEpoch: UInt64?
     private var interpolationCostMS = 0.0
     private var interpolationBudgetMS = 0.0
     private var interpolationWorkingSize: String?
@@ -349,6 +355,7 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }
         guard streamEpoch == self.streamEpoch else { return }
         generated += 1; recordPresentationTime(presentedTime)
+        lastGeneratedPresentationAt = presentedTime ?? ProcessInfo.processInfo.systemUptime
     }
     func markPresentedSource(sequence: UInt64, streamEpoch: UInt64, presentedTime: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
@@ -366,8 +373,32 @@ final class LatestVideoFrame {
         generated = 0; presentedSource = 0
         return value
     }
-    func clear() {
+    /// Whether a generated frame has actually reached the display recently. The renderer
+    /// publishes a preparation label only while this is false, so bookkeeping warm-up resets
+    /// cannot contradict complete pairs that keep presenting.
+    func hasRecentGeneratedPresentation(
+        at now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+        lifetime: TimeInterval = LatestVideoFrame.interpolationActivityLifetime
+    ) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        guard let lastGeneratedPresentationAt, now.isFinite, now >= lastGeneratedPresentationAt else { return false }
+        return now - lastGeneratedPresentationAt <= lifetime
+    }
+    /// True while the renderer still owes a blank frame for the most recent source switch.
+    var isBlankRequestPending: Bool { lock.lock(); defer { lock.unlock() }; return blankRequestEpoch != nil }
+    /// Consumes a pending blank request and reports whether the drawable must be blanked.
+    /// A frame that arrived first supersedes it; blanking then would hide a live picture.
+    func consumeBlankRequest() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let requestedEpoch = blankRequestEpoch else { return false }
+        blankRequestEpoch = nil
+        return buffer == nil && requestedEpoch == streamEpoch
+    }
+    /// Clears the mailbox. blankPreview additionally asks the renderer to blank the drawable,
+    /// because the last presented frame would otherwise stay on screen while the new source
+    /// has not delivered anything.
+    func clear(blankPreview: Bool = false) {
+        lock.lock()
         buffer = nil
         formatDescription = nil
         previous = nil; pts = .invalid; sourceIntervals.removeAll(keepingCapacity: true)
@@ -376,8 +407,14 @@ final class LatestVideoFrame {
         publishedMultiplier = nil
         publishedInterpolationBasisFPS = nil
         publishedInterpolationAt = nil
+        lastGeneratedPresentationAt = nil
+        blankRequestEpoch = blankPreview ? streamEpoch : nil
         inputContentCadence.reset(streamEpoch: streamEpoch)
         level = 0; lastPresentationTime = nil; presentationIntervals.removeAll(keepingCapacity: true)
+        let callback = blankPreview ? frameHandler : nil
+        lock.unlock()
+        // Request the blanking draw now: nothing else would ask for one until a frame arrives.
+        callback?()
     }
     func markRendered(receivedAt: UInt64, gpuMS: Double) {
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - receivedAt) / 1_000_000
@@ -729,8 +766,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             } catch {
                 guard self.macWindowRefreshRevision.isCurrent(revision), self.sourceKind == .macWindow, !self.isRecording else { return }
                 self.macWindowOptions = []
-                self.macWindowStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                // Clean up first: the stop path clears the pending status, so publishing the
+                // reason before it erased the reason the user needs to see.
                 self.stopMacWindowCapture()
+                self.macWindowStatus = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
         }
     }
@@ -757,7 +796,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         macWindowCaptureIsRunning = false
         configuredMacWindowSize = .zero
         isRunning = false
-        frames.clear()
+        // A new window source owns the preview only once it delivers a picture. Until then
+        // the previous source's frame, pair pairings and readouts must not stay visible, or
+        // the preview contradicts the waiting mask.
+        frames.clear(blankPreview: true)
+        frames.setInterpolationState(L10n.text("等待窗口画面"))
         // The window stream replaces any device stream in the same preview pipeline.
         #if MONIVIEW_CAPTURE_TESTING
         windowCaptureStartCountForTesting += 1
@@ -787,12 +830,22 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             configuredMacWindowSize = .zero
             isRunning = false
             macWindowStatus = L10n.text("正在连接窗口…")
+        case .noPicture:
+            macWindowCaptureIsRunning = false
+            configuredMacWindowSize = .zero
+            isRunning = false
+            frames.setInterpolationState(L10n.text("等待窗口画面"))
+            // The stream stays installed so a window that starts presenting later recovers by
+            // itself; reconnecting it here would only repeat the same failure. The reason is
+            // reported so the waiting mask never hides a source that supplies nothing.
+            macWindowStatus = L10n.text("所选窗口没有画面")
         case .failed(let message):
             macWindowCaptureIsRunning = false
             configuredMacWindowSize = .zero
             macWindowStatus = message
             isRunning = false
-            frames.clear()
+            frames.clear(blankPreview: true)
+            frames.setInterpolationState(L10n.text("等待窗口画面"))
             // A closed window is expected during normal use; refresh the list instead
             // of leaving a dead preview. Finalize an active file before enumerating again.
             if isRecording {
@@ -917,7 +970,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         resetContentRateObservation()
         let generation = videoConfiguration.advance()
         if let id { UserDefaults.standard.set(id, forKey: "device.lastVideo") }
-        frames.clear()
+        // The previous device's picture must not stay on screen while the new device has
+        // not delivered its first frame; the waiting overlay alone left the stale drawable
+        // visible behind a translucent mask.
+        frames.clear(blankPreview: true)
         let device = Self.devices(.video).first { $0.uniqueID == id }
         sessionQueue.async { [weak self] in
             guard let self else { return }

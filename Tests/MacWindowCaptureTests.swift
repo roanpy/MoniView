@@ -2,6 +2,7 @@ import AppKit
 import CoreMedia
 import CoreVideo
 import Foundation
+@preconcurrency import ScreenCaptureKit
 
 // Preserve progress even when a precondition fails later.
 setbuf(stdout, nil)
@@ -21,7 +22,8 @@ private final class Counter {
     private(set) var states: [MacWindowCapture.State] = []
     private var stateObservations: [(reported: MacWindowCapture.State,
                                      captureState: MacWindowCapture.State?,
-                                     configuredSize: CGSize)] = []
+                                     configuredSize: CGSize,
+                                     deliveredFrames: Int)] = []
     weak var capture: MacWindowCapture?
 
     func record(sample: CMSampleBuffer) {
@@ -72,14 +74,14 @@ private final class Counter {
         let configuredSize = capture?.configuredPixelSize ?? .zero
         lock.lock()
         states.append(state)
-        stateObservations.append((state, captureState, configuredSize))
+        stateObservations.append((state, captureState, configuredSize, frames.count))
         lock.unlock()
     }
 
-    var runningStateObservation: (captureState: MacWindowCapture.State?, configuredSize: CGSize)? {
+    var runningStateObservation: (captureState: MacWindowCapture.State?, configuredSize: CGSize, deliveredFrames: Int)? {
         lock.lock(); defer { lock.unlock() }
         guard let observation = stateObservations.first(where: { $0.reported == .running }) else { return nil }
-        return (observation.captureState, observation.configuredSize)
+        return (observation.captureState, observation.configuredSize, observation.deliveredFrames)
     }
 
     var snapshot: (count: Int, dropped: Int, sizes: Set<String>, formats: Set<UInt32>, states: [MacWindowCapture.State], increasing: Bool) {
@@ -185,6 +187,23 @@ enum MacWindowCaptureTests {
             check(!excluded.contains { $0.applicationName == other.applicationName }, "Excluding a bundle identifier removes its windows")
         }
 
+        // System chrome owns the desktop picture and the window manager's own surfaces. They
+        // pass every other filter, so they must be excluded explicitly: selecting one leaves
+        // the previous source on screen with a readout that claims a running capture.
+        check(MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: "com.apple.WindowManager") &&
+              MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: "com.apple.dock") &&
+              !MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: "com.example.game") &&
+              !MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: nil),
+              "System chrome is identified by its owning process, and only by that")
+        let shareable = try! runBlocking { try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
+        let chromeIDs = Set(shareable.windows.filter { window in
+            window.frame.width >= 160 && window.frame.height >= 120 &&
+                !(window.owningApplication?.applicationName ?? "").isEmpty &&
+                MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: window.owningApplication?.bundleIdentifier)
+        }.map { $0.windowID })
+        print("System chrome windows present on screen: \(chromeIDs.count)")
+        check(options.allSatisfy { !chromeIDs.contains($0.id) }, "Discovery offers no system chrome window as a source")
+
         // Animated source: frames arrive at the configured size in BGRA with increasing PTS.
         let counter = Counter()
         let capture = MacWindowCapture(
@@ -206,6 +225,9 @@ enum MacWindowCaptureTests {
         check(runningObservation?.captureState == .running &&
               runningObservation?.configuredSize == CGSize(width: expectedPixelWidth, height: expectedPixelHeight),
               "State callback can synchronously read state and configured pixels")
+        // Running must describe a delivered picture, not a session that was merely installed.
+        check((runningObservation?.deliveredFrames ?? 0) >= 1,
+              "Running is published only after the first frame is delivered")
 
         // Stop must stop delivery and report the stopped state.
         capture.stop()
@@ -249,6 +271,36 @@ enum MacWindowCaptureTests {
         print("Settled window: frames=\(staticStats.count) distinct=\(staticCounter.distinctSignatures) steady signatures=\(steady.count)")
         check(steady.count == 1,
               "Unchanged window content repeats byte-identically once settled (got \(steady.count) signatures in the last 50 of \(staticCounter.signatureCount) frames; \(staticCounter.distinctSignatures) distinct overall)")
+
+        // A window can accept a stream and stay silent forever. Running must never describe
+        // that state, and the silence has to be reported rather than waiting indefinitely.
+        // The window manager's own surfaces are exactly this: they exist on every Mac, so
+        // they are used here directly instead of through the discovery list that excludes them.
+        let silentCandidates = shareable.windows.filter {
+            $0.frame.width >= 160 && $0.frame.height >= 120 &&
+                MacWindowCapturePolicy.isSystemChromeWindow(bundleIdentifier: $0.owningApplication?.bundleIdentifier)
+        }
+        // The desktop picture first: it is the surface reported as never supplying content.
+        if let silentWindow = silentCandidates.first(where: { ($0.title ?? "").contains("Wallpaper") })
+            ?? silentCandidates.min(by: { $0.windowLayer < $1.windowLayer }) {
+            let silentCounter = Counter()
+            let silentCapture = MacWindowCapture(
+                frameSink: { silentCounter.record(sample: $0) },
+                state: { silentCounter.recordState($0) },
+                dropped: { silentCounter.recordDrop() })
+            silentCounter.capture = silentCapture
+            silentCapture.start(windowID: silentWindow.windowID)
+            pump(MacWindowCapture.firstFrameDeadlineSeconds + 1.0)
+            let silentStats = silentCounter.snapshot
+            silentCapture.stop()
+            print("Silent window \(silentWindow.windowID) (\(silentWindow.title ?? "-")): frames=\(silentStats.count) states=\(silentStats.states)")
+            check(!(silentStats.states.contains(.running) && silentStats.count == 0),
+                  "Running is not published for a window that delivered no frame")
+            check(silentStats.states.contains(.noPicture) || silentStats.count > 0,
+                  "A silent window is reported as having no picture")
+        } else {
+            print("SKIP silent-window check: no system chrome window is on screen")
+        }
 
         timer?.invalidate()
         print("Mac window capture: \(checks) checks passed (real ScreenCaptureKit session; not a game, quality or latency claim).")

@@ -225,6 +225,8 @@ activityProbe.setEventHandler {
 activityProbe.resume()
 var restartGenerated = 0, restartSources = 0, restartWindows = 0, restartPassWindows = 0
 var restartElapsed = 0.0
+var restartCaptionWindows = 0
+var restartCaptionContradictions: [String] = []
 var cadenceEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
 var restartEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
 var stableEvents: [(sequence: UInt64, generated: Bool, time: Double)] = []
@@ -380,6 +382,16 @@ stats.setEventHandler {
            Double(sourcePresentations) / cadWindowDuration >= expectedContentFPS * 0.9 {
             restartPassWindows += 1
         }
+        // Throughput alone let a run present complete pairs while the caption still claimed
+        // the engine was preparing. A window that presented anything must not describe
+        // itself as still preparing.
+        if gen > 0 || sourcePresentations > 0 {
+            restartCaptionWindows += 1
+            let caption = frames.currentInterpolationState()
+            if caption.contains("准备中") {
+                restartCaptionContradictions.append("tick=\(tick) state=\(caption) source=\(sourcePresentations) generated=\(gen)")
+            }
+        }
     }
     if Double(gen) >= expectedContentFPS * 0.85 { steady += 1 }
     // Count source presentations independently from renderer statistics. The pair
@@ -464,9 +476,11 @@ stats.setEventHandler {
                          "recent pair readout flickered or changed step during steady interpolation")
         }
         if testRestart {
-            print("restart acceptance: windows \(restartPassWindows)/\(restartWindows), source \(Double(restartSources) / restartElapsed) FPS, generated \(Double(restartGenerated) / restartElapsed) FPS, expected multiplier \(expectedMultiplier)")
+            print("restart acceptance: windows \(restartPassWindows)/\(restartWindows), caption non-preparing \(restartCaptionWindows - restartCaptionContradictions.count)/\(restartCaptionWindows), source \(Double(restartSources) / restartElapsed) FPS, generated \(Double(restartGenerated) / restartElapsed) FPS, expected multiplier \(expectedMultiplier)")
             precondition(restartWindows == 6 && restartPassWindows >= 5,
                          "Interpolation did not restore its target throughput after stop/start")
+            precondition(restartCaptionContradictions.isEmpty,
+                         "restart caption kept claiming preparation while pairs presented: \(restartCaptionContradictions.joined(separator: "; "))")
             validateCadencePresentations(restartEvents, multiplier: Int(expectedMultiplier))
             print("PASS stop/start: target generated rate, source rate, pair structure and spacing restored")
         }
