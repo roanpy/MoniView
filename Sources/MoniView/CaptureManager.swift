@@ -1428,9 +1428,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // between runs drags the temporal multiplier with it.
             let rawDetected = ContentCadencePolicy.quantizedRate(self.frames.currentMeasuredContentFPS())
             if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
-            let detectedContentFPS = rawDetected ?? (Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil)
-            self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
-                previous: self.detectedContentFPS, current: detectedContentFPS, streak: self.contentFPSStabilityStreak)
+            let held = Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil
+            let detectedContentFPS = rawDetected ?? held
+            // Only a fresh measurement advances the streak. Re-feeding the held value every
+            // second let an old result accumulate "stability" with no new evidence, which
+            // then justified switching the capture rate on stale information.
+            if rawDetected != nil {
+                self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
+                    previous: self.detectedContentFPS, current: detectedContentFPS, streak: self.contentFPSStabilityStreak)
+            } else {
+                self.contentFPSStabilityStreak = 0
+            }
             self.detectedContentFPS = detectedContentFPS
             self.stableContentFPS = ContentCadencePolicy.stableRate(detectedContentFPS, streak: self.contentFPSStabilityStreak)
             if self.followsRealContentRate, !self.isRecording, !self.isSwitchingVideoDevice,
