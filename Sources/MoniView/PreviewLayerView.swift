@@ -833,9 +833,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // Prefer the requested step, otherwise the lowest the engine declares.
                     // Taking the first element assumed the arrays are ordered, so declaring a
                     // wider set for an engine would silently change what a fallback means.
-                    let multiplier = engineMultipliers.contains(requested)
+                    let stated = engineMultipliers.contains(requested)
                         ? requested
                         : (engineMultipliers.min() ?? 2)
+                    // The step came from a tolerant cadence estimate; the period comes from
+                    // measured PTS. Capture noise can read a 60 Hz pair as 20 FPS content and
+                    // ask for three presentations where the display only has room for two, which
+                    // pushes the endpoint past its deadline. Hold the step to what this pair fits.
+                    let multiplier = FrameInterpolationPolicy.multiplierFittingPair(
+                        stated, pairPeriod: pair.period, displayFPS: displayFPS)
                     let phases = FrameInterpolationPolicy.midpointPhases(multiplier: multiplier)
                     guard !phases.isEmpty else {
                         // The GPU semaphore is already held here, so leaving without releasing it

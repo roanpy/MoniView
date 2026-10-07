@@ -73,6 +73,26 @@ enum FrameInterpolationPolicy {
         guard steps >= 2, abs(multiplier - Double(steps)) < 0.001 else { return [] }
         return (1..<steps).map { Float($0) / Float(steps) }
     }
+
+    /// Presentations the display can hold inside one pair period, capped at the engine's
+    /// stated multiplier. The step is chosen from a tolerant cadence estimate, while the
+    /// period comes from measured PTS, so the two can disagree: capture noise can read a
+    /// 60 Hz pair as 20 FPS content and ask for three presentations where only one has a
+    /// slot. Asking for more than the display can hold pushes the endpoint past its
+    /// deadline, so the step is reduced to what this pair actually fits.
+    static func multiplierFittingPair(_ multiplier: Double, pairPeriod: Double, displayFPS: Double) -> Double {
+        guard multiplier.isFinite, multiplier >= 1, pairPeriod.isFinite, pairPeriod > 0,
+              displayFPS.isFinite, displayFPS > 0 else { return 1 }
+        let stated = max(1, Int(multiplier.rounded()))
+        guard stated >= 2 else { return 1 }
+        // Tolerance absorbs the float error in 60 * (1/60) and the sub-percent difference
+        // between a 59.94 pair and a 60 Hz slot grid; a genuinely missing slot is 0.5 or
+        // more away, so a 2% allowance cannot hide one.
+        let capacity = displayFPS * pairPeriod + 0.02
+        var allowed = 1
+        for step in 2...min(stated, 3) where Double(step) <= capacity { allowed = step }
+        return Double(allowed)
+    }
     static let budgetFraction = 0.9
     static let pairBudgetFraction = 0.9
     static let midpointBudgetFraction = 1.5

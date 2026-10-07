@@ -155,6 +155,23 @@ struct FrameInterpolationPolicyTests {
         for invalid in [1.0, 2.5, 4.0, 0.0, Double.nan] {
             check(P.midpointPhases(multiplier: invalid).isEmpty, "Invalid multiplier yields no phases")
         }
+        // The step is chosen from a tolerant cadence estimate while the period comes from
+        // measured PTS. Noise that reads a 60 Hz pair as 20 FPS content must not buy a third
+        // presentation the display has no room for.
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 20, displayFPS: 120) == 3, "20 FPS content fits 3x on a 120 Hz display")
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 20, displayFPS: 60) == 3, "20 FPS content fits 3x on a 60 Hz display")
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 60, displayFPS: 120) == 2, "A 60 Hz pair only has room for 2x")
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 60, displayFPS: 60) == 1, "A 60 Hz pair on a 60 Hz display cannot be interpolated")
+        check(P.multiplierFittingPair(2, pairPeriod: 1.0 / 30, displayFPS: 60) == 2, "30 FPS content keeps 2x on a 60 Hz display")
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 59.94, displayFPS: 60) == 1, "A 59.94 pair still leaves no slot on a 60 Hz grid")
+        check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 29.97, displayFPS: 60) == 2, "A 29.97 pair fits 2x and not 3x")
+        for invalid in [1.0, 0.0, -3, Double.nan] {
+            check(P.multiplierFittingPair(invalid, pairPeriod: 1.0 / 20, displayFPS: 120) == 1, "Invalid multiplier yields no step")
+        }
+        for invalid in [0.0, -1, Double.nan, Double.infinity] {
+            check(P.multiplierFittingPair(3, pairPeriod: invalid, displayFPS: 120) == 1, "Invalid pair period yields no step")
+            check(P.multiplierFittingPair(3, pairPeriod: 1.0 / 20, displayFPS: invalid) == 1, "Invalid display rate yields no step")
+        }
         check(P.costsFit(midpoints: [0.005, 0.005], source: 0.006, slot: 0.02), "Two midpoints fit a long slot")
         check(!P.costsFit(midpoints: [0.04, 0.04], source: 0.006, slot: 0.02), "Midpoints past the individual cap are rejected")
         check(!P.costsFit(midpoints: [], source: 0.001, slot: 0.02), "An empty midpoint list is rejected")
