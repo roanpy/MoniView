@@ -753,7 +753,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 }
             }
         }
-        let contentFPS = sourceFPS / pairBudgetMultiplier()
+        // Snap the estimate onto a standard rate here too, so the multiplier the renderer
+        // picks and the one the panel reports come from the same number. Without this the
+        // panel used the snapped value while scheduling used the raw one, and a value
+        // sitting between two standard rates could show one target and run another.
+        let rawContentFPS = sourceFPS / pairBudgetMultiplier()
+        let contentFPS = ContentCadencePolicy.quantizedRate(pairBudgetMultiplier() > 1.05 ? rawContentFPS : nil)
+            ?? (pairBudgetMultiplier() > 1.05 ? rawContentFPS : sourceFPS)
         frames.setMeasuredContentFPS(pairBudgetMultiplier() > 1.05 && contentFPS >= 1 ? contentFPS : nil)
         let admitted = FrameInterpolationPolicy.eligibility(runtimeSupported: FrameInterpolatorSupport.isSupported(settings.frameInterpolation), inputFPS: contentFPS, displayFPS: displayFPS, inputValid: true)
         // An exact-copy source (30 Hz content in a 60 Hz signal) needs no new presentation:
