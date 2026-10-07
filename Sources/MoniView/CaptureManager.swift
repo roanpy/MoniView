@@ -118,9 +118,9 @@ struct PictureSettings: Equatable, Codable {
         if frameInterpolation == .off, forceFrameInterpolation { forceFrameInterpolation = false }
     }
 
-    /// Force only has meaning while interpolation runs. This is cleared in the setter
-    /// below rather than from picture.didSet: writing the flag inside the observer
-    /// re-enters it, which recursed until the stack ran out.
+    /// Force only has meaning while interpolation runs, so turning interpolation off
+    /// clears it. This is never called from picture.didSet: writing the flag inside the
+    /// observer re-enters it, which recursed until the stack ran out.
     mutating func setInterpolationEnabled(_ enabled: Bool) {
         if !enabled { forceFrameInterpolation = false }
         if enabled {
@@ -433,6 +433,25 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var contentFPSStabilityStreak = 0
     @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
+    /// Temporal multiplier the renderer is using for the current content rate, derived with
+    /// the same policy the scheduler applies so the panel cannot disagree with the engine.
+    var activeMultiplier: Double {
+        guard let content = detectedContentFPS, content > 0 else { return 2 }
+        let engine = picture.frameInterpolation
+        let supported: [Double] = engine == .flowBlend || engine == .off ? [2, 3] : [2]
+        let requested = FrameInterpolationPolicy.multiplier(contentFPS: content, targetFPS: 60, displayFPS: max(60, displayMaximumFPS))
+        return supported.contains(requested) ? requested : (supported.first ?? 2)
+    }
+    /// Short label for the panel, e.g. "2×" or "3×"; interpolation off shows the target only.
+    var activeMultiplierLabel: String {
+        let value = activeMultiplier
+        return value == value.rounded() ? String(format: "%.0f×", value) : String(format: "%.1f×", value)
+    }
+    /// Frame rate the current content rate and multiplier aim at.
+    var interpolationTargetFPS: Double {
+        guard let content = detectedContentFPS, content > 0 else { return 0 }
+        return content * activeMultiplier
+    }
     var outputFPS: Int { presentedOutputFPS }
     @Published private(set) var interpolationStatus = "关闭"
     @Published private(set) var aiUpscaleStatus = ""
@@ -1404,7 +1423,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             self.skippedDuplicatePairsPerSecond = Int((Double(self.frames.takeDuplicateSkips()) / elapsed).rounded())
             // Hold a lost detection briefly: content hovering at the duplicate threshold
             // must not flap the UI. Budget math uses its own live window, unaffected.
-            let rawDetected = self.frames.currentMeasuredContentFPS()
+            // Snap the raw ratio onto a standard rate before it is used: the measurement can
+            // land between two of them depending on capture timing, and a value that hops
+            // between runs drags the temporal multiplier with it.
+            let rawDetected = ContentCadencePolicy.quantizedRate(self.frames.currentMeasuredContentFPS())
             if let rawDetected { self.heldDetectedContentFPS = rawDetected; self.lastDetectedContentFPSAt = Date() }
             let detectedContentFPS = rawDetected ?? (Date().timeIntervalSince(self.lastDetectedContentFPSAt) < 10 ? self.heldDetectedContentFPS : nil)
             self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
@@ -1512,6 +1534,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["presentationIntervalP95MS"] = presentationIntervalP95MS
         payload["interpolationStatus"] = interpolationStatus
         payload["interpolationMidpointGPUMs"] = frames.currentInterpolationGPUCost()
+        payload["activeMultiplier"] = activeMultiplier
+        payload["interpolationTargetFPS"] = interpolationTargetFPS
         payload["aiUpscaleStatus"] = aiUpscaleStatus
         payload["generatedFPS"] = generatedFPS
         payload["presentedSourceFPS"] = presentedSourceFPS

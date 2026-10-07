@@ -63,6 +63,19 @@ struct ContentCadencePolicyTests {
               endpointDeadline: midpoint + slot, slot: slot, presentationIntervalP95: slot * 1.5),
               "Poor presentation P95 does not qualify")
 
-        print("ContentCadencePolicy: \(checks) checks passed (stability, fractional rate selection, unique PTS cadence, and presentation qualification).")
+                // Snapping: jitter between standard rates must resolve to the nearest one.
+        check(ContentCadencePolicy.quantizedRate(30.0) == 30, "An exact standard rate is unchanged")
+        check(ContentCadencePolicy.quantizedRate(29.97) == 29.97, "Fractional standard rate is preserved")
+        check(ContentCadencePolicy.quantizedRate(30.4) == 30, "Slight overshoot resolves to 30")
+        check(ContentCadencePolicy.quantizedRate(37.5) == 30, "Midpoint drift resolves downward, since jitter only inflates the estimate")
+        check(ContentCadencePolicy.quantizedRate(41.25) == 40, "Clear overshoot still resolves to 40")
+        check(ContentCadencePolicy.quantizedRate(20.2) == 20, "Low content resolves to 20")
+        check(ContentCadencePolicy.quantizedRate(33.0) == 30, "33 FPS resolves to 30")
+        for invalid in [0.0, -5, Double.nan, Double.infinity] {
+            check(ContentCadencePolicy.quantizedRate(invalid) == nil, "Invalid rate is not quantized")
+        }
+        let missing: Double? = nil
+        check(ContentCadencePolicy.quantizedRate(missing) == nil, "Missing rate is not quantized")
+print("ContentCadencePolicy: \(checks) checks passed (stability, fractional rate selection, unique PTS cadence, and presentation qualification).")
     }
 }

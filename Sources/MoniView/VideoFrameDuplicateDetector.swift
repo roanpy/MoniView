@@ -11,6 +11,85 @@ import ImageIO
 enum VideoFrameDuplicateDetector {
     /// Returns true only when dimensions, pixel format, image-interpretation attachments,
     /// and every active pixel byte match exactly. Row padding is ignored.
+    /// A capture device can resend one picture with a handful of bytes changed by its own
+    /// encoding noise. Exact comparison reads that as new content, which inflates the
+    /// measured content rate: a 30 FPS game in a 60 Hz signal measured 40 to 45 FPS on
+    /// this hardware. Cadence measurement therefore allows a small fraction of differing
+    /// bytes, while the inference-skip decision keeps using the exact comparison so it
+    /// never treats genuinely different pictures as repeats.
+    static func areEquivalentForCadence(_ previous: CVPixelBuffer, _ current: CVPixelBuffer,
+                                        allowedDifference: Double = 0.002) -> Bool {
+        guard ObjectIdentifier(previous as AnyObject) != ObjectIdentifier(current as AnyObject),
+              CVPixelBufferGetWidth(previous) == CVPixelBufferGetWidth(current),
+              CVPixelBufferGetHeight(previous) == CVPixelBufferGetHeight(current),
+              CVPixelBufferGetPixelFormatType(previous) == CVPixelBufferGetPixelFormatType(current),
+              attachmentsMatch(previous, current) else { return false }
+        guard CVPixelBufferLockBaseAddress(previous, .readOnly) == kCVReturnSuccess else { return false }
+        defer { CVPixelBufferUnlockBaseAddress(previous, .readOnly) }
+        guard CVPixelBufferLockBaseAddress(current, .readOnly) == kCVReturnSuccess else { return false }
+        defer { CVPixelBufferUnlockBaseAddress(current, .readOnly) }
+        let total = planeByteCount(previous)
+        guard total > 0 else { return false }
+        let differing = differingByteCount(previous, current)
+        return Double(differing) <= Double(total) * allowedDifference
+    }
+
+    /// Total compared byte count across the planes an exact comparison would visit.
+    private static func planeByteCount(_ buffer: CVPixelBuffer) -> Int {
+        var total = 0
+        if CVPixelBufferGetPlaneCount(buffer) == 0 {
+            total = CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer)
+        } else {
+            for plane in 0..<CVPixelBufferGetPlaneCount(buffer) {
+                total += CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane)
+            }
+        }
+        return total
+    }
+
+    /// Bytes that differ, counted on the same rows the exact comparison inspects.
+    private static func differingByteCount(_ first: CVPixelBuffer, _ second: CVPixelBuffer) -> Int {
+        var differing = 0
+        if CVPixelBufferGetPlaneCount(first) == 0 {
+            guard let a = CVPixelBufferGetBaseAddress(first), let b = CVPixelBufferGetBaseAddress(second) else { return .max }
+            differing += countDifferences(a, CVPixelBufferGetBytesPerRow(first),
+                                          b, CVPixelBufferGetBytesPerRow(second),
+                                          rowBytes: CVPixelBufferGetWidth(first) * 4,
+                                          rowCount: CVPixelBufferGetHeight(first))
+        } else {
+            for plane in 0..<CVPixelBufferGetPlaneCount(first) {
+                guard let a = CVPixelBufferGetBaseAddressOfPlane(first, plane),
+                      let b = CVPixelBufferGetBaseAddressOfPlane(second, plane) else { return .max }
+                let bytesPerSample = plane == 0 ? 1 : 2
+                differing += countDifferences(a, CVPixelBufferGetBytesPerRowOfPlane(first, plane),
+                                              b, CVPixelBufferGetBytesPerRowOfPlane(second, plane),
+                                              rowBytes: CVPixelBufferGetWidthOfPlane(first, plane) * bytesPerSample,
+                                              rowCount: CVPixelBufferGetHeightOfPlane(first, plane))
+            }
+        }
+        return differing
+    }
+
+    private static func countDifferences(
+        _ firstBase: UnsafeMutableRawPointer, _ firstStride: Int,
+        _ secondBase: UnsafeMutableRawPointer, _ secondStride: Int,
+        rowBytes: Int, rowCount: Int
+    ) -> Int {
+        guard rowBytes > 0, rowCount > 0, firstStride >= rowBytes, secondStride >= rowBytes else { return .max }
+        let first = firstBase.assumingMemoryBound(to: UInt8.self)
+        let second = secondBase.assumingMemoryBound(to: UInt8.self)
+        var differing = 0
+        for row in 0..<rowCount {
+            let a = first + row * firstStride
+            let b = second + row * secondStride
+            // Rows of a duplicate are usually byte-identical, so let memcmp settle them at
+            // memory speed and only count bytes on the rare row that actually differs.
+            if memcmp(a, b, rowBytes) == 0 { continue }
+            for index in 0..<rowBytes where a[index] != b[index] { differing += 1 }
+        }
+        return differing
+    }
+
     static func areIdentical(_ previous: CVPixelBuffer, _ current: CVPixelBuffer) -> Bool {
         // A shared reference could be mutable through another alias; do not infer that
         // its contents stayed unchanged between capture and comparison.

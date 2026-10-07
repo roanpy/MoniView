@@ -309,6 +309,8 @@ final class FlowBlendInterpolator {
     // Pipelines are built synchronously in init, so the engine is ready immediately.
     // prepare/stop match the renderer's engine protocol; resource pools release with ARC.
     var isReady: Bool { true }
+    /// The blend engine accepts any phase in 0...1, so it can fill 2x and 3x.
+    var supportedMultipliers: [Double] { [2, 3] }
     var onStateChange: (() -> Void)?
     func prepare(width: Int, height: Int) {
         poolLock.lock()

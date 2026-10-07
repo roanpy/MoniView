@@ -25,6 +25,27 @@ enum ContentCadencePolicy {
         return target >= contentFPS - frameRateTolerance
     }
 
+    /// Standard content rates an estimate is snapped onto. Capture timing jitter and
+    /// partially repeated pictures make the raw ratio hop between neighbouring values —
+    /// the same 30 FPS game measured 20, 30, 37.5 and 41.25 across runs — and a hopping
+    /// estimate drags the temporal multiplier with it. Snapping keeps the choice stable
+    /// and still reports a rate the source could plausibly be running at.
+    static let standardRates: [Double] = [20, 23.976, 24, 25, 29.97, 30, 40, 45, 48, 50, 60]
+
+    static func quantizedRate(_ rate: Double?) -> Double? {
+        guard let rate, rate.isFinite, rate > 0 else { return nil }
+        // Bias downward. Capture timing jitter makes two copies of one picture differ by a
+        // few pixels, so they read as distinct frames; the error only ever pushes the
+        // estimate up, never down. Snapping a value that sits clearly between two standard
+        // rates to the lower one therefore recovers the true rate instead of inflating it:
+        // 37.5 for a 30 FPS game becomes 30, not 40.
+        guard let upper = standardRates.first(where: { $0 >= rate }) else { return standardRates.last }
+        guard let lower = standardRates.last(where: { $0 <= rate }) else { return standardRates.first }
+        if upper == lower { return lower }
+        let span = upper - lower
+        return (rate - lower) / span > 0.9 ? upper : lower
+    }
+
     static func targetRate(contentFPS: Double, supportedRates: [Double]) -> Double? {
         guard contentFPS.isFinite, contentFPS > 0 else { return nil }
         let rates = supportedRates.filter { $0.isFinite && $0 > 0 }.sorted()

@@ -17,7 +17,8 @@ let height = Int(environment["MONIVIEW_TEST_HEIGHT"] ?? "1080") ?? 1080
 let presentationLimit = 3
 let require120 = environment["MONIVIEW_REQUIRE_120"] == "1"
 let requireCadence = environment["MONIVIEW_REQUIRE_2X"] == "1"
-let expectedContentFPS = Double(fps) / (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? 2 : 1)
+let repeatDivisor = Int(environment["MONIVIEW_TEST_REPEAT"] ?? (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? "2" : "1")) ?? 1
+let expectedContentFPS = Double(fps) / Double(max(1, repeatDivisor))
 let stopAt = require120 ? 36 : 16
 let testRestart = environment["MONIVIEW_TEST_RESTART"] == "1"
 precondition(!testRestart || !require120, "Restart test uses the non-strict fixture")
@@ -147,7 +148,10 @@ input.setEventHandler {
     }
     let y = CVPixelBufferGetBaseAddressOfPlane(buffer,0)!.assumingMemoryBound(to: UInt8.self)
     let row = CVPixelBufferGetBytesPerRowOfPlane(buffer,0)
-    let motionSequence = environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? sequence / 2 : sequence
+    // Repeat divisor selects the content rate inside the 60 Hz signal: 2 gives 30 FPS
+    // content, 3 gives 20 FPS, which is the case the 3x path exists to fill.
+    let repeatDivisor = Int(environment["MONIVIEW_TEST_REPEAT"] ?? (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? "2" : "1")) ?? 1
+    let motionSequence = repeatDivisor > 1 ? sequence / Int64(repeatDivisor) : sequence
     let offset = Int(motionSequence * 8) % (width - 160)
     for h in (height / 3)..<(height * 2 / 3) { memset(y + h * row + offset, 220, 160) }
     CVPixelBufferUnlockBaseAddress(buffer, [])

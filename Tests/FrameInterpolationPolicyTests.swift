@@ -120,6 +120,27 @@ struct FrameInterpolationPolicyTests {
         let elapsedMidpoint = P.processingCost(cpu: 0.0006, gpu: 0.0001, encodeToCompletion: 0.018)
         check(!P.costsFit(midpoint: elapsedMidpoint, source: 0.001, slot: 1.0 / 120), "Tiny GPU span cannot hide 18ms completion")
         check(P.allowsMeasuredPair(midpoint: elapsedMidpoint, source: 0.001, slot: 1.0 / 120, force: true, deadlineFits: true), "Force still bypasses real measured budget")
+        // Temporal multiplier selection: the smallest step that reaches the target.
+        check(P.multiplier(contentFPS: 30, targetFPS: 60, displayFPS: 120) == 2, "30 FPS content keeps the 2x path")
+        check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 120) == 3, "20 FPS content takes 3x to reach 60")
+        check(P.multiplier(contentFPS: 24, targetFPS: 60, displayFPS: 120) == 3, "24 FPS content takes 3x to reach 60")
+        check(P.multiplier(contentFPS: 30, targetFPS: 60, displayFPS: 60) == 2, "60 Hz display still allows 30 to 60")
+        check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 60) == 3, "60 Hz display allows 20 to 60")
+        check(P.multiplier(contentFPS: 20, targetFPS: 60, displayFPS: 60.0 / 2) == 1, "Unreachable target falls back to no work")
+        check(P.multiplier(contentFPS: 45, targetFPS: 60, displayFPS: 120) == 2, "45 FPS content still doubles when the display allows it")
+        for invalid in [0.0, -1, Double.nan, Double.infinity] {
+            check(P.multiplier(contentFPS: invalid, targetFPS: 60, displayFPS: 120) == 1, "Invalid content rate")
+        }
+        check(P.midpointPhases(multiplier: 2) == [Float(0.5)], "2x generates one midpoint at the middle")
+        check(P.midpointPhases(multiplier: 3) == [Float(1.0) / 3.0, Float(2.0) / 3.0], "3x generates two midpoints")
+        for invalid in [1.0, 2.5, 4.0, 0.0, Double.nan] {
+            check(P.midpointPhases(multiplier: invalid).isEmpty, "Invalid multiplier yields no phases")
+        }
+        check(P.costsFit(midpoints: [0.005, 0.005], source: 0.006, slot: 0.02), "Two midpoints fit a long slot")
+        check(!P.costsFit(midpoints: [0.04, 0.04], source: 0.006, slot: 0.02), "Midpoints past the individual cap are rejected")
+        check(!P.costsFit(midpoints: [], source: 0.001, slot: 0.02), "An empty midpoint list is rejected")
+        check(P.eligibility(runtimeSupported: true, inputFPS: 20, displayFPS: 60, inputValid: true, multiplier: 3), "20 FPS to 60 admitted at 3x")
+        check(!P.eligibility(runtimeSupported: true, inputFPS: 20, displayFPS: 60, inputValid: true, multiplier: 4), "Out of range multiplier rejected")
         print("FrameInterpolationPolicy: \(checks) checks passed (admission/sizing/processing interval only; no renderer, GPU or presentation claim).")
     }
 }

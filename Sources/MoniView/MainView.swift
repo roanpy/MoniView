@@ -444,8 +444,8 @@ struct MainView: View {
                     .foregroundStyle(Color(hex: 0xaaa199))
             }
             if let contentFPS = capture.detectedContentFPS {
-                Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
-                                 Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+                Text(L10n.format("实际内容约 %d FPS · %@ 目标 %d",
+                                 Int(contentFPS.rounded()), capture.activeMultiplierLabel, Int(capture.interpolationTargetFPS.rounded())))
             }
             if capture.picture.frameInterpolation != .off {
                 Text(L10n.format("输出 %d FPS · 生成 %d · %@", capture.outputFPS, capture.generatedFPS, L10n.text(capture.interpolationStatus)))
@@ -545,8 +545,6 @@ struct MainView: View {
                     set: { capture.picture.setInterpolationEnabled($0) }))
                     .disabled(!capture.picture.enhancementEnabled || !FrameInterpolatorSupport.isSupported(capture.picture.preferredInterpolationQuality ?? .balanced))
                     .help(L10n.text("在两张原帧之间生成一张中间帧，目标 2×。需要屏幕刷新率至少是内容帧率的两倍。"))
-                // Everything set once and left alone lives behind one disclosure, so the
-                // panel opens at a predictable height instead of a long column.
                 qualityAdvancedSettings
                 if capture.picture.frameInterpolation != .off {
                     interpolationReadout
@@ -566,8 +564,8 @@ struct MainView: View {
         }
     }
 
-    /// Enhancement settings shown directly. The panel opens on the presets and every
-    /// control stays reachable without unfolding anything.
+    /// Enhancement settings shown directly under the presets: presets set the starting
+    /// point, and every individual control stays visible for finer tuning.
     private var qualityAdvancedSettings: some View {
         VStack(alignment: .leading, spacing: 9) {
             Divider().overlay(Color.white.opacity(0.06))
@@ -626,8 +624,8 @@ struct MainView: View {
             Divider().overlay(Color.white.opacity(0.06))
             HStack {
                 if let contentFPS = capture.detectedContentFPS {
-                    Text(L10n.format("实际内容约 %d FPS · 2× 目标 %d",
-                                     Int(contentFPS.rounded()), Int((contentFPS * 2).rounded())))
+                    Text(L10n.format("实际内容约 %d FPS · %@ 目标 %d",
+                                     Int(contentFPS.rounded()), capture.activeMultiplierLabel, Int(capture.interpolationTargetFPS.rounded())))
                 } else {
                     // The capture signal rate is not the content rate: a 30 FPS game in a
                     // 60 Hz signal can only reach 60, so an undetected cadence must not
@@ -782,29 +780,25 @@ struct MainView: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
-                // The shortcut row above covers everyday use. The full advertised list and
-                // Follow live here so the first layer stays short, matching the quality
-                // panel, without removing either control.
-                DisclosureGroup {
-                    VStack(alignment: .leading, spacing: 11) {
-                        labeledPicker("完整帧率", fieldWidth: 195,
-                            selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
-                            choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
-                            .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                        if capture.frameRateOptions.contains(where: { $0 > 0 }) {
-                            settingsToggle("跟随内容帧率", isOn: $capture.followsRealContentRate)
-                                .disabled(capture.isRecording || capture.formatOptions.isEmpty)
-                                .help(L10n.text("采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
+                // Full advertised list and Follow on one line: the shortcut row above is
+                // for everyday use, and everything else stays visible rather than folded.
+                HStack(alignment: .center, spacing: 8) {
+                    labeledPicker("完整帧率", fieldWidth: 195,
+                        selection: Binding(get: { capture.selectedFrameRate }, set: { capture.selectFrameRateValue($0) }),
+                        choices: capture.frameRateOptions.map { PickerChoice(value: $0, title: $0 == 0 ? L10n.text("自动") : String(format: "%.2f FPS", $0)) })
+                        .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                    if capture.frameRateOptions.contains(where: { $0 > 0 }) {
+                        Toggle(isOn: $capture.followsRealContentRate) {
+                            Text(L10n.text("跟随"))
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color(hex: 0xc8bfb7))
                         }
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(capture.isRecording || capture.formatOptions.isEmpty)
+                        .help(L10n.text("采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。"))
                     }
-                    .padding(.top, 8)
-                } label: {
-                    Text(L10n.text("帧率高级"))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color(hex: 0xd9cfc6))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .padding(.vertical, 5)
                 }
                 labeledPicker("画面比例", fieldWidth: 195, selection: $capture.aspectMode,
                     choices: AspectMode.allCases.map { PickerChoice(value: $0, title: L10n.text($0.rawValue)) })

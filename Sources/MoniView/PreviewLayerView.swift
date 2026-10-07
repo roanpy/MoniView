@@ -20,17 +20,35 @@ private struct RenderKey: Equatable {
 /// State and encoding stay main-thread confined; work encodes on the caller's command buffer.
 private protocol MidpointInterpolating: AnyObject {
     var isReady: Bool { get }
+    /// Temporal multipliers this engine can generate. The VideoToolbox processor supplies
+    /// the midpoint only; the flow-blend engine blends at any phase in 0...1.
+    var supportedMultipliers: [Double] { get }
     var onStateChange: (() -> Void)? { get set }
     func prepare(width: Int, height: Int)
     func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
                      context: CIContext, command: MTLCommandBuffer,
                      previousBuffer: CVPixelBuffer?, currentBuffer: CVPixelBuffer?,
-                     fastInputResampling: Bool) -> CIImage?
+                     fastInputResampling: Bool, blendFactor: Float) -> CIImage?
     func stop()
 }
 
 @available(macOS 26.0, *)
-extension FrameInterpolator: MidpointInterpolating {}
+/// The VideoToolbox processor interpolates at the temporal midpoint only, so a phase
+/// outside 0.5 has no representation there and is reported as unavailable. The renderer
+/// only asks for more than one phase when the selected engine can supply it.
+extension FrameInterpolator: MidpointInterpolating {
+    var supportedMultipliers: [Double] { [2] }
+    func interpolate(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
+                     context: CIContext, command: MTLCommandBuffer,
+                     previousBuffer: CVPixelBuffer?, currentBuffer: CVPixelBuffer?,
+                     fastInputResampling: Bool, blendFactor: Float) -> CIImage? {
+        guard abs(blendFactor - 0.5) < 0.001 else { return nil }
+        return interpolate(previous: previous, current: current, previousTime: previousTime, currentTime: currentTime,
+                           context: context, command: command,
+                           previousBuffer: previousBuffer, currentBuffer: currentBuffer,
+                           fastInputResampling: fastInputResampling)
+    }
+}
 extension FlowBlendInterpolator: MidpointInterpolating {}
 
 struct PreviewLayerView: NSViewRepresentable {
@@ -101,7 +119,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var duplicatePairWindow: [Bool] = []
     private var lastDuplicateCheck: (sequence: UInt64, previousSequence: UInt64, streamEpoch: UInt64,
                                      result: Bool, recordedCadenceSample: Bool)?
-    private var previousCadenceMeasurementEnabled = false
     var contentCadenceMeasurementEnabled = false
     private var lastSourceSequence: UInt64? // last GPU-completed source with an ordered presentation
     private var presentationEpoch: UInt64 = 0
@@ -171,7 +188,26 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let currentPTS: CMTime
         let period: Double
     }
-    private var pendingSource: PendingSource?
+    /// Frames already computed and waiting for their presentation slot, in order. A 2x
+    /// pair queues one midpoint then its endpoint; a 3x pair queues two midpoints then the
+    /// endpoint. The bound is the largest phase count plus one, so the queue can never grow
+    /// with the capture stream.
+    private struct QueuedFrame {
+        let image: CIImage
+        let buffer: CVPixelBuffer
+        let receivedAt: UInt64
+        let sequence: UInt64
+        let settings: PictureSettings
+        let size: CGSize
+        let aspect: AspectMode
+        let presentationTime: Double
+        let sourcePeriod: Double
+        let sourcePTS: CMTime
+        let isUniqueContent: Bool
+        let isGenerated: Bool
+    }
+    private var queuedFrames: [QueuedFrame] = []
+    private static let maximumQueuedFrames = 3
     private var lastUniqueSource: UniqueSource?
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let inFlight = DispatchSemaphore(value: 1)
@@ -230,13 +266,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     func configureInterpolation() {
         let mode = settings.frameInterpolation
         let enabled = settings.enhancementEnabled && mode != .off && FrameInterpolatorSupport.isSupported(mode)
-        let measureContentCadence = contentCadenceMeasurementEnabled || settings.skipsExactDuplicateInterpolation
-        if measureContentCadence != previousCadenceMeasurementEnabled {
-            duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
-            frames.setMeasuredContentFPS(nil)
-            previousCadenceMeasurementEnabled = measureContentCadence
-        }
-        frames.setInterpolationHistoryEnabled(true) // content-rate detection also runs without interpolation
+        // Cadence measurement runs whenever the preview is live, independent of the
+        // interpolation switches and of Follow: it only reads pixels and publishes an
+        // estimate, and the panel needs it to aim interpolation at the content rate.
+        frames.setInterpolationHistoryEnabled(true)
         if mode != previousMode || enabled != previousInterpolationEnabled || settings.forceFrameInterpolation != previousInterpolationForce {
             let failureCooldown = FrameInterpolationPolicy.preserveFailureCooldown(
                 forceChanged: settings.forceFrameInterpolation != previousInterpolationForce,
@@ -248,7 +281,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             adaptiveLongEdge = nil; interpolationDimensions = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-            pendingSource = nil; midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+            queuedFrames.removeAll(); midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
             cooldownUntil = failureCooldown; cooldownReason = failureReason; lastSourceSequence = nil; awaitingSourcePresentation = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
             previousMode = mode; previousInterpolationEnabled = enabled
@@ -276,7 +309,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 configuredDisplayCap = cap
             }
         } else {
-            pendingSource = nil; interpolationLink?.invalidate(); interpolationLink = nil; linkProxy = nil
+            queuedFrames.removeAll(); interpolationLink?.invalidate(); interpolationLink = nil; linkProxy = nil
             observedDisplayFPS = 0; displayTargetTime = 0; configuredDisplayCap = 0
             if #available(macOS 26.0, *) { interpolator?.stop() }
             flowInterpolator = nil
@@ -299,7 +332,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             observedDisplayFPS = observedDisplayFPS == 0 ? hz : observedDisplayFPS * 0.8 + hz * 0.2
         }
         frames.setDisplayRates(maximum: Double(window?.screen?.maximumFramesPerSecond ?? 60), observed: observedDisplayFPS)
-        if pendingSource != nil || !outstandingPresentations.isEmpty { requestRender() }
+        if !queuedFrames.isEmpty || !outstandingPresentations.isEmpty { requestRender() }
         else { requestRenderIfStateChanged() }
     }
     private func p95(_ values: [Double]) -> Double? {
@@ -354,7 +387,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-        pendingSource = nil; midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+        queuedFrames.removeAll(); midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
         duplicatePairWindow.removeAll(); lastDuplicateCheck = nil
         observedDisplayFPS = 0; displayTargetTime = 0; lastSourceSequence = nil
@@ -388,7 +421,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        pendingSource = nil
+        queuedFrames.removeAll()
         // Output-size changes alter midpoint cost; a rung blocked at one size may fit at another.
         blockedRaiseTarget = nil; comfortableMidpoints = 0
         forceDraw = true
@@ -401,7 +434,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         guard let (_, sequence, _) = frames.latest() else { return }
         let key = RenderKey(sequence: sequence, settings: settings, size: drawableSize, aspect: aspectMode)
         // A forced draw that was deferred behind an in-flight GPU command still has to happen.
-        if pendingSource != nil || forceDraw || key != lastSubmitted { requestRender() }
+        if !queuedFrames.isEmpty || forceDraw || key != lastSubmitted { requestRender() }
     }
 
     func requestRender() {
@@ -433,7 +466,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             }
             return last.result
         }
-        let result = VideoFrameDuplicateDetector.areIdentical(previous, current)
+        // Cadence sampling tolerates the capture device's own encoding noise; the
+        // inference-skip decision keeps the exact comparison so only identical pictures
+        // are ever treated as repeats.
+        let result = recordCadenceSample
+            ? VideoFrameDuplicateDetector.areEquivalentForCadence(previous, current)
+            : VideoFrameDuplicateDetector.areIdentical(previous, current)
         if recordCadenceSample {
             duplicatePairWindow.append(result)
             duplicatePairWindow = Array(duplicatePairWindow.suffix(16))
@@ -532,7 +570,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
            outstandingPresentations.values.contains(where: { CACurrentMediaTime() > $0.deadline + 0.25 }) {
             retiringForPresentationFailure = true
             comfortableMidpoints = 0
-            interpolationLink?.invalidate(); pendingSource = nil
+            interpolationLink?.invalidate(); queuedFrames.removeAll()
             frames.setInterpolationState("呈现中断，重建预览")
             onPresentationRecovery?()
             return
@@ -548,7 +586,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         if streamEpoch != sourceStreamEpoch {
             sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
             adaptiveLongEdge = nil; interpolationDimensions = nil
-            pendingSource = nil; presentedMidpoint = nil; lastSourceSequence = nil
+            queuedFrames.removeAll(); presentedMidpoint = nil; lastSourceSequence = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             midpointCosts.removeAll(); midpointGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); cooldownUntil = 0; cooldownReason = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
@@ -577,27 +615,28 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         var skipInterpolation = false
         var endpointPresentation: Double?
         var activePairPeriod = 0.0
-        if let pending = pendingSource {
-            if !Self.timingCompatible(pending.settings, settings) || pending.size != size || pending.aspect != aspectMode ||
-                CVPixelBufferGetWidth(pending.buffer) != CVPixelBufferGetWidth(buffer) ||
-                CVPixelBufferGetHeight(pending.buffer) != CVPixelBufferGetHeight(buffer) {
-                pendingSource = nil // Latest source/settings always replace, never queue behind an obsolete pair.
+        /// Midpoints the active pair generates. Admission and the published budget both
+        /// scale with this, so the panel cannot show a 2x budget while 3x is running.
+        var activeMidpointCount = 1
+        var queuedImage: CIImage?
+        if let queued = queuedFrames.first {
+            if !Self.timingCompatible(queued.settings, settings) || queued.size != size || queued.aspect != aspectMode {
+                queuedFrames.removeAll() // A resize or engine change invalidates every queued frame.
                 comfortableMidpoints = 0
                 // Preserve a live GPU-error guard; otherwise this is only a
                 // settings/resize cooldown, not a newly failed GPU command.
                 if cooldownReason == nil { cooldownUntil = now + FrameInterpolationPolicy.overloadCooldownSeconds }
-            } else if !endpointIsFresh(pending) {
-                pendingSource = nil; presentedMidpoint = nil; skipInterpolation = true
-                comfortableMidpoints = 0
-                frames.setInterpolationState("呈现节奏调整")
             } else {
-                // A compositor miss is not an inference overload. Keep the ONE fixed
-                // endpoint ordered and rebase it, rather than cool down for two seconds.
-                endpointPresentation = max(pending.presentationTime, lastPresentationTime + pending.sourcePeriod / 2, now + (p95(nativeCosts) ?? 0.002) + 0.001)
-                (buffer, sequence, receivedAt) = (pending.buffer, pending.sequence, pending.receivedAt)
-                sourcePTS = pending.sourcePTS
-                sourceIsUniqueContent = pending.isUniqueContent
-                activePairPeriod = pending.sourcePeriod
+                // A compositor miss is not an inference overload. Keep the queue ordered and
+                // rebase the head's slot rather than cooling down for two seconds.
+                queuedFrames.removeFirst()
+                endpointPresentation = max(queued.presentationTime, lastPresentationTime + queued.sourcePeriod / 4, now + 0.001)
+                (buffer, sequence, receivedAt) = (queued.buffer, queued.sequence, queued.receivedAt)
+                sourcePTS = queued.sourcePTS
+                sourceIsUniqueContent = queued.isUniqueContent
+                activePairPeriod = queued.sourcePeriod
+                // An already generated frame is presented as-is; it must not be regenerated.
+                if queued.isGenerated { queuedImage = queued.image; skipInterpolation = true }
             }
         }
         let forced = forceDraw || endpointPresentation != nil
@@ -618,7 +657,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             drawableFailures += 1
             if drawableFailures >= 3, now - firstDrawableFailureAt > 0.5 {
                 retiringForPresentationFailure = true
-                interpolationLink?.invalidate(); pendingSource = nil
+                interpolationLink?.invalidate(); queuedFrames.removeAll()
                 frames.setInterpolationState("呈现中断，重建预览")
                 onPresentationRecovery?()
             }
@@ -634,7 +673,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
 
         let encodingStarted = CACurrentMediaTime()
         guard let fresh = frames.latestSnapshot(), fresh.streamEpoch == streamEpoch else {
-            pendingSource = nil; forceDraw = true; inFlight.signal(); requestRender(); return
+            queuedFrames.removeAll(); forceDraw = true; inFlight.signal(); requestRender(); return
         }
         // A drawable may have waited for presentation. Always take the newest frame afterwards.
         if endpointPresentation == nil {
@@ -643,29 +682,28 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
         // Revalidate after drawable acquisition. Never draw a stale endpoint after it
         // was discarded: restore the atomic latest snapshot for immediate fallback.
-        if let endpoint = endpointPresentation {
-            let revised = max(endpoint, CACurrentMediaTime() + (p95(nativeCosts) ?? 0.002) + 0.001)
-            if let pending = pendingSource, pending.sequence == sequence, endpointIsFresh(pending, target: revised) {
-                endpointPresentation = revised
-            } else {
-                pendingSource = nil; endpointPresentation = nil; presentedMidpoint = nil; skipInterpolation = true
-                comfortableMidpoints = 0
-                (buffer, sequence, receivedAt) = (fresh.buffer, fresh.sequence, fresh.receivedAt)
-                sourcePTS = fresh.pts
-                frames.setInterpolationState("呈现节奏调整")
-            }
+        if endpointPresentation != nil, skipInterpolation, queuedImage == nil {
+            // A queued endpoint that could not be kept: fall back to the newest source so
+            // the preview never shows a stale picture.
+            endpointPresentation = nil; presentedMidpoint = nil
+            comfortableMidpoints = 0
+            (buffer, sequence, receivedAt) = (fresh.buffer, fresh.sequence, fresh.receivedAt)
+            sourcePTS = fresh.pts
+            frames.setInterpolationState("呈现节奏调整")
         }
-        var generatedMidpoint = false
+        var generatedMidpoint = queuedImage != nil
         var calibratedMidpoint = false
         var presentationTime = endpointPresentation
-        var sourceImage = CIImage(cvPixelBuffer: buffer)
+        var sourceImage = queuedImage ?? CIImage(cvPixelBuffer: buffer)
         let mediaFPS = frames.sourceFrameRate()
         let sourceFPS = FrameInterpolationPolicy.nominalInputFPS(mediaFPS ?? 0) ?? 0
         let interpolationRequested = settings.enhancementEnabled && settings.frameInterpolation != .off
         let displayFPS = min(observedDisplayFPS, Double(window.screen?.maximumFramesPerSecond ?? 60))
-        // Measure true content cadence even before admission: 30 FPS games duplicated
-        // into a 60 Hz signal should still admit 2x on 60 Hz displays.
-        if endpointPresentation == nil {
+        // Measure true content cadence from the capture stream itself. This must not depend
+        // on the presentation queue being empty: while a multi-phase pair is draining, that
+        // queue is almost always non-empty, and gating here made the estimate see sparse,
+        // out-of-order samples that drifted between 20 and 34 FPS for the same 30 FPS game.
+        if queuedImage == nil {
             let cadencePair = frames.interpolationPair(sequence: sequence)
             let isDuplicate = cadencePair.flatMap {
                 observeDuplicateCadence(previous: $0.0, current: buffer,
@@ -697,7 +735,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // the display already holds the identical previous drawable. Skipping the whole
         // spatial pipeline here saves GPU for midpoint quality on the unique frames.
         if interpolationRequested, admitted, !sourceIsUniqueContent, !forced, !skipInterpolation, endpointPresentation == nil,
-           pendingSource == nil, CACurrentMediaTime() >= cooldownUntil,
+           queuedFrames.isEmpty, CACurrentMediaTime() >= cooldownUntil,
            let duplicatePair = frames.interpolationPair(sequence: sequence), lastSourceSequence == duplicatePair.1,
            isDuplicatePair(previous: duplicatePair.0, current: buffer, sequence: sequence, streamEpoch: streamEpoch) {
             frames.markDuplicateSkipped(sequence: sequence, streamEpoch: streamEpoch)
@@ -740,12 +778,31 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // keeps clearing the history it needs. P95 still drives the display so a
                     // long tail stays visible to the user.
                     let midCost = admissionCost(midpointCosts), sourceCost = admissionCost(nativeCosts)
-                    let slot = pair.period / 2
+                    // Ask for the smallest multiplier that lifts this content to the panel's
+                    // rate. 30 FPS content keeps its existing single-midpoint path; slower
+                    // content fills the same period with two midpoints instead of one.
+                    // Never ask an engine for a phase it cannot supply: the VideoToolbox
+                    // processor only produces the midpoint, so it stays on 2x and the flow
+                    // engine is the tier that can fill slower content up to the panel rate.
+                    let engineMultipliers = interpolator.supportedMultipliers
+                    // Aim at the conventional smoothness target, not at the panel rate:
+                    // doubling 20 FPS content on a 120 Hz panel should reach 60, and only
+                    // content that cannot get there by doubling earns the third phase.
+                    let requested = FrameInterpolationPolicy.multiplier(
+                        contentFPS: contentFPS, targetFPS: 60, displayFPS: displayFPS)
+                    let multiplier = engineMultipliers.contains(requested) ? requested : (engineMultipliers.first ?? 2)
+                    let phases = FrameInterpolationPolicy.midpointPhases(multiplier: multiplier)
+                    guard !phases.isEmpty else { return }
+                    activeMidpointCount = phases.count
+                    let steps = Double(phases.count)
+                    let slot = pair.period / (steps + 1)
                     activePairPeriod = pair.period
                     let budgetSlot = slot
                     let budgetFits = midCost.map { $0 <= budgetSlot * FrameInterpolationPolicy.midpointBudgetFraction } ?? false
                     let sourceFits = sourceCost.map { $0 <= budgetSlot * FrameInterpolationPolicy.budgetFraction } ?? false
-                    let pairFits = midCost.flatMap { mid in sourceCost.map { FrameInterpolationPolicy.costsFit(midpoint: mid, source: $0, slot: budgetSlot) } } ?? false
+                    let pairFits = midCost.flatMap { mid in sourceCost.map {
+                        FrameInterpolationPolicy.costsFit(midpoints: Array(repeating: mid, count: phases.count), source: $0, slot: budgetSlot)
+                    } } ?? false
                     let earliest = CACurrentMediaTime() + (midCost ?? 0.002) + slot * 0.1
                     let displaySlot = displayFPS > 0 ? 1 / displayFPS : slot
                     let nextPairSlot = scheduledSourceUntil + slot
@@ -759,18 +816,41 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             force: settings.forceFrameInterpolation, deadlineFits: deadlineFits)
                     } } ?? false
                     if midCost == nil || mayGenerate {
-                        if let midpoint = interpolator.interpolate(previous: CIImage(cvPixelBuffer: pair.previousBuffer), current: sourceImage,
-                            previousTime: pair.previousPTS, currentTime: pair.currentPTS, context: ciContext, command: command,
-                            previousBuffer: pair.previousBuffer, currentBuffer: buffer,
-                            fastInputResampling: settings.frameInterpolation == .efficient) {
-                            if midCost == nil { calibratedMidpoint = true }
-                            else {
-                                generatedMidpoint = true; sourceImage = midpoint
+                        // One midpoint per phase, kept in presentation order. The first is
+                        // presented by this command; the remaining ones and the endpoint wait
+                        // in the bounded queue so a 3x pair fills its period in sequence.
+                        var producedImages: [CIImage] = []
+                        for phase in phases {
+                            guard queuedFrames.count + producedImages.count + 1 < Self.maximumQueuedFrames else { break }
+                            guard let midpoint = interpolator.interpolate(previous: CIImage(cvPixelBuffer: pair.previousBuffer), current: sourceImage,
+                                previousTime: pair.previousPTS, currentTime: pair.currentPTS, context: ciContext, command: command,
+                                previousBuffer: pair.previousBuffer, currentBuffer: buffer,
+                                fastInputResampling: settings.frameInterpolation == .efficient,
+                                blendFactor: phase) else { break }
+                            producedImages.append(midpoint)
+                        }
+                        if let first = producedImages.first {
+                            if midCost == nil {
+                                calibratedMidpoint = true
+                            } else {
+                                generatedMidpoint = true; sourceImage = first
                                 presentationTime = target
-                                pendingSource = PendingSource(buffer: buffer, receivedAt: receivedAt, sequence: sequence,
-                                    settings: settings, size: size, aspect: aspectMode,
-                                    presentationTime: target + slot, sourcePeriod: pair.period,
-                                    sourcePTS: sourcePTS, isUniqueContent: sourceIsUniqueContent)
+                                if producedImages.count > 1 {
+                                    for offset in 1..<producedImages.count {
+                                        queuedFrames.append(QueuedFrame(image: producedImages[offset], buffer: buffer,
+                                            receivedAt: receivedAt, sequence: sequence, settings: settings,
+                                            size: size, aspect: aspectMode,
+                                            presentationTime: target + slot * Double(offset),
+                                            sourcePeriod: pair.period, sourcePTS: sourcePTS,
+                                            isUniqueContent: sourceIsUniqueContent, isGenerated: true))
+                                    }
+                                }
+                                queuedFrames.append(QueuedFrame(image: CIImage(cvPixelBuffer: buffer), buffer: buffer,
+                                    receivedAt: receivedAt, sequence: sequence, settings: settings,
+                                    size: size, aspect: aspectMode,
+                                    presentationTime: target + slot * Double(producedImages.count),
+                                    sourcePeriod: pair.period, sourcePTS: sourcePTS,
+                                    isUniqueContent: sourceIsUniqueContent, isGenerated: false))
                             }
                         }
                     } else if !settings.forceFrameInterpolation && (!budgetFits || !sourceFits || !pairFits) {
@@ -965,7 +1045,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             }
         }
         if !generatedMidpoint, let time = presentationTime {
-            scheduledSourceUntil = time; awaitingSourcePresentation = (sequence, time); pendingSource = nil
+            scheduledSourceUntil = time; awaitingSourcePresentation = (sequence, time)
         }
         let semaphore = inFlight
         let frameStore = frames
@@ -1034,17 +1114,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         if warming {
                             self.calibrationWarmupsRemaining -= 1
-                            frameStore.setInterpolationCost(seconds: cost + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: cost + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: Double(activeMidpointCount + 1) * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             frameStore.setInterpolationState("插帧准备中")
                         } else if wasMidpoint || wasCalibration {
                             self.midpointCosts.append(cost); self.midpointCosts = Array(self.midpointCosts.suffix(32))
                             self.midpointGPUCosts.append(gpuMS); self.midpointGPUCosts = Array(self.midpointGPUCosts.suffix(32))
                             if let gpuP95 = self.p95(self.midpointGPUCosts) { frameStore.setInterpolationGPUCost(milliseconds: gpuP95) }
-                            frameStore.setInterpolationCost(seconds: (self.admissionCost(self.midpointCosts) ?? self.p95(self.midpointCosts) ?? cost) + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                            frameStore.setInterpolationCost(seconds: (self.admissionCost(self.midpointCosts) ?? self.p95(self.midpointCosts) ?? cost) + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? 0), budget: Double(activeMidpointCount + 1) * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                         } else {
                             self.nativeCosts.append(cost); self.nativeCosts = Array(self.nativeCosts.suffix(32))
                             if let mid = self.p95(self.midpointCosts) {
-                                frameStore.setInterpolationCost(seconds: mid + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? cost), budget: 2 * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
+                                frameStore.setInterpolationCost(seconds: mid + (self.admissionCost(self.nativeCosts) ?? self.p95(self.nativeCosts) ?? cost), budget: Double(activeMidpointCount + 1) * measuredBudgetSlot * FrameInterpolationPolicy.pairBudgetFraction)
                             }
                         }
                     }
@@ -1058,7 +1138,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // that pair even when its measured cost disables the NEXT pair.
                         // GPU errors invalidate the pair; age/epoch guards still apply.
                         self.cooldownReason = succeeded ? nil : "GPU错误，保留原始画面"
-                        if !succeeded { self.pendingSource = nil }
+                        if !succeeded { self.queuedFrames.removeAll() }
                         let lower = measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
                         // Only Smooth changes inference resolution. Quality retains its
                         // advertised 1080p cap and retries after a bounded cooldown.
