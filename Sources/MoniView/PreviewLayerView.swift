@@ -837,6 +837,9 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     guard !phases.isEmpty else { return }
                     activeMidpointCount = phases.count
                     let steps = Double(phases.count)
+                    // Publish the step the engine is about to run so the panel reports the
+                    // pipeline in use rather than its own recomputation of it.
+                    frames.setActiveMultiplier(steps + 1)
                     let slot = pair.period / (steps + 1)
                     activePairPeriod = pair.period
                     let budgetSlot = slot

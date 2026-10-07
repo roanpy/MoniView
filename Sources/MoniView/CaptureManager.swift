@@ -279,6 +279,12 @@ final class LatestVideoFrame {
         lock.lock(); interpolationCostMS = seconds * 1000; interpolationBudgetMS = budget * 1000; lock.unlock()
     }
     func setInterpolationWorkingSize(_ value: String?) { lock.lock(); interpolationWorkingSize = value; lock.unlock() }
+    /// Multiplier the renderer actually applied to the most recent pair. Published by the
+    /// renderer rather than recomputed here, so the panel cannot announce a different step
+    /// than the engine is running.
+    private var publishedMultiplier: Double?
+    func setActiveMultiplier(_ value: Double?) { lock.lock(); publishedMultiplier = value; lock.unlock() }
+    func currentActiveMultiplier() -> Double? { lock.lock(); defer { lock.unlock() }; return publishedMultiplier }
     func currentInterpolationWorkingSize() -> String? { lock.lock(); defer { lock.unlock() }; return interpolationWorkingSize }
     func interpolationCost() -> (Double, Double) {
         lock.lock(); defer { lock.unlock() }; return (interpolationCostMS, interpolationBudgetMS)
@@ -436,6 +442,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// Temporal multiplier the renderer is using for the current content rate, derived with
     /// the same policy the scheduler applies so the panel cannot disagree with the engine.
     var activeMultiplier: Double {
+        // What the renderer applied if it has reported one; otherwise the step the policy
+        // would choose, which is also what an idle or paused preview should show.
+        if let published = frames.currentActiveMultiplier() { return published }
         guard let content = detectedContentFPS, content > 0 else { return 2 }
         let engine = picture.frameInterpolation
         let supported: [Double] = engine == .flowBlend || engine == .off ? [2, 3] : [2]
