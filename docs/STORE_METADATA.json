@@ -1,0 +1,33 @@
+{
+  "status": "Draft only; not uploaded / 仅草稿，未上传",
+  "platform": "macOS",
+  "minimumSystemVersion": "14.0",
+  "proposedCategory": "public.app-category.video",
+  "privacyPolicyURL": "https://github.com/roanpy/MoniView/blob/main/docs/PRIVACY.md",
+  "supportURLCandidate": "https://github.com/roanpy/MoniView/issues",
+  "supportURLStatus": "Owner must add genuine contact details to the support page before submission / 提交前所有者须在支持页补真实联系信息",
+  "ownerRequired": [
+    "Final bundle identifier / 最终 bundle ID",
+    "Support and review contacts / 支持与审核联系方式",
+    "Copyright holder / 版权主体",
+    "Pricing and territories / 定价与地区",
+    "Age rating, encryption and agreements / 分级、加密与协议答案",
+    "Final build screenshots / 最终构建截图"
+  ],
+  "localizations": {
+    "en-US": {
+      "name": "MoniView",
+      "subtitle": "HDMI preview and recording",
+      "promotionalText": "Preview a USB capture card or a window on your Mac. Monitor audio, record locally, save snapshots, and adjust the picture with native tools.",
+      "keywords": "HDMI,UVC,capture,preview,recording,audio,window,video,MetalFX",
+      "description": "Use your Mac to preview compatible USB UVC capture devices, including HDMI capture cards, or a selected Mac application window.\n\n• Live video preview with source format and frame-rate information.\n• Independently selected audio monitoring, volume and mute controls.\n• Local MOV recording and PNG snapshots through the system save panel.\n• Picture color adjustments and spatial scaling, including MetalFX on supported hardware.\n• Smoothness, Quality and Native enhancement presets, with manual controls.\n• English and Simplified Chinese interface following the system language.\n\nProcessing stays on your Mac. No account, advertising or automatic media upload. A compatible capture card is needed for HDMI input; Mac-window preview does not require one. The original source application must remain open.\n\nmacOS 14 or later. Some processing features require newer macOS versions and supported hardware. Optional experimental interpolation depends on content, hardware and processing load; target frame rates are not guaranteed. Recording preserves source resolution rather than the scaled preview and includes color/sharpening by default, which can be disabled.\n\nCamera access is requested for a selected video device, microphone access for selected audio, and Screen Recording access for Mac-window capture. Without a USB capture input, a camera is not opened automatically. See Help → Getting Started for offline setup instructions."
+    },
+    "zh-Hans": {
+      "name": "MoniView",
+      "subtitle": "HDMI 预览、监听与本地录制",
+      "promotionalText": "预览 USB 采集卡或 Mac 应用窗口，独立监听音频、本地录制、保存截图，并通过原生工具调节画面。",
+      "keywords": "采集卡,视频预览,本地录制,音频监听,窗口采集,画面增强,HDMI,UVC",
+      "description": "通过 Mac 预览兼容的 USB UVC 视频设备，包括 HDMI 采集卡，或选中的 Mac 应用窗口。\n\n• 实时视频预览，显示来源格式与帧率信息。\n• 独立选择音频输入，调节监听音量和静音。\n• 通过系统保存面板录制本地 MOV 或保存 PNG 截图。\n• 色彩调节与空间放大，支持的硬件可使用 MetalFX。\n• 流畅优先、画质优先、原生增强预设，保留手动控制。\n• 跟随系统语言的简体中文和英文界面。\n\n所有处理留在本机，无账号、广告或自动上传媒体。HDMI 输入需要兼容采集卡；Mac 窗口预览无需采集卡，原始应用仍须保持打开。\n\n需要 macOS 14 或更新版本；部分处理功能需要较新系统与受支持硬件。可选实验插帧的效果取决于内容、硬件和处理负载，不保证目标帧率。录制保持源分辨率，不录入放大后的预览；默认应用色彩与锐化，可在设置中关闭。\n\n选中视频设备后才请求摄像头权限，所选音频需要麦克风权限，Mac 窗口采集需要屏幕录制权限。没有 USB 采集输入时不会自动打开摄像头。帮助菜单的使用指南可离线查看。"
+    }
+  }
+}

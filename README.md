@@ -14,7 +14,7 @@ Live preview, audio monitoring, recording, color tools, and MetalFX spatial scal
 
 </div>
 
-> **Status: early preview (0.2.0).** MoniView is a local developer build with ad-hoc signing. It is not notarized and is not on the Mac App Store. It targets macOS 14 or later. The interface follows the system language: English or Simplified Chinese.
+> **Status: early preview (0.2.0).** MoniView is a local developer build with ad-hoc or explicitly selected development signing. It is not notarized and is not on the Mac App Store. It targets macOS 14 or later. The interface follows the system language: English or Simplified Chinese.
 
 MoniView turns a USB (UVC) capture card into a low-latency monitor window for an HDMI source: a camera, a console, or any other HDMI output.
 
@@ -48,13 +48,15 @@ swift build -c release
 open build/MoniView.app
 ```
 
-Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and an ad-hoc signature.
+Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and a local signature (ad-hoc by default).
 
 The optional AI path requires an Apple Swift 6.2+ / macOS SDK 26+ build and supported macOS 26+ hardware at runtime. Older Apple compilers build the spatial fallback; the deployment target remains macOS 14. A custom new compiler paired with an old SDK can explicitly package the fallback with `MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh`. See [AI engineering notes](docs/AI_UPSCALING.md).
 
-The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
+The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version. For compilation/resource preparation without signing, use `MONIVIEW_PREPARE_ONLY=1 ./Scripts/build-app.sh`; this stages a separate `build/store-preparation/MoniView.app` without signing, installing or enabling App Sandbox. See [Store preparation](docs/APP_STORE.md) and [draft bilingual metadata](docs/STORE_METADATA.json).
 
-On first launch, grant camera access for video. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects an external USB video device and a matching audio input. Without one, video stays disconnected instead of automatically opening a built-in or wireless camera, including after unplugging the capture device. Cameras remain available for explicit selection in settings.
+Camera access is requested when a video input is selected; with no eligible USB capture card, startup does not request camera permission. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects an external USB video device and a matching audio input. Without one, video stays disconnected instead of automatically opening a built-in or wireless camera, including after unplugging the capture device. Cameras remain available for explicit selection in settings.
+
+Help → Getting Started provides offline setup and permission-recovery instructions; Help also links to privacy and support.
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
 
@@ -111,11 +113,11 @@ This is what one device reported under test, not a general performance claim.
 
 ## Privacy
 
-Camera access is required to read video from the UVC capture card. Microphone access is only required to monitor or record audio. MoniView runs entirely on the local machine, collects nothing, and sends nothing to any external service. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Exported media is written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
+Camera access is required for a selected UVC capture card or manually selected camera. Microphone access is only required to monitor or record audio. MoniView processes media locally without telemetry or automatic uploads. Settings store device identifiers locally; Help links open GitHub in your browser, and voluntarily submitted feedback is handled by GitHub. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Exported media is written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
 
 ## Platform and roadmap
 
-MoniView is macOS only today. It is built as an ad-hoc signed local app, not a notarized or Mac App Store build, so the current artifact is not Store-submittable; see [docs/APP_STORE.md](docs/APP_STORE.md) for the distribution checklist and the remaining gaps. An iPad version would need a separate UIKit touch target, audio playback adaptation, and its own signing; a Mac `.app` cannot be installed on iPad. The iOS version is not part of this repository, and later versions may be closed source. Existing releases keep the license they shipped with.
+MoniView is macOS only today. It is built as a locally signed development app, not a notarized or Mac App Store build, so the current artifact is not Store-submittable; see [docs/APP_STORE.md](docs/APP_STORE.md) for the distribution checklist and the remaining gaps. An iPad version would need a separate UIKit touch target, audio playback adaptation, and its own signing; a Mac `.app` cannot be installed on iPad. The iOS version is not part of this repository, and later versions may be closed source. Existing releases keep the license they shipped with.
 
 The planned direction is shared media/model code with small native platform shells, not a larger desktop control panel. Existing reusable seams and remaining platform dependencies are documented in [platform boundaries](docs/PLATFORM_BOUNDARIES.md); no iPad target is implemented by this review.
 

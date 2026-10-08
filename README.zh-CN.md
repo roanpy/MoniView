@@ -14,7 +14,7 @@
 
 </div>
 
-> **状态：早期预览（0.2.0）。** MoniView 是本机 ad-hoc 签名的开发版，未做公证，未上架 Mac App Store。支持 macOS 14 及以上。界面跟随系统语言：简体中文或英文。
+> **状态：早期预览（0.2.0）。** MoniView 是本机开发版，默认 ad-hoc 或使用显式指定的开发签名，未做公证，未上架 Mac App Store。支持 macOS 14 及以上。界面跟随系统语言：简体中文或英文。
 
 ### 界面语言
 
@@ -48,13 +48,17 @@ swift build -c release
 open build/MoniView.app
 ```
 
-只需要 Swift 工具链，Xcode Command Line Tools 即可，不需要 Xcode 工程或完整 IDE。`Scripts/build-app.sh` 把 SwiftPM release 产物打包成 `build/MoniView.app`，包含 `Resources/MoniView.icns` 和打包的 `PrivacyInfo.xcprivacy`，并做 ad-hoc 签名。
+只需要 Swift 工具链，Xcode Command Line Tools 即可，不需要 Xcode 工程或完整 IDE。`Scripts/build-app.sh` 把 SwiftPM release 产物打包成 `build/MoniView.app`，包含 `Resources/MoniView.icns` 和打包的 `PrivacyInfo.xcprivacy`，并做本地签名（默认 ad-hoc）。
 
 可选 AI 路径需要 Apple Swift 6.2+ / macOS SDK 26+ 构建，并在支持该功能的 macOS 26+ 硬件上运行。较旧 Apple 编译器构建空间放大回退版，最低部署版本仍为 macOS 14。自定义新编译器搭配旧 SDK 时，可用 `MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh` 显式打包回退版，详见 [AI 超分工程说明](docs/AI_UPSCALING.md)。
 
 脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`、`MONIVIEW_DISABLE_AI=1`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
 
-首次启动需要摄像头权限来读取视频。只有监听或录制声音时才需要麦克风权限，采集卡音频也属于该权限；仅监看视频不要求授权麦克风。MoniView 自动选择外接 USB 视频设备和匹配的音频输入；没有这类设备时保持视频未连接，拔掉采集设备后也不会自动回退打开内置或无线摄像头。摄像头仍可在设置中手动选择。
+选中视频输入后才请求摄像头权限；没有符合条件的 USB 采集卡时，启动不请求摄像头权限。只有监听或录制声音时才需要麦克风权限，采集卡音频也属于该权限；仅监看视频不要求授权麦克风。MoniView 自动选择外接 USB 视频设备和匹配的音频输入；没有这类设备时保持视频未连接，拔掉采集设备后也不会自动回退打开内置或无线摄像头。摄像头仍可在设置中手动选择。
+
+帮助 → 使用指南提供离线配置和权限恢复说明，帮助菜单也提供隐私与支持入口。
+
+若仅编译和准备资源、不签名，运行 `MONIVIEW_PREPARE_ONLY=1 ./Scripts/build-app.sh`，会生成独立的 `build/store-preparation/MoniView.app`，不签名、不安装或启用沙盒。详见[商店准备](docs/APP_STORE.md)与[双语文案草稿](docs/STORE_METADATA.json)。
 
 底部按钮：录制、画面信息、画质增强、色彩、设置。点击画面关闭已打开的面板。
 
@@ -111,11 +115,11 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 
 ## 隐私
 
-视频需要摄像头权限以读取 UVC 采集卡；只有监听或录制声音时才需要麦克风权限。MoniView 完全在本机运行，不收集数据，也不向外部服务发送数据。app 打包了隐私清单（`PrivacyInfo.xcprivacy`），声明不跟踪、不收集数据。导出媒体保存到你在存储面板中选择的文件，诊断快照写入 `~/Library/Logs/MoniView/diagnostics.json`，都只留在本机。采集卡序列号、设备标识和诊断日志可能包含可识别信息，请勿附到公开 issue 中。完整说明见 [docs/PRIVACY.md](docs/PRIVACY.md)。
+选中的 UVC 采集卡或手动选择的摄像头需要摄像头权限；只有监听或录制声音时才需要麦克风权限。MoniView 在本机处理媒体，没有遥测或自动上传。设置在本机保存设备标识；帮助链接在浏览器打开 GitHub，主动提交的反馈由 GitHub 处理。app 打包了隐私清单（`PrivacyInfo.xcprivacy`），声明不跟踪、不收集数据。导出媒体保存到你在存储面板中选择的文件，诊断快照写入 `~/Library/Logs/MoniView/diagnostics.json`，都只留在本机。采集卡序列号、设备标识和诊断日志可能包含可识别信息，请勿附到公开 issue 中。完整说明见 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 平台与路线
 
-当前仅 macOS，以 ad-hoc 签名的本机构建分发，未做公证，也不是 Mac App Store 构建，当前产物不能直接用于 Store 提交；分发清单与当前缺口见 [docs/APP_STORE.md](docs/APP_STORE.md)。iPad 版需要独立的 UIKit/触控目标、音频播放适配与单独签名；Mac 的 `.app` 不能安装到 iPad。iOS 版本不在本仓库，后续版本可能闭源；已发布版本沿用发布时的许可证。
+当前仅 macOS，以本地开发签名构建分发，未做公证，也不是 Mac App Store 构建，当前产物不能直接用于 Store 提交；分发清单与当前缺口见 [docs/APP_STORE.md](docs/APP_STORE.md)。iPad 版需要独立的 UIKit/触控目标、音频播放适配与单独签名；Mac 的 `.app` 不能安装到 iPad。iOS 版本不在本仓库，后续版本可能闭源；已发布版本沿用发布时的许可证。
 
 后续方向是共用媒体处理和模型、保留小型原生平台外壳，而不是增加庞杂的桌面控制面板。已有复用切入点和仍然存在的平台依赖见[平台边界](docs/PLATFORM_BOUNDARIES.md)；本轮审查没有实现 iPad target。
 

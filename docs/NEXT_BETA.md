@@ -27,9 +27,9 @@ Apple说明独立窗口在遮挡／屏幕外仍可采集，最小化则暂停。
 
 ## Mac App Store / Mac商店
 
-Next milestone is an actually sandboxed validation build, not submission. Inspect the signed entitlements and exercise camera/window capture, independent audio, permission recovery, selected-file recording and commit failure. Current local validation builds use a local development signature without sandbox; a resources plist is not proof of enabled sandbox. Distribution signing, archive, privacy declarations, metadata and review remain later tasks. See [App Store preparation](APP_STORE.md).
+Next milestone is an actually sandboxed validation build, not submission. Inspect the signed entitlements and exercise camera/window capture, independent audio, permission recovery, selected-file recording and commit failure. Current local validation builds use a local development signature without sandbox; a resources plist is not proof of enabled sandbox. Non-signing source/privacy preparation and draft metadata are complete as of 2026-10-08; distribution signing, final screenshots, signed hardware acceptance and review remain later tasks. See [App Store preparation](APP_STORE.md).
 
-下一里程碑是实际启用沙盒的验证构建，不是提交商店。检查签名权限并验证采集、独立音频、授权恢复、用户选定文件的录制完成与失败恢复。目前本地验证构建未启用沙盒；资源权限文件不代表实际启用。分发签名、归档、隐私、商店素材与审核后续分别处理。
+下一里程碑是实际启用沙盒的验证构建，不是提交商店。检查签名权限并验证采集、独立音频、授权恢复、用户选定文件的录制完成与失败恢复。目前本地验证构建未启用沙盒；资源权限文件不代表实际启用。2026-10-08 已完成非签名代码／隐私准备与文案草稿；分发签名、最终截图、签名包真机验收和审核后续分别处理。
 
 ## iPad
 

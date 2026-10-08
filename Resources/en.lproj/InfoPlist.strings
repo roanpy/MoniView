@@ -1,4 +1,4 @@
 /* MoniView — English Info.plist strings. */
 
-"NSCameraUsageDescription" = "MoniView needs camera access to read the USB video capture card and show the HDMI picture.";
+"NSCameraUsageDescription" = "MoniView needs access to your selected video capture card or camera to preview and record video.";
 "NSMicrophoneUsageDescription" = "MoniView needs access to your selected audio input for live monitoring and recording.";

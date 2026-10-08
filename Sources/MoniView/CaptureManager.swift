@@ -786,6 +786,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private var recordingFinished: (() -> Void)?
     private var discoveryRetryCount = 0
     private var discoveryRetryScheduled = false
+    private var videoPermissionRequestInFlight = false
     private var isSwitchingVideoDevice = false
     // Main-queue transaction state; prevents follow from reusing the old format ID.
     private var pendingVideoConfiguration: (formatID: Int, frameRate: Double)?
@@ -869,7 +870,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // Only ask for camera access when the camera-based source is the one in use.
         // A window-source session never touches AVFoundation video input, so prompting
         // for it would block the app behind an unrelated permission.
-        if sourceKind == .device { requestInitialPermission() } else { applySourceKind() }
+        if sourceKind == .device { refreshDevices() } else { applySourceKind() }
     }
 
     deinit {
@@ -903,6 +904,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             selectedVideoID = selectedVideoID ?? Self.automaticVideoDevice(in: Self.devices(.video))?.uniqueID
             selectVideoDevice(id: selectedVideoID)
         case .macWindow:
+            cameraPermissionPending = false
+            permissionDenied = false
             // Release the device input so the UVC stream and the window stream never
             // compete for the same GPU and frame handoff. Audio is not part of that
             // conflict: it keeps its own input on the same session, so listening and
@@ -1141,20 +1144,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // Audio discovery and restore already ran above this camera-source guard.
             return
         }
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            cameraPermissionPending = false
-            permissionDenied = false
-        case .notDetermined:
-            cameraPermissionPending = true
-            return
-        default:
-            cameraPermissionPending = false
-            permissionDenied = true
-            return
-        }
+        // Discovery does not open a camera. Keep manual choices visible before permission
+        // is granted, and ask only when an actual input is selected below.
         let videos = Self.devices(.video)
-        if !videos.isEmpty { discoveryRetryCount = 0 }
+        videoOptions = videos.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
+        if Self.automaticVideoDevice(in: videos) != nil { discoveryRetryCount = 0 }
         else if !isRecording && !discoveryRetryScheduled && discoveryRetryCount < 5 {
             // UVC providers can finish initializing after the initial discovery snapshot.
             discoveryRetryCount += 1
@@ -1162,7 +1156,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 guard let self else { return }
                 self.discoveryRetryScheduled = false
-                if self.videoOptions.isEmpty && !self.isRecording && !self.permissionDenied { self.refreshDevices(force: false) }
+                if self.selectedVideoID == nil && !self.isRecording && !self.permissionDenied { self.refreshDevices(force: false) }
             }
         }
         if isRecording {
@@ -1173,7 +1167,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             } else if force { statusMessage = "停止录制后可更换设备。" }
             return
         }
-        videoOptions = videos.map { CaptureInputOption(id: $0.uniqueID, name: $0.localizedName) }
         if let id = selectedVideoID, videos.contains(where: { $0.uniqueID == id }) {
             if force { selectVideoDevice(id: id) }
             return
@@ -1184,6 +1177,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func selectVideoDevice(id: String?) {
         guard !isRecording else { statusMessage = "停止录制后可更换设备。"; return }
+        guard sourceKind == .device else { return }
+        if cameraPermissionPending, selectedVideoID == id,
+           AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined { return }
         let previouslyPaired = UserDefaults.standard.string(forKey: "audio.selection") == nil || audioOptions.first(where: { $0.id == selectedAudioID })?.name == deviceName
         let previousDeviceID = selectedVideoID
         selectedVideoID = id
@@ -1202,14 +1198,30 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // delivered its first frame; the waiting overlay alone left the stale drawable visible
         // behind a translucent mask.
         beginPreviewInput(owner: .device)
-        let device = Self.devices(.video).first { $0.uniqueID == id }
+        var device = Self.devices(.video).first { $0.uniqueID == id }
+        cameraPermissionPending = false
+        permissionDenied = false
+        if device != nil {
+            switch AVCaptureDevice.authorizationStatus(for: .video) {
+            case .authorized: break
+            case .notDetermined:
+                requestSelectedVideoPermission()
+                device = nil
+            default:
+                permissionDenied = true
+                device = nil
+            }
+        }
+        // An unauthorized input follows the normal teardown path; the permission
+        // completion reselects the current intent, never the original captured ID.
+        let authorizedDevice = device
         sessionQueue.async { [weak self] in
             guard let self else { return }
             guard self.videoConfiguration.isCurrent(generation) else { return }
             self.session.beginConfiguration()
             var configurationOpen = true
             do {
-                if let device {
+                if let device = authorizedDevice {
                     if let old = self.videoInput { self.session.removeInput(old); self.videoInput = nil }
                     self.selectedDevice = nil
                     self.configuredFrameDuration = .invalid
@@ -1954,21 +1966,21 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
     func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) { frames.markDropped() }
 
-    private func requestInitialPermission() {
-        // Refresh audio independently even if the camera prompt is still unresolved.
-        refreshDevices()
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: break
-        case .notDetermined:
-            cameraPermissionPending = true
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                DispatchQueue.main.async {
-                    self?.cameraPermissionPending = false
-                    self?.permissionDenied = !granted
-                    if granted { self?.refreshDevices() }
-                }
+    private func requestSelectedVideoPermission() {
+        cameraPermissionPending = true
+        guard !videoPermissionRequestInFlight else { return }
+        videoPermissionRequestInFlight = true
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.videoPermissionRequestInFlight = false
+                self.cameraPermissionPending = false
+                // The source, selection or device may have changed while the prompt was open.
+                guard self.sourceKind == .device, let id = self.selectedVideoID,
+                      Self.devices(.video).contains(where: { $0.uniqueID == id }) else { return }
+                self.permissionDenied = !granted
+                if granted { self.selectVideoDevice(id: id) }
             }
-        default: permissionDenied = true
         }
     }
     private func startStatsTimer() {
@@ -2137,7 +2149,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             payload["connectionMaxDuration"] = connection.videoMaxFrameDuration.seconds.isFinite ? connection.videoMaxFrameDuration.seconds : 0
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
-        let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/MoniView", isDirectory: true)
+        // Foundation resolves the user's Library inside the app container under App Sandbox.
+        guard let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else { return }
+        let directory = library.appendingPathComponent("Logs/MoniView", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? data.write(to: directory.appendingPathComponent("diagnostics.json"), options: .atomic)
         }
