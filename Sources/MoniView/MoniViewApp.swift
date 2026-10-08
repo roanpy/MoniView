@@ -13,12 +13,16 @@ struct MoniViewApp: App {
             MainView()
                 .environmentObject(captureManager)
                 .preferredColorScheme(.dark)
-                .frame(minWidth: 880, minHeight: 590)
+                .frame(minWidth: captureManager.isFittedWindowPreviewActive ? 1 : 880,
+                       minHeight: captureManager.isFittedWindowPreviewActive ? 1 : 590)
                 .onAppear {
                     appDelegate.capture = captureManager
                 }
                 .background {
-                    WindowLevelObserver(alwaysOnTop: alwaysOnTop)
+                    WindowLevelObserver(alwaysOnTop: alwaysOnTop, fittedPreview: captureManager.isFittedWindowPreviewActive)
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                    FittedPreviewWindowObserver(capture: captureManager)
                         .frame(width: 0, height: 0)
                         .accessibilityHidden(true)
                 }
@@ -33,6 +37,10 @@ struct MoniViewApp: App {
                 }
                 .keyboardShortcut("f", modifiers: [.control, .command])
                 Toggle("窗口置顶", isOn: $alwaysOnTop)
+                Button(L10n.text("返回 MoniView")) {
+                    captureManager.fittedWindowPreview.stop(activate: true)
+                }
+                .disabled(!captureManager.isFittedWindowPreviewActive)
             }
             CommandGroup(after: .help) {
                 Button(L10n.text("使用指南")) {
@@ -56,6 +64,7 @@ struct MoniViewApp: App {
 final class MoniViewAppDelegate: NSObject, NSApplicationDelegate {
     weak var capture: CaptureManager?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        capture?.fittedWindowPreview.stop()
         capture?.flushPicturePersistence()
         guard let capture, capture.isRecording else { return .terminateNow }
         capture.finishRecordingBeforeExit {

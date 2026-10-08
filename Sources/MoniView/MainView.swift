@@ -20,10 +20,11 @@ struct MainView: View {
     @State private var isFullscreen = false
     @State private var fullscreenControlsVisible = true
     @State private var controlsHideWorkItem: DispatchWorkItem?
+    private var edgeToEdgePreview: Bool { isFullscreen || capture.isFittedWindowPreviewActive }
 
     var body: some View {
         ZStack {
-            if isFullscreen {
+            if edgeToEdgePreview {
                 Color.black.ignoresSafeArea()
             } else {
                 LinearGradient(
@@ -35,7 +36,7 @@ struct MainView: View {
             }
 
             VStack(spacing: 0) {
-                if !isFullscreen {
+                if !edgeToEdgePreview {
                     header
                         .padding(.horizontal, 18)
                         .padding(.top, 9)
@@ -43,21 +44,22 @@ struct MainView: View {
                 }
 
                 previewArea
-                    .padding(.horizontal, isFullscreen ? 0 : 12)
+                    .padding(.horizontal, edgeToEdgePreview ? 0 : 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .ignoresSafeArea(edges: isFullscreen ? .all : [])
+            .ignoresSafeArea(edges: edgeToEdgePreview ? .all : [])
 
             quickControls
                 .padding(.bottom, isFullscreen ? 26 : 10)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .opacity(!isFullscreen || fullscreenControlsVisible ? 1 : 0)
-                .allowsHitTesting(!isFullscreen || fullscreenControlsVisible)
+                .opacity(capture.isFittedWindowPreviewActive ? 0 : (!isFullscreen || fullscreenControlsVisible ? 1 : 0))
+                .allowsHitTesting(!capture.isFittedWindowPreviewActive && (!isFullscreen || fullscreenControlsVisible))
+                .accessibilityHidden(capture.isFittedWindowPreviewActive)
                 .animation(.easeInOut(duration: 0.2), value: fullscreenControlsVisible)
         }
         .overlay(alignment: .bottom) {
             GeometryReader { geometry in
-                if let activePanel {
+                if let activePanel, !capture.isFittedWindowPreviewActive {
                     let bottom = isFullscreen ? 98.0 : 82.0
                     FloatingControlPanel(panel: activePanel,
                                          availableHeight: max(120, geometry.size.height - bottom - 12),
@@ -99,6 +101,9 @@ struct MainView: View {
         .onChange(of: activePanel) { _, panel in
             if panel != nil { revealFullscreenControls() }
             else if isFullscreen { scheduleFullscreenControlsHide() }
+        }
+        .onChange(of: capture.isFittedWindowPreviewActive) { _, active in
+            if active { activePanel = nil; showInformation = false; controlsHideWorkItem?.cancel() }
         }
         .overlay {
             VStack {
@@ -218,7 +223,7 @@ struct MainView: View {
 
     private var previewArea: some View {
         ZStack {
-            if isFullscreen {
+            if edgeToEdgePreview {
                 Color.black
             } else {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -229,8 +234,8 @@ struct MainView: View {
             // pipeline is never rebuilt; overlays communicate state instead.
             PreviewLayerView(capture: capture)
                 .id(capture.previewRevision)
-                .clipShape(RoundedRectangle(cornerRadius: isFullscreen ? 0 : 17, style: .continuous))
-                .padding(isFullscreen ? 0 : 3)
+                .clipShape(RoundedRectangle(cornerRadius: edgeToEdgePreview ? 0 : 17, style: .continuous))
+                .padding(edgeToEdgePreview ? 0 : 3)
             if !capture.isRunning { waitingForInput }
 
             VStack {
@@ -276,15 +281,15 @@ struct MainView: View {
                     .padding(.bottom, 14)
                 }
             }
-            .padding(isFullscreen ? 20 : 18)
+            .padding(edgeToEdgePreview ? 20 : 18)
         }
         .overlay {
-            if !isFullscreen {
+            if !edgeToEdgePreview {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .stroke(Color(hex: 0x65584c).opacity(0.64), lineWidth: 1)
             }
         }
-        .shadow(color: .black.opacity(isFullscreen ? 0 : 0.24), radius: isFullscreen ? 0 : 22, y: isFullscreen ? 0 : 12)
+        .shadow(color: .black.opacity(edgeToEdgePreview ? 0 : 0.24), radius: edgeToEdgePreview ? 0 : 22, y: edgeToEdgePreview ? 0 : 12)
         .onTapGesture(count: 2) { NSApp.keyWindow?.toggleFullScreen(nil) }
         .onTapGesture { activePanel = nil; revealFullscreenControls() }
         .accessibilityElement(children: .contain)
@@ -354,7 +359,7 @@ struct MainView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut("r", modifiers: [.command])
-            .disabled(!capture.isRunning && !capture.isRecording)
+            .disabled((!capture.isRunning || capture.isMacWindowPreviewResizing) && !capture.isRecording)
             .opacity(capture.isRunning || capture.isRecording ? 1 : 0.55)
             .help(L10n.text(capture.isRecording ? "停止录制" : "录制画面"))
             .accessibilityLabel(L10n.text(capture.isRecording ? "停止录制" : "录制画面"))
@@ -758,7 +763,7 @@ struct MainView: View {
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                panelHeading("采集设置", subtitle: "按采集卡支持的格式显示", icon: "gearshape")
+                panelHeading("采集设置", subtitle: capture.sourceKind == .macWindow ? "选择本机窗口并设置预览" : "按采集卡支持的格式显示", icon: "gearshape")
                 sourceRefreshButton
             }
 
@@ -774,6 +779,20 @@ struct MainView: View {
                             choices: capture.macWindowOptions.map { PickerChoice(value: Optional($0.id), title: $0.displayTitle) })
                             .disabled(capture.isRecording || capture.macWindowOptions.isEmpty)
                         sourceRefreshButton
+                    }
+                    Button(L10n.text("贴合原窗口（实验）")) {
+                        capture.fittedWindowPreview.start()
+                    }
+                    .disabled(!capture.isRunning || capture.isRecording || isFullscreen)
+                    Text(L10n.text("仅支持同屏普通窗口。鼠标操作原应用，点击菜单栏图标或 Dock 返回 MoniView。"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(hex: 0x98908a))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let message = capture.fittedWindowPreviewMessage {
+                        Text(L10n.text(message))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0xf2a23a))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let status = capture.macWindowStatus {
                         Text(L10n.text(status))
@@ -889,7 +908,7 @@ struct MainView: View {
             .padding(.horizontal, 12)
             HStack(spacing: 8) {
                 Image(systemName: "info.circle")
-                Text("分辨率和帧率受采集卡硬件限制。")
+                Text(L10n.text(capture.sourceKind == .macWindow ? "原应用需要保持打开；窗口预览不会提高原应用帧率。" : "分辨率和帧率受采集卡硬件限制。"))
             }
             .font(.system(size: 10))
             .foregroundStyle(Color(hex: 0x98908a))
@@ -1138,6 +1157,7 @@ struct MainView: View {
             capture.stopRecording()
             return
         }
+        guard !capture.isFittedWindowPreviewActive, !capture.isMacWindowPreviewResizing else { return }
 
         let panel = NSSavePanel()
         let formatter = DateFormatter()

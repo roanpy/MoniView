@@ -619,6 +619,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var sourceKind: CaptureSourceKind = .device {
         didSet {
             guard oldValue != sourceKind else { return }
+            fittedWindowPreview.stop()
             UserDefaults.standard.set(sourceKind.rawValue, forKey: "source.kind")
             applySourceKind()
         }
@@ -628,6 +629,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published var selectedMacWindowID: UInt32? {
         didSet {
             guard sourceKind == .macWindow, oldValue != selectedMacWindowID else { return }
+            fittedWindowPreview.stop()
             UserDefaults.standard.set(Int(selectedMacWindowID ?? 0), forKey: "source.windowID")
             restartMacWindowCapture()
         }
@@ -645,7 +647,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// Portrait buffers are phone/tablet mirrors: fill the window by default until the
     /// user picks a mode explicitly. Landscape 4:3 (retro consoles) is never stretched.
     @Published private(set) var isPortraitSource = false
-    var effectiveAspectMode: AspectMode { isPortraitSource && !userChoseAspect ? .stretch : aspectMode }
+    var effectiveAspectMode: AspectMode {
+        if isFittedWindowPreviewActive { return .fit }
+        return isPortraitSource && !userChoseAspect ? .stretch : aspectMode
+    }
     @Published var picture = PictureSettings() {
         didSet {
             if oldValue.enhancementEnabled != picture.enhancementEnabled ||
@@ -722,6 +727,27 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var displayMaximumFPS = 0.0
     @Published private(set) var displayObservedFPS = 0.0
     @Published private(set) var previewRevision: UInt64 = 0
+    @Published private(set) var isFittedWindowPreviewActive = false
+    @Published private(set) var fittedWindowPreviewMessage: String?
+    @Published private(set) var isMacWindowPreviewResizing = false
+    lazy var fittedWindowPreview = FittedWindowPreview(capture: self)
+    func setFittedPreviewState(_ active: Bool, message: String?) {
+        isFittedWindowPreviewActive = active
+        fittedWindowPreviewMessage = message
+    }
+    @MainActor func resizeMacWindowPreview(to size: CGSize, scale: CGFloat) async -> Bool {
+        guard sourceKind == .macWindow, !isRecording, !isMacWindowPreviewResizing,
+              let source = macWindowCapture else { return false }
+        isMacWindowPreviewResizing = true
+        defer { isMacWindowPreviewResizing = false }
+        let resized = await source.resizeOutput(to: size, scale: scale)
+        guard sourceKind == .macWindow, macWindowCapture === source else { return false }
+        if resized {
+            configuredMacWindowSize = source.configuredPixelSize
+            resolution = "\(Int(configuredMacWindowSize.width)) × \(Int(configuredMacWindowSize.height))"
+        }
+        return resized
+    }
     func rebuildPreview() { previewRevision &+= 1 }
     @Published private(set) var deviceName = "未连接"
     @Published private(set) var resolution = "—"
@@ -986,6 +1012,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     private func restartMacWindowCapture() {
+        fittedWindowPreview.stop()
         guard sourceKind == .macWindow, let windowID = selectedMacWindowID else {
             stopMacWindowCapture()
             return
@@ -1087,6 +1114,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     private func stopMacWindowCapture() {
+        fittedWindowPreview.stop()
         macWindowRefreshRevision.advance()
         macWindowCapture?.stop()
         macWindowCapture = nil
@@ -1845,7 +1873,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func startRecording(to url: URL) {
-        guard !isRecording else { return }
+        guard !isRecording, !isFittedWindowPreviewActive, !isMacWindowPreviewResizing else { return }
         let windowSize = configuredMacWindowSize
         if sourceKind == .macWindow {
             guard CaptureSessionPolicy.canRecordWindowCapture(

@@ -1,6 +1,6 @@
 # Mac window enhancement feasibility / Mac 本机窗口增强可行性
 
-Status: researched proposal, **not implemented**. The current product still uses capture-device input. / 状态：已研究的方案，**尚未实现**；当前产品仍使用采集设备输入。
+Status (2026-10-08): selected Mac-window capture is implemented. A fitted-preview candidate now reuses the existing preview window and stream; runtime acceptance is pending. The original application must keep running. / 2026-10-08：已实现所选 Mac 窗口采集；贴合预览候选复用现有窗口与采集流，运行验收尚待完成，原应用仍须运行。
 
 ## Recommendation / 建议
 
@@ -44,3 +44,14 @@ Use a small Mac-specific capture adapter, with the existing frame handoff as its
 - [Apple: Low-latency frame interpolation configuration](https://developer.apple.com/documentation/videotoolbox/vtlowlatencyframeinterpolationconfiguration) — runtime availability and temporal/spatial processing boundaries.
 
 These APIs establish feasibility, not App Store approval, universal compatibility, sustained performance or measured latency. / 接口资料说明可行性，不代表上架批准、普遍兼容或已经实测的性能与延迟。
+
+
+## Fitted-preview candidate / 贴合预览候选
+
+Capture settings → Mac window → Fit over source window (experimental), disabled while recording or in MoniView full screen. Opt-in per session; never restored automatically at startup. It turns the existing preview window into a borderless, mouse-transparent normal-level window over the source, with no second renderer/stream. The original application retains keyboard/mouse input; no event injection or Accessibility permission is used. / 采集设置 → Mac 窗口 → 贴合原窗口（实验）；录制或 MoniView 全屏时禁用，每次手动进入，不在启动恢复。现有预览窗口变为无边框、鼠标穿透、普通层级覆盖，复用原采集流与渲染。原应用接收输入，不注入事件或新增辅助功能权限。
+
+Menu bar MoniView icon → Return to MoniView, or activate MoniView through Dock, restores the saved frame, window style and controls. A background monitor allows one geometry request at a time (20 Hz maximum). Cross-display/partly off-screen/fullscreen windows, other overlapping windows, app/Space/display changes, minimized/closed sources and failed/expired resize updates return to separate preview. / 菜单栏图标返回或 Dock 激活 MoniView 恢复原窗口与控件；后台最多20Hz且仅一个几何请求在途。跨屏、部分屏外、全屏、其他窗口覆盖、应用／工作区／屏幕变化、最小化／关闭或尺寸更新失败／超时均退出。
+
+Moving updates the preview position. Resizing updates the same ScreenCaptureKit stream and exposes the original window until matching-size pixels arrive, so stale scaled controls are not left over input targets. Fit mode is temporary and does not overwrite the saved aspect preference. Recording is excluded from this mode to keep writer dimensions fixed. / 移动同步位置；缩放更新同一采集流，新尺寸像素到达前显示原窗口，避免旧图与点击目标错位；临时使用适应比例，不改保存的比例偏好。模式暂不与录制同时启用，避免 writer 尺寸变化。
+
+This reduces two-window handling, not the source application's rendering cost. GPU/energy savings, all game behavior and cross-display support are not certified. Runtime checks must be recorded separately in [LOCAL_VALIDATION](LOCAL_VALIDATION.md). / 减少双窗口操作，不能消除原程序渲染；未认证GPU／功耗收益、所有游戏行为或跨屏支持；实测单独记录。

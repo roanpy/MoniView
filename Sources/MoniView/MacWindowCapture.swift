@@ -152,6 +152,7 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var streamGeneration: UInt64?
     private var generation: UInt64 = 0
     private var configuredSize = CGSize.zero
+    private var captureFrameInterval = CMTime(value: 1, timescale: 60)
     /// Ingest token issued by the client for the stream this adapter currently serves. Nil while
     /// no stream is installed, so a frame from a stopped stream can never be handed over as one
     /// belonging to the current input.
@@ -295,11 +296,12 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             configuration.showsCursor = false
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
             configuration.scalesToFit = true
+            configuration.ignoreShadowsSingleWindow = true
 
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             candidateStream = stream
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
-            guard installStartingStream(stream, generation: expected) else {
+            guard installStartingStream(stream, interval: configuration.minimumFrameInterval, generation: expected) else {
                 try? await stream.stopCapture()
                 return
             }
@@ -346,14 +348,48 @@ final class MacWindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return generation == expected
     }
 
-    private func installStartingStream(_ candidate: SCStream, generation expected: UInt64) -> Bool {
+    private func installStartingStream(_ candidate: SCStream, interval: CMTime, generation expected: UInt64) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard generation == expected, stateValue == .starting else { return false }
         stream = candidate
+        captureFrameInterval = interval
         streamGeneration = expected
         // Keep configuredPixelSize at zero until startCapture succeeds.
         configuredSize = .zero
+        return true
+    }
+
+    /// Update the existing stream, without creating another source or changing its ingest token.
+    /// The caller coalesces requests and refuses recording-time dimension changes.
+    func resizeOutput(to pointSize: CGSize, scale: CGFloat) async -> Bool {
+        let size = MacWindowCapturePolicy.pixelSize(forWindowFrameSize: pointSize, backingScaleFactor: scale)
+        guard size != .zero, let snapshot = outputResizeSnapshot() else { return false }
+        if snapshot.size == size { return true }
+        let configuration = SCStreamConfiguration()
+        configuration.width = Int(size.width); configuration.height = Int(size.height)
+        configuration.minimumFrameInterval = snapshot.interval
+        configuration.queueDepth = 5
+        configuration.showsCursor = false
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.scalesToFit = true
+        configuration.ignoreShadowsSingleWindow = true
+        do {
+            try await snapshot.stream.updateConfiguration(configuration)
+            return publishOutputResize(size, stream: snapshot.stream, generation: snapshot.generation)
+        } catch { return false }
+    }
+
+    private func outputResizeSnapshot() -> (stream: SCStream, generation: UInt64, interval: CMTime, size: CGSize)? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard let stream, let streamGeneration, stateValue == .running else { return nil }
+        return (stream, streamGeneration, captureFrameInterval, configuredSize)
+    }
+    private func publishOutputResize(_ size: CGSize, stream: SCStream, generation expected: UInt64) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard acceptsDeliveryLocked(), MacWindowCapturePolicy.acceptsCallback(callbackStream: stream,
+            activeStream: self.stream, activeGeneration: streamGeneration, generation: expected) else { return false }
+        configuredSize = size
         return true
     }
 

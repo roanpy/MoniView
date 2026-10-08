@@ -1,5 +1,13 @@
 # Native validation / 原生验证记录
 
+## Fitted-window candidate — build 118, 2026-10-08 / 贴合窗口候选
+
+**Build and static checks / 构建与静态检查.** Release arm64 preparation build 0.2.0 (118) compiled and packaged successfully, with valid plist/resource tables. All 16 new overlay/status/source-description keys exist in both Chinese and English tables. `git diff --check` passed. The installed stable build116 executable hash remains unchanged. No certificate, keychain, bundle-signing, sandbox or Store-upload operation was performed. / 118 的 arm64 Release 独立准备包编译打包成功，plist 与资源合法，16个新增键中英文齐全，差异空白检查通过；已安装116哈希不变，未操作证书、钥匙串、应用包签名、沙盒或商店上传。
+
+**Observed UI / 已观察界面.** Capture settings expose the experimental entry and localized instructions for Mac-window sources. With recording access denied, the fit button stays disabled and the reason remains visible. Adding the preparation app in system recording settings and restarting did not make ScreenCaptureKit enumeration succeed; the installed stable app still enumerated/captured a window with its existing authorization. Read-only signature inspection of the preparation app reports a linker-signed executable with no bound Info.plist or sealed resources. A complete local bundle signature is the next proposed diagnostic step, subject to the user's earlier no-signing restriction. / Mac窗口设置显示实验入口与中文说明；拒绝访问时按钮禁用且保留原因。系统设置添加准备包并重启后仍无法枚举窗口，已安装稳定版使用现有授权仍能枚举／采集。只读检查显示准备包仅有链接器签名，Info.plist未绑定、资源未封存；下一诊断步骤拟补完整本地包签名，须遵守用户先不处理签名的限制。
+
+**Not accepted yet / 尚未验收.** Actual overlay alignment, mouse pass-through, move/resize, exit cycles, dialogs and minimize/close could not be exercised in build118 without recording access. These checks are pending, not passing. No game compatibility, GPU/energy improvement, latency, sustained FPS or sandbox-runtime result is claimed. Stable device-source selection and audio-off state were restored after the permission comparison. / 118未取得录屏访问，贴合位置、点击穿透、移动缩放、重复退出、弹窗及最小化／关闭尚未实测，不计通过；未声称游戏兼容、GPU／功耗收益、延迟、持续帧率或沙盒运行结果。授权对照后已恢复设备来源及关闭音频状态。
+
 ## Panel motion follow-up — build 116, 2026-10-08 / 面板动效补充
 
 The floating controls use a 10pt rise and 0.98→1 scale with a 0.22s fade on opening, and a 0.14s exit. The shared card preserves its height while content changes, then animates to the newly measured height over 0.20s; there is no zero-height reset. A cancellable sequential fade replaces the old content before revealing the new controls, resets each panel's scroll position, and disables outgoing controls during the switch. Reduce Motion removes translation/scaling and animated height changes. / 浮层打开时上浮10pt、轻缩放并淡入0.22秒，关闭0.14秒；切换保留外框高度，再按新内容0.20秒调整，不清零。可取消的顺序淡出／淡入避免新旧控件交叠，切换后滚动回顶部，过渡期旧控件不可操作；减少动态效果时取消位移、缩放和高度动画。

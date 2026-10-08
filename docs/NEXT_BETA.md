@@ -15,11 +15,11 @@ This plan records bounded follow-up work. It does not claim these features have 
 
 ## Fitted window preview / 贴合窗口预览
 
-Prototype `Fit over source window (experimental)`, off by default, for a normal desktop window on the same display. Reuse one existing capture stream and renderer, place a borderless preview over the selected source bounds, and let mouse events pass to the source. Returning to MoniView through Dock/app activation restores normal controls. Withdraw on uncertain geometry, source loss, minimize, modal windows or Space changes. Never move, minimize or inject input into the source application.
+A candidate now implements `Fit over source window (experimental)`, off by default, for a normal desktop window on the same display. Reuse one existing capture stream and renderer, place a borderless preview over the selected source bounds, and let mouse events pass to the source. Returning to MoniView through Dock/app activation restores normal controls. Withdraw on uncertain geometry, source loss, minimize, modal windows or Space changes. Never move, minimize or inject input into the source application.
 
 This can reduce two-window operation; it cannot remove the source game's rendering. Compare the same scene before claiming a GPU or energy reduction. Verify 10 enter/exit cycles, mouse/keyboard control, dialogs and minimize/restore on an actual target application. Reject the prototype if it hides dialogs, misaligns input or loses the escape path after two rounds.
 
-试验入口默认关闭，首版限同显示器的普通桌面窗口：复用单一采集流和renderer，无边框预览覆盖选中源窗口、鼠标穿透；点击Dock／切回MoniView恢复控制。源消失、最小化、几何信息不确定、弹窗或Space变化时撤覆盖。不修改原应用窗口，不注入输入。可减少双窗口操作，不能消除游戏渲染；GPU／功耗收益须同场景对照。实际目标应用验证10次进入退出及输入、弹窗、最小化恢复；两轮仍不可靠就保留独立预览。
+候选代码已实现试验入口，默认关闭，限同显示器的普通桌面窗口：复用单一采集流和renderer，无边框预览覆盖选中源窗口、鼠标穿透；点击Dock／切回MoniView恢复控制。源消失、最小化、几何信息不确定、弹窗或Space变化时撤覆盖。不修改原应用窗口，不注入输入。可减少双窗口操作，不能消除游戏渲染；GPU／功耗收益须同场景对照。实际目标应用验证10次进入退出及输入、弹窗、最小化恢复；两轮仍不可靠就保留独立预览。
 
 Apple documents that independent-window capture retains occluded/off-screen contents, but pauses when minimized: [ScreenCaptureKit window behavior](https://developer.apple.com/videos/play/wwdc2022/10155/). Mouse pass-through uses public [NSWindow.ignoresMouseEvents](https://developer.apple.com/documentation/appkit/nswindow/ignoresmouseevents).
 

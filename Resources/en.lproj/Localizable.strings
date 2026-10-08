@@ -339,3 +339,21 @@
 "支持与反馈" = "Support and Feedback";
 "好" = "OK";
 "连接 USB 采集卡后，在采集设置中选择视频设备。没有 USB 视频输入时不会自动打开内置或无线摄像头；这些摄像头只能手动选择。\n\n无需采集卡：打开一个有内容的其他应用窗口，将画面来源改为 Mac 窗口，授权屏幕录制后选择该窗口。源窗口需要保持打开并持续更新。\n\n音频可单独选择或关闭。录制与截图通过系统保存面板选择位置；画质增强仅处理实时预览，默认录制也应用色彩与源分辨率锐化，可在设置中关闭。\n\n拒绝权限后，可在系统设置的隐私与安全性中重新允许，再刷新设备或窗口；系统可能要求重启应用。" = "Connect a USB capture card and choose its video device in Capture settings. Without a USB video input, MoniView does not open a built-in or wireless camera automatically; these cameras must be selected manually.\n\nWithout a capture card: open another application window with visible content, set Source to Mac window, grant Screen Recording access, and select that window. The source window must stay open and keep updating.\n\nSelect audio independently or turn it off. Recording and snapshots use the system save panel. Enhancement affects the live preview; recordings include color adjustments and source-resolution sharpening by default, which can be disabled in settings.\n\nAfter denying permission, allow access in System Settings under Privacy & Security, then refresh devices or windows. macOS may require restarting the app.";
+
+/* Fitted local window preview. */
+"返回 MoniView" = "Return to MoniView";
+"贴合原窗口（实验）" = "Fit over source window (experimental)";
+"仅支持同屏普通窗口。鼠标操作原应用，点击菜单栏图标或 Dock 返回 MoniView。" = "Ordinary windows on the same display only. Mouse input reaches the original app. Use the menu bar icon or Dock to return to MoniView.";
+"请先选择正在预览的普通 Mac 窗口，并停止录制或退出全屏。" = "Select a running ordinary Mac window preview first, and stop recording or leave full screen.";
+"贴合预览仅支持与 MoniView 同屏、完整可见的普通窗口。" = "Fitted preview requires an ordinary window fully inside the same display as MoniView.";
+"显示器已改变，已返回独立预览。" = "The display configuration changed. Returned to separate preview.";
+"工作区或窗口状态改变，已返回独立预览。" = "The workspace or window state changed. Returned to separate preview.";
+"已切换应用，已返回独立预览。" = "You switched applications. Returned to separate preview.";
+"来源状态改变，已返回独立预览。" = "The source state changed. Returned to separate preview.";
+"窗口已隐藏、关闭或移出当前屏幕，已返回独立预览。" = "The window was hidden, closed or moved outside the current display. Returned to separate preview.";
+"请将所选来源窗口置于前台后再开启贴合预览。" = "Bring the selected source window to the foreground before starting fitted preview.";
+"来源前方出现其他窗口，已返回独立预览。" = "Another window appeared in front of the source. Returned to separate preview.";
+"窗口尺寸更新失败，已返回独立预览。" = "The window size could not be updated. Returned to separate preview.";
+"等待窗口新画面超时，已返回独立预览。" = "Timed out waiting for the resized window picture. Returned to separate preview.";
+"选择本机窗口并设置预览" = "Select a Mac window and configure preview";
+"原应用需要保持打开；窗口预览不会提高原应用帧率。" = "The source app must stay open. Window preview does not increase its own frame rate.";
