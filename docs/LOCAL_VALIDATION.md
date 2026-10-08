@@ -1,5 +1,11 @@
 # Native validation / 原生验证记录
 
+## No-device startup follow-up — build 115, 2026-10-08 / 无设备启动补充
+
+Automatic video selection now only restores or chooses external USB inputs. Built-in and wireless cameras remain manual choices; a saved camera no longer becomes the startup fallback, and capture-device disconnection does not open one. Both the initial discovery and window→device source selection use the same rule. The empty video picker has an explicit localized unselected value. / 自动选择只恢复或选择外接USB输入；内置及无线摄像头仍可手选，但保存过的摄像头不再作为启动默认或采集设备断开后的回退。初始发现和窗口→设备切换共用该规则，未选视频输入有明确本地化占位。
+
+Build 0.2.0 (115) compiled, signed and installed; the previous build114 bundle was retained. With the capture device absent, the old app showed the MacBook camera selected; restarting build115 showed “Select video input” with no video input selected and recording disabled. This is a native no-device startup observation, not a new interpolation performance test or a renewed Astra acceptance of build115. / 构建115编译、签名并安装，保留114；采集设备未连接时旧版本选中MacBook摄像头，重启115后显示“选择视频输入”、未选输入且录制禁用。本项是原生无设备启动观察，不代替新的插帧性能测试或构建115的Astra终验。
+
 ## Final local closeout — build 114, 2026-10-07–08 / 本机最终收尾
 
 This section supersedes earlier candidates for the bounded closeout requested by the user: one repair round, regression tests, Astra acceptance and a GitHub commit/push. It does not retroactively mark the earlier long gameplay checklist complete. / 本节替代早期候选构建，验收范围按用户最终要求收敛为集中修复、回归测试、Astra终验及GitHub提交推送；不将历史长时间游戏清单追认为全部完成。

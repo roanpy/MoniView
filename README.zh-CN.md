@@ -54,7 +54,7 @@ open build/MoniView.app
 
 脚本支持可选覆盖参数：`MONIVIEW_VERSION`、`MONIVIEW_BUILD`、`MONIVIEW_ARCH`、`MONIVIEW_SIGN_IDENTITY`、`MONIVIEW_DISABLE_AI=1`，以及 `MONIVIEW_ENTITLEMENTS=1`（用 `Resources/MoniView.entitlements` 与 hardened runtime 签名，用于沙盒验证）。脚本会校验签名、检查打包资源，并输出架构与版本。
 
-首次启动需要摄像头权限来读取视频。只有监听或录制声音时才需要麦克风权限，采集卡音频也属于该权限；仅监看视频不要求授权麦克风。MoniView 自动选择 USB 视频设备和匹配的音频输入；其他输入可在设置中选择。
+首次启动需要摄像头权限来读取视频。只有监听或录制声音时才需要麦克风权限，采集卡音频也属于该权限；仅监看视频不要求授权麦克风。MoniView 自动选择外接 USB 视频设备和匹配的音频输入；没有这类设备时保持视频未连接，拔掉采集设备后也不会自动回退打开内置或无线摄像头。摄像头仍可在设置中手动选择。
 
 底部按钮：录制、画面信息、画质增强、色彩、设置。点击画面关闭已打开的面板。
 

@@ -353,6 +353,9 @@ struct MainView: View {
                     get: { capture.selectedVideoID },
                     set: { capture.selectVideoDevice(id: $0) }
                 )) {
+                    if capture.selectedVideoID == nil {
+                        Text(L10n.text("选择视频输入")).tag(Optional<String>.none)
+                    }
                     ForEach(capture.videoOptions) { option in
                         Text(option.name).tag(Optional(option.id))
                     }
@@ -812,7 +815,9 @@ struct MainView: View {
                 if capture.sourceKind == .device {
                     labeledPicker("视频设备", fieldWidth: 195,
                         selection: Binding(get: { capture.selectedVideoID }, set: { capture.selectVideoDevice(id: $0) }),
-                        choices: capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
+                        choices: (capture.selectedVideoID == nil
+                            ? [PickerChoice(value: Optional<String>.none, title: "未连接")] : [])
+                            + capture.videoOptions.map { PickerChoice(value: Optional($0.id), title: $0.name) })
                         .disabled(capture.isRecording)
                 }
 

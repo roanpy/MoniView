@@ -882,6 +882,14 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         AVCaptureDevice.DiscoverySession(deviceTypes: media == .video ? [.external, .builtInWideAngleCamera] : [.microphone], mediaType: media, position: .unspecified).devices
     }
 
+    /// Automatic selection is for USB capture inputs only. Built-in and wireless
+    /// cameras stay available for an explicit selection, even if one was saved before.
+    private static func automaticVideoDevice(in videos: [AVCaptureDevice]) -> AVCaptureDevice? {
+        let candidates = videos.filter { $0.deviceType == .external && $0.transportType == 0x75736220 }
+        let preferredID = UserDefaults.standard.string(forKey: "device.lastVideo")
+        return candidates.first { $0.uniqueID == preferredID } ?? candidates.first
+    }
+
     // MARK: - Source selection
 
     /// Apply the stored source choice. Only one source may own the preview.
@@ -892,7 +900,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // the new owner and drops its frame instead of refilling the mailbox this clears.
             beginPreviewInput(owner: .device)
             stopMacWindowCapture()
-            selectedVideoID = selectedVideoID ?? UserDefaults.standard.string(forKey: "device.lastVideo")
+            selectedVideoID = selectedVideoID ?? Self.automaticVideoDevice(in: Self.devices(.video))?.uniqueID
             selectVideoDevice(id: selectedVideoID)
         case .macWindow:
             // Release the device input so the UVC stream and the window stream never
@@ -1170,11 +1178,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             if force { selectVideoDevice(id: id) }
             return
         }
-        // Prefer a USB capture device over Continuity Camera.
-        let preferredID = UserDefaults.standard.string(forKey: "device.lastVideo")
-        selectVideoDevice(id: videos.first(where: { $0.uniqueID == preferredID })?.uniqueID ?? videos.first(where: { $0.transportType == 0x75736220 })?.uniqueID
-            ?? videos.first(where: { $0.deviceType == .external })?.uniqueID
-            ?? videos.first?.uniqueID)
+        // No capture input means no automatic camera fallback, including after unplug.
+        selectVideoDevice(id: Self.automaticVideoDevice(in: videos)?.uniqueID)
     }
 
     func selectVideoDevice(id: String?) {

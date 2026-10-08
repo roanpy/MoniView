@@ -54,7 +54,7 @@ The optional AI path requires an Apple Swift 6.2+ / macOS SDK 26+ build and supp
 
 The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
 
-On first launch, grant camera access for video. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects the USB video device and a matching audio input, and other inputs can be chosen in settings.
+On first launch, grant camera access for video. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects an external USB video device and a matching audio input. Without one, video stays disconnected instead of automatically opening a built-in or wireless camera, including after unplugging the capture device. Cameras remain available for explicit selection in settings.
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
 
