@@ -417,7 +417,7 @@ stats.setEventHandler {
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
         spatialTargetSamples += 1
     }
-    if testSpatialOverload, (6...16).contains(tick) {
+    if testSpatialOverload || require120, (6...16).contains(tick) {
         // An over-budget tier must demote its generated midpoint's spatial pass instead of
         // dropping pairs. The demotion restores itself after sustained comfortable pairs, so
         // the run records whether it was ever observed rather than sampling one fixed tick.
@@ -490,6 +490,9 @@ stats.setEventHandler {
     // shares the same sampling boundary, including native fallback and redraws.
     requireFixture(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
     print("tick=\(tick) newCADcount=\(newCADCount) window=\(String(format: "%.3f", cadWindowDuration))s capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) engine=\(frames.currentEngine()) spatial=\(frames.currentEnhancedSize() ?? "native") work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
+    if require120 || requireCadence || testSpatialOverload {
+        print("   midpoint-spatial=\(preview.testMidpointSpatialDemoted ? "cheap" : "full") lateness=\(preview.testUntimelyPresentedPairs)")
+    }
     if testFollowSwitch && (tick == 18 || tick == 19) {
         let basis = frames.currentInterpolationBasisFPS()
         let multiplier = frames.currentActiveMultiplier()
@@ -689,6 +692,13 @@ stats.setEventHandler {
             let generatedFPS = Double(strictGeneratedFrames) / measuredDuration
             print("120 acceptance: strict windows \(strictWindows)/30, actual mean interval \(mean*1000)ms, P95 \(p95*1000)ms, source FPS \(String(format: "%.2f", sourceFPS)), generated FPS \(String(format: "%.2f", generatedFPS)), output FPS \(String(format: "%.2f", sourceFPS + generatedFPS)), sampled \(strictSampleWindows) windows/\(String(format: "%.3f", measuredDuration))s")
             requireFixture(strictWindows >= 27 && mean <= 0.0089 && p95 <= 0.0125, "sustained 60→120 acceptance failed")
+            // At a viewport-sized target this output rate only holds because late pairs drop the
+            // midpoint's spatial pass. If that lever was never needed, every strict window has
+            // to have passed on full-quality midpoints alone.
+            if demotedSamples == 0 {
+                requireFixture(strictWindows == 30,
+                               "120 acceptance fell short while the midpoint kept its full spatial pass")
+            }
         }
         if testSpatialOverload {
             requireFixture(spatialTargetSamples == 7 && preview.injectedOverBudgetCount > 0,

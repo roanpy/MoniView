@@ -1817,10 +1817,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// Selecting a preset applies a complete, predictable processing configuration.
     /// Subsequent manual edits remain available and change the preset label to custom.
     static let qualityPresets: [QualityPreset] = [
-        // Source-sized flow avoids display-size scaling work. Throughput remains
-        // dependent on the source cadence, GPU load and presentation deadlines.
+        // Flow at the visible viewport: the cheapest tier that still enlarges with MetalFX,
+        // and the midpoint ladder drops its own spatial pass whenever pairs run late, so a
+        // 60->120 output rate keeps its slots. Source frames stay enlarged either way.
         QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.55,
-                      upscaleMethod: .metalFX, upscaleTarget: .native, interpolation: .flowBlend),
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .flowBlend),
         // Display-sized: midpoints and endpoints scale up to the window. Sharper, and it
         // costs more, so the target rate may not hold on a busy GPU.
         QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.80,
