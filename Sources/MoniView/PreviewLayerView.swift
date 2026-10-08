@@ -115,6 +115,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var generationBatchGPUCosts: [Double] = []
     private var calibrationWarmupsRemaining = 2
     private var adaptiveLongEdge: Int?
+    /// Measured overload demotes a generated midpoint to the cheap final resize before the
+    /// renderer starts dropping pairs; sustained comfortable pairs restore the full pass.
+    private var midpointSpatialDemoted = false
+    private var lastMidpointRestoreAt = 0.0
     private var interpolationDimensions: FrameInterpolationPolicy.Dimensions?
     /// Recent exact adjacent-pair outcomes estimate content cadence; per-pair PTS intervals
     /// independently set midpoint budget and presentation timing.
@@ -143,6 +147,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     var suppressBlankPresentedCallbacks = false
     var injectInterpolationOverBudget = false
     private(set) var injectedOverBudgetCount = 0
+    var testMidpointSpatialDemoted: Bool { midpointSpatialDemoted }
     #endif
     #if MONIVIEW_PREVIEW_TESTING
     private func trace(_ value: String) { if ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" { print(value) } }
@@ -324,6 +329,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // generated has reached the display for this configuration yet.
             frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
+            midpointSpatialDemoted = false; lastMidpointRestoreAt = 0
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -446,6 +452,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0
         // A blank registration belongs to the input that was replaced: its next confirm, failure or
         // timeout must not rebuild the layer the new stream is drawing into.
         clearBlankTracking()
@@ -462,7 +469,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
 
     private func recordComfortablePresentedPair(slot: Double) {
-        guard slot.isFinite, slot > 0, adaptiveLongEdge != nil,
+        guard slot.isFinite, slot > 0, adaptiveLongEdge != nil || midpointSpatialDemoted,
               let midpointCost = p95(generationBatchCosts), midpointCost <= slot * 0.55 else {
             comfortableMidpoints = 0
             return
@@ -472,6 +479,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         comfortableMidpoints = 0
         lastRaisedToLongEdge = nil
         let now = CACurrentMediaTime()
+        if midpointSpatialDemoted, now - lastMidpointRestoreAt > 10 {
+            // Retry the full-quality midpoint. A pair that still misses its period demotes
+            // it again on the next overload, so the ladder stays bounded in both directions.
+            midpointSpatialDemoted = false
+            lastMidpointRestoreAt = now
+        }
         if let current = adaptiveLongEdge, now - lastRaiseAt > 10 {
             let ceiling = FrameInterpolationPolicy.ceilingLongEdge(
                 mode: settings.frameInterpolation, inputFPS: 0.5 / slot)
@@ -488,6 +501,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0
         presentationEpoch &+= 1; presentedMidpoint = nil
         // The step belongs to the pair that published it. A display change resets the cadence
         // window and the cost history, so leaving the last step in place would let the panel
@@ -1121,8 +1135,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // exceeds budget. A generated midpoint takes the same pipeline as its neighbouring
         // source frames on every tier except the cheapest one: measured on this Mac the
         // extra pass costs about a millisecond per pair, and skipping it made every other
-        // presented frame visibly softer, which reads as blur on faces in motion.
-        let smoothMidpoint = generatedMidpoint && settings.frameInterpolation == .efficient
+        // presented frame visibly softer, which reads as blur on faces in motion. A tier
+        // whose pairs keep missing their period falls back to that cheap midpoint until
+        // sustained comfortable pairs allow the full pass again.
+        let smoothMidpoint = generatedMidpoint
+            && (settings.frameInterpolation == .efficient || midpointSpatialDemoted)
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
@@ -1320,6 +1337,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let shouldMeasure = !generatedMidpoint && frameSequence != lastMeasuredSequence
         let wasMidpoint = generatedMidpoint
         let wasGenerationBatch = generatedBatch
+        let wasSmoothMidpoint = smoothMidpoint
         let wasCalibration = calibratedMidpoint
         let phasesForCost = activePairPhases
         let costPairPeriod = activePairPeriod
@@ -1459,6 +1477,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         let lower = expectedSettings.frameInterpolation == .efficient
                             ? measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
                             : nil
+                        // The tier's own spatial pass is the first lever on a tier that cannot
+                        // lower its inference size: a midpoint that keeps missing its period
+                        // drops to the cheap resize instead of the renderer dropping pairs.
+                        if succeeded, wasGenerationBatch, !wasSmoothMidpoint {
+                            self.midpointSpatialDemoted = true
+                        }
                         let forcedContinuation = succeeded && expectedSettings.forceFrameInterpolation
                             && lower == nil
                         if succeeded, let lower {

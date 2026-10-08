@@ -416,6 +416,13 @@ stats.setEventHandler {
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
         spatialTargetSamples += 1
     }
+    if testSpatialOverload, tick == 12 {
+        // An over-budget tier must demote its generated midpoint's spatial pass instead of
+        // dropping pairs: the cheap path is what keeps the source cadence presentable.
+        requireFixture(preview.testMidpointSpatialDemoted,
+                       "over-budget midpoint never demoted its spatial pass")
+        requireFixture(gen > 0, "demoted midpoint stopped generating frames")
+    }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!

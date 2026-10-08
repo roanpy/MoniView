@@ -12,6 +12,8 @@
 
 **Checks / 检查.** Capture compatibility (including the eight target-size assertions and the preset matrix), 372 interpolation-policy checks, localization (284 keys per locale, 568 UI lookups, 4 permission messages) all passed. Release arm64 build 121 packaged; the installed bundle was replaced after backing up the previous build. / 采集兼容（含 8 项目标尺寸断言与预设矩阵）、插帧策略 372 项、本地化（每语言 284 键、568 次界面查询、4 项权限）全部通过；121 Release arm64 打包完成，安装替换前已备份上一版。
 
+**Adaptive midpoint quality / 中间帧自适应画质.** A tier that cannot lower its inference size now demotes its generated midpoint to the cheap resize when a successful pair misses its period, instead of the renderer dropping pairs; ninety comfortable presented pairs plus a ten-second interval restore the full pass, and a pair that still misses demotes it again. The overload probe asserts the demotion and that generation continues, but the run itself is still pending: the screen was locked during the last attempt. / 无法降低推理尺寸的档位在成功帧对超期时，先把中间帧退回廉价缩放，而不是直接丢帧；连续 90 个稳定上屏帧对且间隔超过 10 秒后恢复完整放大，若再次超期则重新退回。超预算探针已加入降档与持续生成断言，但本轮运行待补：最近一次尝试时屏幕处于锁定状态。
+
 **Limit / 边界.** These are synthetic sources and offscreen timings. Real-game detail, HDMI latency, long-run thermals and the subjective sharpness of faces still need the user's own comparison; a 1080p feed upscaled to 3024 cannot recover detail the capture never contained. Replacing the bundle with a new local signature invalidates the previous camera and screen-recording grants, so one system prompt has to be accepted per replacement. / 以上为合成源与离屏计时；真实游戏细节、HDMI 延迟、长时间发热与脸部观感仍需用户自测。1080p 信号放大到 3024 无法还原采集本身没有的细节。用新的本地签名替换应用会使原有摄像头与录屏授权失效，每次替换需要重新确认一次系统授权。
 
 ## Match Display source-detail regression — build 120, 2026-10-08 / 匹配屏幕细节回退修复
