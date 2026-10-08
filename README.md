@@ -58,6 +58,8 @@ On first launch, grant camera access for video. Microphone permission is needed 
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
 
+Quality, Color and Settings panels gently rise and fade in above the toolbar. Switching keeps the card's bottom edge fixed while its height adjusts, with sequential content fades. The system's Reduce Motion preference removes scaling, movement and animated height changes.
+
 **Window > Always on Top** keeps the preview above normal windows and remembers the choice across launches. Native full screen temporarily uses the normal window level; leaving full screen restores the saved preference. It does not change Spaces behavior or raise save panels and other app windows.
 
 The brief status line shows the device name, the actual buffer resolution, and the measured FPS. In window mode it sits centered along the top; in full screen it moves to the top left. The detailed info card opens at the top right, and while it is open the brief line is hidden and restored when the card closes. The brief line defaults to hidden and can be enabled with **Show device status** in settings. The enhancement label is separately controlled by **Show enhancement status**, also off by default; existing preferences are preserved.
