@@ -108,6 +108,13 @@ enum UpscaleTarget: String, CaseIterable, Identifiable, Codable {
         case .screen: return screenLongEdge ?? sourceLongEdge
         }
     }
+    /// Match the selected processing target; low latency avoids work beyond the visible
+    /// viewport. Interpolation cost does not alter this source-frame quality decision.
+    func processingLongEdge(screenLongEdge: Double?, sourceLongEdge: Double,
+                            visibleLongEdge: Double, lowLatency: Bool) -> Double {
+        let requested = resolvedLongEdge(screenLongEdge: screenLongEdge, sourceLongEdge: sourceLongEdge)
+        return max(sourceLongEdge, lowLatency ? min(requested, visibleLongEdge) : requested)
+    }
 }
 
 enum UpscaleMethod: String, CaseIterable, Identifiable, Codable {
@@ -2151,6 +2158,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         payload["displayObservedFPS"] = displayObservedFPS
         payload["enhancementEnabled"] = picture.enhancementEnabled
         payload["enhancementTarget"] = picture.upscaleTarget.rawValue
+        payload["enhancementProcessingSize"] = enhancedSize ?? "native"
+        payload["upscaleMethod"] = picture.upscaleMethod.rawValue
         payload["upscaleEngine"] = upscaleEngine
         let snapshot = payload
         sessionQueue.async { [weak self] in

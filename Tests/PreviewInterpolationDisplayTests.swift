@@ -88,6 +88,7 @@ if !(enhancementStrength.isFinite && (0...1).contains(enhancementStrength)) {
     skipFixture("MONIVIEW_TEST_STRENGTH must be between 0 and 1 (got \(environment["MONIVIEW_TEST_STRENGTH"] ?? "unset"))")
 }
 let requireMetalFX = environment["MONIVIEW_TEST_REQUIRE_METALFX"] == "1"
+let testSpatialOverload = environment["MONIVIEW_TEST_SPATIAL_OVERLOAD"] == "1"
 let testFullscreen = environment["MONIVIEW_TEST_FULLSCREEN"] == "1"
 let testInterpolationMode: FrameInterpolationMode
 if environment["MONIVIEW_TEST_FLOWBLEND"] == "1" {
@@ -114,6 +115,12 @@ preview.settings.lowLatency = lowLatency
 preview.settings.frameInterpolation = testInterpolationMode
 preview.settings.forceFrameInterpolation = environment["MONIVIEW_TEST_FORCE"] == "1"
 preview.settings.skipsExactDuplicateInterpolation = followEnabled
+preview.injectInterpolationOverBudget = testSpatialOverload
+if testSpatialOverload {
+    requireFixture(testTarget == .screen && preview.settings.forceFrameInterpolation &&
+                   (testInterpolationMode == .quality || testInterpolationMode == .flowBlend),
+                   "spatial overload probe requires Match Display, Force, and High or Flow Beta")
+}
 let originalInterpolationMode = preview.settings.frameInterpolation
 let originalForceSetting = preview.settings.forceFrameInterpolation
 let originalUpscaleMethod = preview.settings.upscaleMethod
@@ -257,6 +264,7 @@ var strictEnvironmentFailure: String?
 var cadenceWindows = 0, cadencePassWindows = 0
 var cadenceSources = 0, cadenceGenerated = 0
 var cadenceElapsed = 0.0
+var spatialTargetSamples = 0
 var activitySamples = 0, missingActivitySamples = 0, mismatchedActivitySamples = 0
 let activityProbe = DispatchSource.makeTimerSource(queue: .main)
 activityProbe.schedule(deadline: .now() + 0.05, repeating: 0.05)
@@ -393,6 +401,21 @@ stats.setEventHandler {
     cadElapsed += cadWindowDuration
     let counts = frames.statistics(), presented = frames.presentationStatistics(), cost = frames.interpolationCost()
     let gen = presented.generated
+    if testSpatialOverload, (6...12).contains(tick) {
+        guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
+              let screen = window.screen else { skipFixture("spatial overload probe window is not visible") }
+        let sourceLongEdge = Double(max(width, height))
+        let displayScale = max(1, min(preview.drawableSize.width / Double(width), preview.drawableSize.height / Double(height)))
+        let edge = testTarget.processingLongEdge(
+            screenLongEdge: Double(max(screen.frame.width, screen.frame.height) * screen.backingScaleFactor),
+            sourceLongEdge: sourceLongEdge, visibleLongEdge: sourceLongEdge * displayScale, lowLatency: lowLatency)
+        guard edge / sourceLongEdge > 1.01 else { skipFixture("spatial overload probe needs a drawable larger than its source") }
+        let scale = edge / sourceLongEdge
+        let expectedSize = "\(Int((Double(width) * scale).rounded()))×\(Int((Double(height) * scale).rounded()))"
+        requireFixture(frames.currentEngine() == "MetalFX" && frames.currentEnhancedSize() == expectedSize,
+                       "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
+        spatialTargetSamples += 1
+    }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
         let expected = FrameInterpolationPolicy.targetDimensions(width: width, height: height, mode: .quality)!
@@ -658,6 +681,11 @@ stats.setEventHandler {
             let generatedFPS = Double(strictGeneratedFrames) / measuredDuration
             print("120 acceptance: strict windows \(strictWindows)/30, actual mean interval \(mean*1000)ms, P95 \(p95*1000)ms, source FPS \(String(format: "%.2f", sourceFPS)), generated FPS \(String(format: "%.2f", generatedFPS)), output FPS \(String(format: "%.2f", sourceFPS + generatedFPS)), sampled \(strictSampleWindows) windows/\(String(format: "%.3f", measuredDuration))s")
             requireFixture(strictWindows >= 27 && mean <= 0.0089 && p95 <= 0.0125, "sustained 60→120 acceptance failed")
+        }
+        if testSpatialOverload {
+            requireFixture(spatialTargetSamples == 7 && preview.injectedOverBudgetCount > 0,
+                           "spatial overload branch and all seven target-size samples must be exercised")
+            print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; no target-FPS claim")
         }
         print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : ", minimize/restore smoke"); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil)

@@ -677,6 +677,22 @@ struct CaptureCompatibilityTests {
         precondition(UpscaleTarget.screen.resolvedLongEdge(screenLongEdge: 5120, sourceLongEdge: 1920) == 5120)
         precondition(UpscaleTarget.screen.resolvedLongEdge(screenLongEdge: nil, sourceLongEdge: 1920) == 1920)
         precondition(UpscaleTarget.native.resolvedLongEdge(screenLongEdge: 5120, sourceLongEdge: 2160) == 2160)
+        precondition(UpscaleTarget.screen.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 1920,
+            visibleLongEdge: 3024, lowLatency: true) == 3024, "Match Display must retain full visible source-frame scaling")
+        precondition(UpscaleTarget.screen.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 1920,
+            visibleLongEdge: 2400, lowLatency: true) == 2400, "Low latency retains the existing viewport bound")
+        precondition(UpscaleTarget.screen.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 1920,
+            visibleLongEdge: 2400, lowLatency: false) == 3024)
+        precondition(UpscaleTarget.screen.processingLongEdge(screenLongEdge: 5120, sourceLongEdge: 1920,
+            visibleLongEdge: 3840, lowLatency: true) == 3840)
+        precondition(UpscaleTarget.screen.processingLongEdge(screenLongEdge: nil, sourceLongEdge: 1920,
+            visibleLongEdge: 3024, lowLatency: false) == 1920)
+        precondition(UpscaleTarget.native.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 1920,
+            visibleLongEdge: 3024, lowLatency: true) == 1920)
+        precondition(UpscaleTarget.fullHD.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 3840,
+            visibleLongEdge: 2400, lowLatency: true) == 3840, "Enhancement never downsamples the source")
+        precondition(UpscaleTarget.uhd.processingLongEdge(screenLongEdge: 3024, sourceLongEdge: 1920,
+            visibleLongEdge: 3024, lowLatency: false) == 3840)
 
         testCaptureLifecyclePolicies()
         print("Capture compatibility tests passed: legacy settings, frame history/PTS, cadence resets, formats, rates, and display targets.")

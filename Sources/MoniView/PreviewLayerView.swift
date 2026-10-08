@@ -141,6 +141,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Failure injection for the clearing draw alone, so a test can lose its presentation callback
     /// while the frame path stays healthy. Absent from production builds.
     var suppressBlankPresentedCallbacks = false
+    var injectInterpolationOverBudget = false
+    private(set) var injectedOverBudgetCount = 0
     #endif
     #if MONIVIEW_PREVIEW_TESTING
     private func trace(_ value: String) { if ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" { print(value) } }
@@ -241,9 +243,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var lastRaiseAt = 0.0
     private var lastRaisedToLongEdge: Int?
     private var blockedRaiseTarget: Int?
-    /// Measured overload reduces spatial work before dropping interpolation. Nil preserves
-    /// the selected target; 1.25 and 1.0 are bounded fallbacks, reset with the configuration.
-    private var interpolationSpatialScale: Double?
 
     init(frames: LatestVideoFrame) {
         self.frames = frames
@@ -325,7 +324,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // generated has reached the display for this configuration yet.
             frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
-            interpolationSpatialScale = nil
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -448,7 +446,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        interpolationSpatialScale = nil
         // A blank registration belongs to the input that was replaced: its next confirm, failure or
         // timeout must not rebuild the layer the new stream is drawing into.
         clearBlankTracking()
@@ -491,7 +488,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        interpolationSpatialScale = nil
         presentationEpoch &+= 1; presentedMidpoint = nil
         // The step belongs to the pair that published it. A display change resets the cadence
         // window and the cost history, so leaving the last step in place would let the panel
@@ -1117,19 +1113,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let visibleLongEdge = sourceLongEdge * displayScale
         // This is backing-store size; scaled display modes can differ from native panel pixels.
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
-        let requestedLongEdge = settings.upscaleTarget.resolvedLongEdge(screenLongEdge: screenPixels, sourceLongEdge: sourceLongEdge)
-        var targetLongEdge = settings.lowLatency ? min(requestedLongEdge, visibleLongEdge) : requestedLongEdge
-        // Apply a measured spatial limit consistently to pair endpoints and native
-        // fallbacks. Alternating full-size fallbacks with capped endpoints contaminated
-        // the cost history and repeatedly re-triggered cooldown. Interpolation off keeps
-        // the requested target; the advertised midpoint working size never changes.
-        let requestedSpatialScale = max(1, targetLongEdge / sourceLongEdge)
-        let canReduceSpatial = interpolationRequested && requestedSpatialScale > 1.01
-        if interpolationRequested, let cap = interpolationSpatialScale {
-            targetLongEdge = min(targetLongEdge, (sourceLongEdge * cap).rounded())
-        }
+        let targetLongEdge = settings.upscaleTarget.processingLongEdge(screenLongEdge: screenPixels,
+            sourceLongEdge: sourceLongEdge, visibleLongEdge: visibleLongEdge, lowLatency: settings.lowLatency)
+        // Interpolation overload must not silently reduce source-frame spatial detail.
+        // Keep the selected target (and the existing low-latency viewport bound) stable.
         // Generated frames use their inference size plus a final resize. Source frames
-        // retain the selected spatial engine at the current measured spatial limit.
+        // retain the selected spatial engine and target even when a pair exceeds budget.
         let smoothMidpoint = generatedMidpoint
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
@@ -1428,11 +1417,17 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     let sourceForBudget = self.admissionCost(self.nativeCosts)
                     let hasCompleteBudget = !phasesForCost.isEmpty && generationForBudget != nil && sourceForBudget != nil
                         && (phasesForCost.count <= 1 || presentationForBudget != nil)
-                    let pairOverBudget = hasCompleteBudget && !FrameInterpolationPolicy.costsFit(
+                    var pairOverBudget = hasCompleteBudget && !FrameInterpolationPolicy.costsFit(
                         generationBatch: generationForBudget ?? 0,
                         subsequentPresentation: presentationForBudget,
                         sourceEndpoint: sourceForBudget ?? 0,
                         phases: phasesForCost, pairPeriod: costPairPeriod)
+                    #if MONIVIEW_PREVIEW_TESTING
+                    if self.injectInterpolationOverBudget && !warming && (wasGenerationBatch || wasMidpoint || wasEndpoint) {
+                        pairOverBudget = true
+                        self.injectedOverBudgetCount += 1
+                    }
+                    #endif
                     let individualLimit = measuredSlot * (wasGenerationBatch
                         ? FrameInterpolationPolicy.midpointBudgetFraction : FrameInterpolationPolicy.budgetFraction)
                     // Force keeps trying but must still adapt successful, over-budget
@@ -1449,18 +1444,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         }
                         // A successful but over-budget endpoint does not erase recent
                         // activity. Without another successful pair its TTL expires.
-                        // High/Medium keep their advertised inference resolution. Spatial
-                        // work is the first lever; only Low may lower inference resolution.
+                        // High/Medium keep their advertised inference resolution and source
+                        // enhancement target. Only Low may lower inference resolution.
                         let lower = expectedSettings.frameInterpolation == .efficient
                             ? measuredDimensions.flatMap { FrameInterpolationPolicy.reducedLongEdge(after: max($0.width, $0.height)) }
                             : nil
-                        let spatialScale = self.interpolationSpatialScale ?? requestedSpatialScale
                         let forcedContinuation = succeeded && expectedSettings.forceFrameInterpolation
-                            && lower == nil && (!canReduceSpatial || spatialScale <= 1.01)
-                        if succeeded, canReduceSpatial, spatialScale > 1.01 {
-                            self.interpolationSpatialScale = spatialScale > 1.25 ? 1.25 : 1.0
-                            self.cooldownUntil = CACurrentMediaTime() + 0.1
-                        } else if succeeded, let lower {
+                            && lower == nil
+                        if succeeded, let lower {
                             self.adaptiveLongEdge = lower
                             self.cooldownUntil = CACurrentMediaTime() + 0.1
                         } else if forcedContinuation {

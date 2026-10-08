@@ -11,6 +11,7 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_FLOWBLEND=1                  (use the optical-flow Beta tier; overrides MONIVIEW_TEST_QUALITY / MONIVIEW_TEST_BALANCED)
   MONIVIEW_TEST_QUALITY=1                    (use the Clear interpolation tier)
   MONIVIEW_TEST_REQUIRE_METALFX=1            (strict run must observe MetalFX)
+  MONIVIEW_TEST_SPATIAL_OVERLOAD=1           (inject over-budget pairs; assert Match Display retains MetalFX target in seven visible steady samples; requires Force plus High or Flow Beta and enlarged drawable)
   MONIVIEW_TEST_FORCE_CONTINUOUS=1           (assert generated presentations in each steady window with Force on; does not certify target FPS)
   MONIVIEW_TEST_FULLSCREEN=1                 (fixture enters native fullscreen after launch; no persistent app setting)
   MONIVIEW_TEST_WINDOW_WIDTH / _HEIGHT       (fixture window size; default 960x540)
@@ -73,7 +74,7 @@ swiftc -swift-version 5 -O -D MONIVIEW_PREVIEW_TESTING \
  "$ROOT/Sources/MoniView/AIUpscaler.swift" "$ROOT/Sources/MoniView/FrameInterpolator.swift" \
  "$ROOT/Sources/MoniView/VideoFrameDuplicateDetector.swift" "$ROOT/Sources/MoniView/FrameInterpolationPolicy.swift" "$ROOT/Sources/MoniView/ContentCadencePolicy.swift" "$ROOT/Sources/MoniView/PreviewLayerView.swift" \
  "$ROOT/Sources/MoniView/FlowBlendInterpolator.swift" \
- "$ROOT/Sources/MoniView/MetalUpscaler.swift" "$ROOT/Sources/MoniView/InputContentCadence.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" \
+ "$ROOT/Sources/MoniView/MetalUpscaler.swift" "$ROOT/Sources/MoniView/InputContentCadence.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" "$ROOT/Sources/MoniView/FittedWindowPreview.swift" \
  "$ROOT/Sources/MoniView/CaptureRecorder.swift" "$ROOT/Sources/MoniView/VideoImageProcessor.swift" \
  "$ROOT/Sources/MoniView/MacWindowCapture.swift" "$ROOT/Sources/MoniView/CaptureSessionPolicy.swift" \
  "$ROOT/Sources/MoniView/DurationBoundedFIFO.swift" "$ROOT/Sources/MoniView/ConfigurationRevision.swift" \

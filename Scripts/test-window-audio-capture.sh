@@ -9,7 +9,7 @@ swiftc -swift-version 5 -O -D MONIVIEW_CAPTURE_TESTING \
  "$ROOT/Sources/MoniView/CaptureSessionPolicy.swift" "$ROOT/Sources/MoniView/DurationBoundedFIFO.swift" \
  "$ROOT/Sources/MoniView/ConfigurationRevision.swift" "$ROOT/Sources/MoniView/Localization.swift" \
  "$ROOT/Sources/MoniView/VideoImageProcessor.swift" "$ROOT/Sources/MoniView/CaptureRecorder.swift" \
- "$ROOT/Sources/MoniView/MacWindowCapture.swift" "$ROOT/Sources/MoniView/InputContentCadence.swift" "$ROOT/Sources/MoniView/VideoFrameDuplicateDetector.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" \
+ "$ROOT/Sources/MoniView/MacWindowCapture.swift" "$ROOT/Sources/MoniView/InputContentCadence.swift" "$ROOT/Sources/MoniView/VideoFrameDuplicateDetector.swift" "$ROOT/Sources/MoniView/CaptureManager.swift" "$ROOT/Sources/MoniView/FittedWindowPreview.swift" \
  "$WORK/main.swift" -o "$WORK/moniview-window-audio-tests"
 if [ "${MONIVIEW_COMPILE_ONLY:-0}" = "1" ]; then
   printf '%s\n' 'PASS window-audio fixture compile-only; runtime capture was not started'
