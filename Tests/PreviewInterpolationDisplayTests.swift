@@ -265,6 +265,7 @@ var cadenceWindows = 0, cadencePassWindows = 0
 var cadenceSources = 0, cadenceGenerated = 0
 var cadenceElapsed = 0.0
 var spatialTargetSamples = 0
+var demotedSamples = 0, demotedGenerationWindows = 0
 var activitySamples = 0, missingActivitySamples = 0, mismatchedActivitySamples = 0
 let activityProbe = DispatchSource.makeTimerSource(queue: .main)
 activityProbe.schedule(deadline: .now() + 0.05, repeating: 0.05)
@@ -416,12 +417,12 @@ stats.setEventHandler {
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
         spatialTargetSamples += 1
     }
-    if testSpatialOverload, tick == 12 {
+    if testSpatialOverload, (6...16).contains(tick) {
         // An over-budget tier must demote its generated midpoint's spatial pass instead of
-        // dropping pairs: the cheap path is what keeps the source cadence presentable.
-        requireFixture(preview.testMidpointSpatialDemoted,
-                       "over-budget midpoint never demoted its spatial pass")
-        requireFixture(gen > 0, "demoted midpoint stopped generating frames")
+        // dropping pairs. The demotion restores itself after sustained comfortable pairs, so
+        // the run records whether it was ever observed rather than sampling one fixed tick.
+        if preview.testMidpointSpatialDemoted { demotedSamples += 1 }
+        if gen > 0 { demotedGenerationWindows += 1 }
     }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
@@ -692,7 +693,10 @@ stats.setEventHandler {
         if testSpatialOverload {
             requireFixture(spatialTargetSamples == 7 && preview.injectedOverBudgetCount > 0,
                            "spatial overload branch and all seven target-size samples must be exercised")
-            print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; no target-FPS claim")
+            requireFixture(demotedSamples > 0, "over-budget midpoint never demoted its spatial pass")
+            requireFixture(demotedGenerationWindows >= 9,
+                           "demoted midpoint stopped generating frames in \(11 - demotedGenerationWindows) sampled windows")
+            print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; midpoint spatial demotion observed in \(demotedSamples) samples with generated frames in \(demotedGenerationWindows)/11 windows; no target-FPS claim")
         }
         print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : ", minimize/restore smoke"); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil)
