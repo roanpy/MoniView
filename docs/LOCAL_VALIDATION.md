@@ -1,5 +1,11 @@
 # Native validation / 原生验证记录
 
+## Panel motion follow-up — build 116, 2026-10-08 / 面板动效补充
+
+The floating controls use a 10pt rise and 0.98→1 scale with a 0.22s fade on opening, and a 0.14s exit. The shared card preserves its height while content changes, then animates to the newly measured height over 0.20s; there is no zero-height reset. A cancellable sequential fade replaces the old content before revealing the new controls, resets each panel's scroll position, and disables outgoing controls during the switch. Reduce Motion removes translation/scaling and animated height changes. / 浮层打开时上浮10pt、轻缩放并淡入0.22秒，关闭0.14秒；切换保留外框高度，再按新内容0.20秒调整，不清零。可取消的顺序淡出／淡入避免新旧控件交叠，切换后滚动回顶部，过渡期旧控件不可操作；减少动态效果时取消位移、缩放和高度动画。
+
+Build116 compiled, signed and installed with build115 retained. Native clicks inspected enhancement→colour→settings, Escape dismissal and enhancement reopening: correct contents and controls were present, card width/bottom alignment stayed consistent, and scroll indicators remained hidden. These checks establish the final interactive states, not a frame-by-frame motion recording, measured animation FPS, a live GPU performance rerun or another Astra review. / 构建116编译、签名安装并保留115；原生点击检查画质→色彩→设置、Esc关闭及重新打开，内容控件正常、卡片同宽同底边、滚动条隐藏。此记录验证交互终态，不冒称逐帧动效录像、动画帧率测量、实时GPU性能复测或新的Astra终验。
+
 ## No-device startup follow-up — build 115, 2026-10-08 / 无设备启动补充
 
 Automatic video selection now only restores or chooses external USB inputs. Built-in and wireless cameras remain manual choices; a saved camera no longer becomes the startup fallback, and capture-device disconnection does not open one. Both the initial discovery and window→device source selection use the same rule. The empty video picker has an explicit localized unselected value. / 自动选择只恢复或选择外接USB输入；内置及无线摄像头仍可手选，但保存过的摄像头不再作为启动默认或采集设备断开后的回退。初始发现和窗口→设备切换共用该规则，未选视频输入有明确本地化占位。

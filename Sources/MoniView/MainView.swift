@@ -12,7 +12,7 @@ private enum PanelKind: String, Hashable {
 
 struct MainView: View {
     @EnvironmentObject private var capture: CaptureManager
-    @State private var panelContentHeight: CGFloat = 560
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let iconButtonHitTarget: CGFloat = 32
     @State private var activePanel: PanelKind?
     @State private var showInformation = false
@@ -59,43 +59,20 @@ struct MainView: View {
             GeometryReader { geometry in
                 if let activePanel {
                     let bottom = isFullscreen ? 98.0 : 82.0
-                    ScrollView {
-                        panelContent(activePanel)
-                            .padding(16)
-                            .fixedSize(horizontal: false, vertical: true)
-                            // A stable identity per panel: without it SwiftUI reuses one view
-                            // across a panel switch, so the outgoing panel's content and layout
-                            // briefly render behind the incoming one.
-                            .id(activePanel)
-                            .onGeometryChange(for: CGFloat.self) { content in
-                                content.size.height
-                            } action: { height in
-                                if height > 0 { panelContentHeight = height }
-                            }
-                    }
-                    .scrollBounceBehavior(.basedOnSize)
-                    .scrollIndicators(.hidden)
-                    // One width for every panel: switching between them no longer makes the
-                    // card jump size and reflow its controls.
-                    .frame(width: 365)
-                    // Let a panel use whatever vertical room the window actually has. The
-                    // previous fixed 560pt cap for the enhancement panel forced a scrollbar
-                    // on a normal-size window even with every section collapsed.
-                    .frame(height: min(panelContentHeight, max(120, geometry.size.height - bottom - 12)))
-                    .background(Color(hex: 0x24201c).opacity(0.92), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.7))
-                    .shadow(color: .black.opacity(0.35), radius: 24, y: 8)
+                    FloatingControlPanel(panel: activePanel,
+                                         availableHeight: max(120, geometry.size.height - bottom - 12),
+                                         content: panelContent)
+                    // Transform the card itself, not the full-height overlay container.
+                    .transition(reduceMotion ? .opacity : .modifier(
+                        active: PanelReveal(opacity: 0, scale: 0.98, offset: 10),
+                        identity: PanelReveal(opacity: 1, scale: 1, offset: 0)))
                     .padding(.bottom, bottom)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
             }
+            .animation(.easeOut(duration: activePanel == nil ? 0.14 : 0.22),
+                       value: activePanel != nil)
         }
-        // A new panel must not inherit the previous panel measured height: the frame
-        // would be the wrong size for one layout pass, which is what made a scrollbar
-        // flash on every switch.
-        .onChange(of: activePanel) { _, _ in panelContentHeight = 0 }
-        .animation(.easeOut(duration: 0.18), value: activePanel)
         .background(Color(hex: 0x1d1b19))
         .background {
             WindowFullscreenObserver(isFullscreen: $isFullscreen)
@@ -1171,6 +1148,85 @@ struct MainView: View {
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             capture.startRecording(to: url)
+        }
+    }
+}
+
+private struct PanelReveal: ViewModifier {
+    let opacity: Double
+    let scale: CGFloat
+    let offset: CGFloat
+
+    func body(content: Content) -> some View {
+        content.opacity(opacity).scaleEffect(scale, anchor: .bottom).offset(y: offset)
+    }
+}
+
+/// A single card owns its size while its content changes. Sequential fades avoid
+/// overlapping controls; cancelled switch tasks cannot publish an older selection.
+private struct FloatingControlPanel<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let panel: PanelKind
+    let availableHeight: CGFloat
+    let content: (PanelKind) -> Content
+    @State private var displayedPanel: PanelKind
+    @State private var contentVisible = true
+    @State private var contentHeight: CGFloat = 560
+    @State private var hasMeasuredContent = false
+
+    init(panel: PanelKind, availableHeight: CGFloat, @ViewBuilder content: @escaping (PanelKind) -> Content) {
+        self.panel = panel
+        self.availableHeight = availableHeight
+        self.content = content
+        _displayedPanel = State(initialValue: panel)
+    }
+
+    var body: some View {
+        ScrollView {
+            content(displayedPanel)
+                .padding(16)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.size.height
+                } action: { height in
+                    guard height > 0, abs(height - contentHeight) > 0.5 else { return }
+                    let animation: Animation? = hasMeasuredContent && !reduceMotion
+                        ? .easeInOut(duration: 0.2) : nil
+                    withAnimation(animation) {
+                        contentHeight = height
+                        hasMeasuredContent = true
+                    }
+                }
+        }
+        .id(displayedPanel) // A different panel starts at the top of its own scroll content.
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.hidden)
+        .opacity(contentVisible ? 1 : 0)
+        .allowsHitTesting(contentVisible && displayedPanel == panel)
+        .accessibilityHidden(!contentVisible || displayedPanel != panel)
+        .frame(width: 365, height: min(contentHeight, availableHeight), alignment: .top)
+        .background(Color(hex: 0x24201c).opacity(0.92))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .stroke(Color.white.opacity(0.12), lineWidth: 0.7))
+        .shadow(color: .black.opacity(0.35), radius: 24, y: 8)
+        .task(id: panel) {
+            guard panel != displayedPanel else {
+                // A rapid A→B→A cancels B's task after it may have faded A out.
+                withAnimation(.easeOut(duration: 0.12)) { contentVisible = true }
+                return
+            }
+            if !reduceMotion {
+                withAnimation(.easeOut(duration: 0.09)) { contentVisible = false }
+                do { try await Task.sleep(nanoseconds: 90_000_000) }
+                catch { return }
+                guard !Task.isCancelled else { return }
+            }
+            // Replace identities with no transition, so old/new text never crossfades.
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { displayedPanel = panel }
+            withAnimation(.easeOut(duration: 0.12)) { contentVisible = true }
         }
     }
 }
