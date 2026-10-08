@@ -48,6 +48,8 @@ These APIs establish feasibility, not App Store approval, universal compatibilit
 
 ## Fitted-preview candidate / 贴合预览候选
 
+Window choice is explicit after each launch. Refreshing a lost/hidden source never chooses another app automatically; temporary window-server IDs are not restored across launches. / 每次启动明确选择窗口；刷新时源已丢失／隐藏则不自动换采其他应用，不跨启动恢复临时窗口ID。
+
 Capture settings → Mac window → Fit over source window (experimental), disabled while recording or in MoniView full screen. Opt-in per session; never restored automatically at startup. It turns the existing preview window into a borderless, mouse-transparent normal-level window over the source, with no second renderer/stream. The original application retains keyboard/mouse input; no event injection or Accessibility permission is used. / 采集设置 → Mac 窗口 → 贴合原窗口（实验）；录制或 MoniView 全屏时禁用，每次手动进入，不在启动恢复。现有预览窗口变为无边框、鼠标穿透、普通层级覆盖，复用原采集流与渲染。原应用接收输入，不注入事件或新增辅助功能权限。
 
 Menu bar MoniView icon → Return to MoniView, or activate MoniView through Dock, restores the saved frame, window style and controls. A background monitor allows one geometry request at a time (20 Hz maximum). Cross-display/partly off-screen/fullscreen windows, other overlapping windows, app/Space/display changes, minimized/closed sources and failed/expired resize updates return to separate preview. / 菜单栏图标返回或 Dock 激活 MoniView 恢复原窗口与控件；后台最多20Hz且仅一个几何请求在途。跨屏、部分屏外、全屏、其他窗口覆盖、应用／工作区／屏幕变化、最小化／关闭或尺寸更新失败／超时均退出。

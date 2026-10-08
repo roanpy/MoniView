@@ -630,7 +630,6 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         didSet {
             guard sourceKind == .macWindow, oldValue != selectedMacWindowID else { return }
             fittedWindowPreview.stop()
-            UserDefaults.standard.set(Int(selectedMacWindowID ?? 0), forKey: "source.windowID")
             restartMacWindowCapture()
         }
     }
@@ -862,10 +861,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         if let raw = UserDefaults.standard.string(forKey: "view.aspect"), let saved = AspectMode(rawValue: raw) { aspectMode = saved }
         if UserDefaults.standard.object(forKey: "audio.volume") != nil { audioVolume = UserDefaults.standard.float(forKey: "audio.volume") }
         if let raw = UserDefaults.standard.string(forKey: "source.kind"), let saved = CaptureSourceKind(rawValue: raw) { sourceKind = saved }
-        if UserDefaults.standard.object(forKey: "source.windowID") != nil {
-            let saved = UInt32(UserDefaults.standard.integer(forKey: "source.windowID"))
-            selectedMacWindowID = saved == 0 ? nil : saved
-        }
+        // Window-server IDs are temporary and may be reused by another application.
+        // Require a fresh window choice after launch instead of restoring a numeric ID.
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
@@ -983,19 +980,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 guard self.macWindowRefreshRevision.isCurrent(revision), self.sourceKind == .macWindow, !self.isRecording else { return }
                 self.macWindowOptions = options
                 if self.selectedMacWindowID == nil || !options.contains(where: { $0.id == self.selectedMacWindowID }) {
-                    let saved = UInt32(UserDefaults.standard.integer(forKey: "source.windowID"))
-                    let restored = saved != 0 && options.contains(where: { $0.id == saved }) ? saved : options.first?.id
-                    // Assigning triggers restartMacWindowCapture through didSet.
-                    self.selectedMacWindowID = restored
-                    if restored == nil {
-                        // No window to capture: clean up first, then publish why the list is
-                        // empty. The stop path clears the pending status, so setting the reason
-                        // before it left the user with no explanation at all.
-                        self.stopMacWindowCapture()
-                        self.macWindowStatus = L10n.text("没有可选择的窗口")
-                    } else {
-                        self.macWindowStatus = nil
-                    }
+                    // Never replace a missing source with an unrelated application's window.
+                    self.selectedMacWindowID = nil
+                    self.stopMacWindowCapture()
+                    self.macWindowStatus = L10n.text(options.isEmpty ? "没有可选择的窗口" : "选择要显示的窗口")
                 } else {
                     self.macWindowStatus = nil
                     self.restartMacWindowCapture()

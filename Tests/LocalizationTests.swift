@@ -14,6 +14,7 @@ private struct LocalizationAudit {
         loadResources()
         checkResourceParity()
         checkFormatPlaceholders()
+        checkLiteralDecoding()
         checkSourceUIKeys()
         checkLanguageFallback()
         checkBundleLookupsAndPermissionMessages()
@@ -178,7 +179,7 @@ private struct LocalizationAudit {
                     } else if unit == 34 {
                         if capture && depth == 1 {
                             let body = nsSource.substring(with: NSRange(location: literalStart, length: index - literalStart))
-                            if body.unicodeScalars.contains(where: isHanScalar) { literals.insert(body) }
+                            if body.unicodeScalars.contains(where: isHanScalar) { literals.insert(decodedLiteral(body)) }
                         }
                         inString = false
                     }
@@ -201,6 +202,28 @@ private struct LocalizationAudit {
             }
         }
         return literals
+    }
+
+    /// Localization keys currently use ordinary Swift strings with JSON-compatible
+    /// escapes. Decode those escapes once, rather than comparing source spelling
+    /// (for example backslash-n) with Foundation's already-decoded resource keys.
+    /// Preserve unsupported forms so they still fail the audit instead of being skipped.
+    private func decodedLiteral(_ body: String) -> String {
+        let data = Data(("\"" + body + "\"").utf8)
+        return (try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)) as? String ?? body
+    }
+
+    private mutating func checkLiteralDecoding() {
+        let cases: [(String, String)] = [
+            (#"中文\n下一行"#, "中文\n下一行"),
+            (#"中文\\n"#, #"中文\n"#),
+            (#"中文\"引用\""#, "中文\"引用\""),
+            (#"中文\u{4E2D}"#, #"中文\u{4E2D}"#)
+        ]
+        for (source, expected) in cases where decodedLiteral(source) != expected {
+            failures.append("localized literal escape decoding differs for \(source)")
+        }
+        print("Localized literal escape cases checked: \(cases.count)")
     }
 
     private func isHanScalar(_ scalar: Unicode.Scalar) -> Bool {

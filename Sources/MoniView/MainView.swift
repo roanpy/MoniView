@@ -776,7 +776,8 @@ struct MainView: View {
                     HStack(alignment: .center, spacing: 8) {
                         labeledPicker("Mac 窗口", fieldWidth: 195,
                             selection: Binding(get: { capture.selectedMacWindowID }, set: { capture.selectedMacWindowID = $0 }),
-                            choices: capture.macWindowOptions.map { PickerChoice(value: Optional($0.id), title: $0.displayTitle) })
+                            choices: [PickerChoice(value: UInt32?.none, title: L10n.text("选择要显示的窗口"))] +
+                                capture.macWindowOptions.map { PickerChoice(value: Optional($0.id), title: $0.displayTitle) })
                             .disabled(capture.isRecording || capture.macWindowOptions.isEmpty)
                         sourceRefreshButton
                     }

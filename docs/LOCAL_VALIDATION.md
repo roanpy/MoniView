@@ -1,5 +1,13 @@
 # Native validation / 原生验证记录
 
+## Temporary signing and source-choice follow-up — builds 118/119, 2026-10-08 / 临时签名与窗口选择补充
+
+With explicit user authorization, build118 received a complete ad-hoc bundle signature (no certificate or keychain), then a separate local test identity to avoid sharing the installed app's recording identity. After authorization/restart, this isolated build enumerated sources and visibly captured the temporary TextEdit document. This supersedes the earlier recording-access blocker; it does not establish that the same-identifier preparation app can retain the stable app's authorization. / 用户明确允许后，118补完整临时包签名，不使用证书或钥匙串；独立测试身份避免与已安装版共用录屏身份。授权重启后可枚举窗口，并实看临时文本编辑文档的采集画面。此前录屏访问阻塞已在隔离包解决，不代表同标识准备包能沿用稳定版授权。
+
+During interaction checks, the computer-use service repeatedly reported external window changes and the test process exited normally according to AppKit logs; no new crash report was found. Actual fitted overlay activation, alignment, mouse pass-through, resize and exit cycles are still unverified. A brief undisturbed desktop interval was requested for those checks. / 操作时界面服务反复报告窗口变化，测试进程日志显示正常退出，未发现新的崩溃报告；贴合进入、对齐、鼠标穿透、缩放和进出循环仍未核验，已请求短时间保持测试桌面不受干扰。
+
+Source inspection exposed automatic fallback to another window when a selected source disappears from enumeration. Build119 removes this fallback, stops restoring numeric window IDs across launches, and adds an explicit unselected picker value. Release arm64 packaging and strict ad-hoc signature verification passed for the separate local preview119 bundle. The window-capture CPU policy suite passed 13 checks. The localization suite initially failed because its scanner did not decode the multiline help key's escapes; it was repaired with four decoding checks and rerun. These CPU/build checks do not certify native interaction or game performance. The installed stable116 executable remains unchanged. / 代码检查发现原窗口不在枚举结果时会自动换采其他窗口；119取消该回退和跨启动数字窗口ID恢复，增加明确未选占位。独立119包Release编译、临时签名严格核验通过，窗口CPU策略13项通过；本地化首次因测试未解析多行帮助键转义而失败，修正并补4项解析检查后重跑。CPU／构建检查不代替原生交互或游戏性能验收；已安装116哈希不变。
+
 ## Fitted-window candidate — build 118, 2026-10-08 / 贴合窗口候选
 
 **Build and static checks / 构建与静态检查.** Release arm64 preparation build 0.2.0 (118) compiled and packaged successfully, with valid plist/resource tables. All 16 new overlay/status/source-description keys exist in both Chinese and English tables. `git diff --check` passed. The installed stable build116 executable hash remains unchanged. No certificate, keychain, bundle-signing, sandbox or Store-upload operation was performed. / 118 的 arm64 Release 独立准备包编译打包成功，plist 与资源合法，16个新增键中英文齐全，差异空白检查通过；已安装116哈希不变，未操作证书、钥匙串、应用包签名、沙盒或商店上传。
