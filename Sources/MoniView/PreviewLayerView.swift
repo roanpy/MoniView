@@ -1117,9 +1117,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             sourceLongEdge: sourceLongEdge, visibleLongEdge: visibleLongEdge, lowLatency: settings.lowLatency)
         // Interpolation overload must not silently reduce source-frame spatial detail.
         // Keep the selected target (and the existing low-latency viewport bound) stable.
-        // Generated frames use their inference size plus a final resize. Source frames
-        // retain the selected spatial engine and target even when a pair exceeds budget.
-        let smoothMidpoint = generatedMidpoint
+        // Source frames retain the selected spatial engine and target even when a pair
+        // exceeds budget. A generated midpoint takes the same pipeline as its neighbouring
+        // source frames on every tier except the cheapest one: measured on this Mac the
+        // extra pass costs about a millisecond per pair, and skipping it made every other
+        // presented frame visibly softer, which reads as blur on faces in motion.
+        let smoothMidpoint = generatedMidpoint && settings.frameInterpolation == .efficient
         let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
@@ -1164,11 +1167,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let enhancementSharpening = usedMetalFX || usedAI || workingScale <= 1.01 ? VideoImageProcessor.enhancementSharpening : VideoImageProcessor.scaledPreviewSharpening
         let sharpness = settings.sharpness + (settings.enhancementEnabled ? settings.enhancementStrength * enhancementSharpening : 0)
         let engine = smoothMidpoint ? "流畅插帧" : (usedAI ? "AI 超分" : (usedMetalFX ? "MetalFX" : (workingScale > 1.01 ? "Lanczos" : (sharpness > 0.001 ? "原始＋锐化" : "原始"))))
-        if sharpness > 0.001 { image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]) }
         let output = image.extent
         let scale = aspectMode == .fit ? min(size.width / output.width, size.height / output.height) : max(size.width / output.width, size.height / output.height)
         if aspectMode == .stretch {
             let resize = CGAffineTransform(scaleX: size.width / output.width, y: size.height / output.height)
+            // Only the cheap tier overrides the context default: macOS already resamples
+            // shrinking axes with the high-quality filter.
             image = smoothMidpoint ? image.transformed(by: resize, highQualityDownsample: false) : image.transformed(by: resize)
         } else if usedMetalFX || image.extent.width > originalExtent.width ||
                     (generatedMidpoint && settings.frameInterpolation == .efficient) {
@@ -1184,6 +1188,12 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 // Shrinking needs the antialiasing that only the resampling filters give.
                 image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
             }
+        }
+        // Sharpening lands on the pixels that are displayed. Applied before the fit
+        // resize, a shrunk frame averaged most of its added acutance away again.
+        if sharpness > 0.001 {
+            let fitted = image.extent
+            image = image.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: sharpness]).cropped(to: fitted)
         }
         let scaled = image.extent
         let transform = CGAffineTransform(translationX: (size.width - scaled.width) / 2 - scaled.minX, y: (size.height - scaled.height) / 2 - scaled.minY)
