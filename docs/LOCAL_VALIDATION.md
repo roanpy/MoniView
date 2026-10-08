@@ -1,5 +1,19 @@
 # Native validation / 原生验证记录
 
+## Smoothness preset enlargement and the 120 Hz output rate — build 124, 2026-10-09 / 流畅档放大与120Hz输出
+
+**Finding / 发现.** Smoothness was the only preset with a native processing target, so it never ran MetalFX: the 1920 to 3024 enlargement of the drawable was a plain resize. On one real captured frame at the preset's own strength, that path measured laplacian 4.34 and tenengrad 13.51, against 14.26 and 17.59 for the same frame enlarged by MetalFX at the same sharpening. The preset the user picks for fluidity was therefore also the softest by a factor of three in high-frequency energy. / 流畅优先是唯一使用原始处理目标的预设，因此从不执行 MetalFX：1920 到绘制尺寸 3024 的放大只是一次普通缩放。同一真实采集帧、同一预设强度下，该路径拉普拉斯 4.34、梯度 13.51，而同一帧经 MetalFX 放大后为 14.26 与 17.59。用户为流畅而选的预设，高频细节反而只有三分之一。
+
+**Repair / 修复.** Smoothness now uses Match Display bounded to the visible viewport (low latency keeps the viewport cap), so source frames are enlarged by MetalFX. Holding the resulting output rate needs the generated frames to pay less: sustained late presented pairs demote the midpoint's spatial pass through a bounded, decaying counter, and the retry is gated on the pair period still holding spare display slots (slot >= 12 ms), so a rate already using every slot does not thrash. / 流畅优先改用按可见视口限制的匹配屏幕，原帧由 MetalFX 放大。守住由此产生的输出帧率需要生成帧更省：帧对持续迟到时通过有界、带衰减的计数退回中间帧的空间放大；重试要求帧对周期仍有余量（时隙≥12毫秒），已占满时隙的帧率不会反复试探。
+
+**120 Hz acceptance / 120Hz验收.** 60 FPS synthetic content, 120 Hz internal display, 1512x851 window, flow engine, strength 0.55, force on. Strict 60→120 gate: 29/30 windows, source 58.27 + generated 58.23 = 116.50 FPS output, mean interval 8.58 ms, P95 8.33 ms, 30 s sampled. Controls on the same gate: native target 29/30 (no enlargement at all), viewport target without the lateness trigger 26/30 (FAIL), viewport target with the demotion injected 30/30. / 60帧合成内容、120Hz内屏、1512x851窗口、光流引擎、强度0.55、强制开启：严格60→120验收 29/30 窗口，原帧58.27＋生成58.23＝116.50帧输出，平均间隔8.58毫秒，P95 8.33毫秒，采样30秒。同一验收的对照：原始目标29/30（完全不做放大）、视口目标但无迟到触发26/30（不通过）、视口目标并注入降档30/30。
+
+**Comfortable case / 余量充足的情况.** 30 FPS content inside a 60 FPS signal keeps full-quality midpoints: 7/7 windows, 30.00 + 30.00 FPS, 209 complete pairs, pair estimate 15-16 ms against a 30 ms budget, and the tick diagnostics report the full spatial pass after the first two seconds. / 60帧信号中的30帧内容仍保持完整质量的中间帧：7/7窗口、30.00＋30.00帧、209完整帧对、帧对15–16毫秒／预算30毫秒，逐秒诊断在最初两秒后显示完整空间放大。
+
+**Checks / 检查.** Capture compatibility (eight target-size assertions and the preset matrix), 372 interpolation-policy checks and localization all passed after the preset change. / 预设改动后，采集兼容（8项目标尺寸断言与预设矩阵）、372项插帧策略与本地化全部通过。
+
+**Limit / 边界.** The 120 Hz numbers are synthetic-source and presentation-interval measurements, not game image quality, HDMI latency or thermal evidence. At a rate that uses every display slot the generated frames run without their spatial pass, so their detail stays below the source frames' by design; the source frames are what the user reads as sharpness. / 120Hz数据来自合成源与呈现间隔测量，不代表游戏画质、HDMI延迟或发热结论。占满显示时隙的帧率下，生成帧按设计不执行空间放大，其细节低于原帧；用户感知的清晰度来自原帧。
+
 ## Interpolated-frame detail pass — build 121, 2026-10-09 / 生成帧细节处理
 
 **Cause / 原因.** Since `e9fc7b1` every generated midpoint skipped the spatial pipeline and was enlarged to the drawable with one cheap resize. With interpolation on, every second presented frame was therefore visibly softer than its neighbouring source frames, which reads as blur on faces in motion. The source-frame path itself was unchanged relative to the evening before; only the overload cap from `32332a5` had regressed it, and that was removed in `af92a3d`. / 自 `e9fc7b1` 起，所有生成中间帧都跳过空间放大，只用一次廉价缩放拉到绘制尺寸；开启插帧时每隔一帧明显比相邻原帧软，运动中的脸因此显得糊。原帧路径相对前一晚并未变化，此前只有 `32332a5` 的超预算降档造成回退，已在 `af92a3d` 取消。
