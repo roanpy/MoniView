@@ -430,6 +430,7 @@ stats.setEventHandler {
         let expectedSize = "\(Int((Double(width) * scale).rounded()))×\(Int((Double(height) * scale).rounded()))"
         requireFixture(frames.currentEngine() == "MetalFX" && frames.currentEnhancedSize() == expectedSize,
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
+        requireFixture(gen > 0, "overload retained its target but stopped generated presentations at tick \(tick)")
         spatialTargetSamples += 1
     }
     if testSpatialOverload || require120 || requireCadence, (6...16).contains(tick) {
@@ -437,7 +438,7 @@ stats.setEventHandler {
         // dropping pairs. The demotion restores itself after sustained comfortable pairs, so
         // the run records whether it was ever observed rather than sampling one fixed tick.
         if preview.testMidpointSpatialDemoted { demotedSamples += 1 }
-        if gen > 0 { demotedGenerationWindows += 1 }
+        if preview.testMidpointSpatialDemoted && gen > 0 { demotedGenerationWindows += 1 }
         // The fixture minimizes and restores the window at ticks 13 and 14, and that path
         // resets the ladder, so a full-quality reading after it proves nothing. Sample the
         // steady window before it and require that generated frames were actually presenting.
@@ -445,6 +446,9 @@ stats.setEventHandler {
             if preview.testMidpointSpatialDemoted { demotedLateSamples += 1 }
             else if gen > 0 { fullLateSamples += 1 }
         }
+    }
+    if testSpatialOverload && tick == 16 {
+        requireFixture(gen > 0, "overload generation did not resume after minimize/restore")
     }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
@@ -738,9 +742,9 @@ stats.setEventHandler {
             requireFixture(spatialTargetSamples == 7 && preview.injectedOverBudgetCount > 0,
                            "spatial overload branch and all seven target-size samples must be exercised")
             requireFixture(demotedSamples > 0, "over-budget midpoint never demoted its spatial pass")
-            requireFixture(demotedGenerationWindows >= 9,
-                           "demoted midpoint stopped generating frames in \(11 - demotedGenerationWindows) sampled windows")
-            print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; midpoint spatial demotion observed in \(demotedSamples) samples with generated frames in \(demotedGenerationWindows)/11 windows; no target-FPS claim")
+            requireFixture(demotedGenerationWindows > 0,
+                           "spatial demotion and generated presentations were never observed together")
+            print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; midpoint spatial demotion observed in \(demotedSamples) samples with simultaneous generated frames in \(demotedGenerationWindows) windows and generation in all seven steady samples; no target-FPS claim")
         }
         print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : ", minimize/restore smoke"); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil)
