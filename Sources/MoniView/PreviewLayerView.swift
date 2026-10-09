@@ -120,6 +120,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var midpointSpatialDemoted = false
     private var lastMidpointRestoreAt = 0.0
     private var untimelyPresentedPairs = 0
+    private var lastAcceptedPresentationAt = 0.0
+    private var timelyPresentations = 0
     private var interpolationDimensions: FrameInterpolationPolicy.Dimensions?
     /// Recent exact adjacent-pair outcomes estimate content cadence; per-pair PTS intervals
     /// independently set midpoint budget and presentation timing.
@@ -331,7 +333,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // generated has reached the display for this configuration yet.
             frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
-            midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0
+            midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -454,7 +456,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
         // A blank registration belongs to the input that was replaced: its next confirm, failure or
         // timeout must not rebuild the layer the new stream is drawing into.
         clearBlankTracking()
@@ -481,16 +483,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         comfortableMidpoints = 0
         lastRaisedToLongEdge = nil
         let now = CACurrentMediaTime()
-        // Only retry the full-quality midpoint where the pair period still holds spare display
-        // slots. At an output rate that already uses every slot (60->120 on a 120 Hz panel, a
-        // 8.33 ms presentation interval) a retry only produces another run of late pairs, so the
-        // demoted midpoint stays until the output rate leaves headroom again.
-        if midpointSpatialDemoted, slot >= 0.012, now - lastMidpointRestoreAt > 10 {
-            // A pair that still misses its period demotes it again on the next overload, so the
-            // ladder stays bounded in both directions.
-            midpointSpatialDemoted = false
-            lastMidpointRestoreAt = now
-        }
         if let current = adaptiveLongEdge, now - lastRaiseAt > 10 {
             let ceiling = FrameInterpolationPolicy.ceilingLongEdge(
                 mode: settings.frameInterpolation, inputFPS: 0.5 / slot)
@@ -507,7 +499,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
         presentationEpoch &+= 1; presentedMidpoint = nil
         // The step belongs to the pair that published it. A display change resets the cadence
         // window and the cost history, so leaving the last step in place would let the panel
@@ -1290,6 +1282,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 if wasGenerated {
                     self.lastGeneratedPresentationTime = time
                     self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time)
+                    self.lastAcceptedPresentationAt = time
                 }
                 else {
                     if wasEndpoint, let midpoint = self.presentedMidpoint,
@@ -1311,22 +1304,38 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             endpointTime: time,
                             endpointDeadline: presentationTime ?? time, slot: period,
                             presentationIntervalP95: presentedFrameStore.presentationP95() / 1000) {
-                            // A timely pair decays the lateness evidence instead of clearing it:
-                            // an output rate already using every display slot makes single late
-                            // pairs intermittent while the shortfall stays systematic.
-                            self.untimelyPresentedPairs = max(0, self.untimelyPresentedPairs - 1)
                             self.recordComfortablePresentedPair(slot: period)
                         } else {
                             self.comfortableMidpoints = 0
-                            // Lateness is the symptom the cost check cannot see: a pair can fit
-                            // its measured budget and still miss its slots, so sustained lateness
-                            // drops the midpoint's spatial pass before the output rate collapses.
-                            // Bounded so the decay can clear it once pairs are timely again.
-                            self.untimelyPresentedPairs = min(8, self.untimelyPresentedPairs + 1)
-                            if self.untimelyPresentedPairs >= 3 {
-                                self.midpointSpatialDemoted = true
+                        }
+                        // Lateness against a deadline is not a shortfall: a pair can present every
+                        // slot on time and still sit a fixed phase behind its deadline, which the
+                        // stricter quality gate above reports for its own purpose. What costs a
+                        // 120 Hz output rate is a slot that never got a frame, so the demotion
+                        // counts presentation intervals that stretch past their slot instead.
+                        if self.lastAcceptedPresentationAt > 0 {
+                            let interval = time - self.lastAcceptedPresentationAt
+                            if interval > period * 1.5, interval <= period * 4 {
+                                self.untimelyPresentedPairs = min(8, self.untimelyPresentedPairs + 1)
+                                self.timelyPresentations = 0
+                                if self.untimelyPresentedPairs >= 3 {
+                                    self.midpointSpatialDemoted = true
+                                }
+                            } else if interval <= period * 1.5 {
+                                self.untimelyPresentedPairs = max(0, self.untimelyPresentedPairs - 1)
+                                self.timelyPresentations = min(600, self.timelyPresentations + 1)
+                            }
+                            // Restore on the same signal that demoted: a sustained run of slots
+                            // that all got their frame. The inference-size ladder's cost test is
+                            // not usable here because a high tier's inference alone exceeds it.
+                            if self.midpointSpatialDemoted, self.timelyPresentations >= 90,
+                               period >= 0.012, CACurrentMediaTime() - self.lastMidpointRestoreAt > 10 {
+                                self.midpointSpatialDemoted = false
+                                self.lastMidpointRestoreAt = CACurrentMediaTime()
+                                self.timelyPresentations = 0
                             }
                         }
+                        self.lastAcceptedPresentationAt = time
                     } else if wasEndpoint {
                         self.comfortableMidpoints = 0
                     }

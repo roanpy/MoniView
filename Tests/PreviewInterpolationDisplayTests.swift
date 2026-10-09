@@ -25,6 +25,13 @@ func requireFixture(_ condition: Bool, _ message: String) {
 // A native window and GPU with synthetic SDR input. This is not a capture-card,
 // picture-quality, HDMI-latency or long-running throughput certification.
 let environment = ProcessInfo.processInfo.environment
+// A locked session stops drawable presentations without changing the window's occlusion
+// state, so every throughput window would read zero and the run would report a failure that
+// is not about the renderer. Refuse the environment instead of blaming the code.
+if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+   (session["CGSSessionScreenIsLocked"] as? Bool) == true {
+    skipFixture("screen is locked; presentations cannot be validated")
+}
 let fps = Int(environment["MONIVIEW_TEST_FPS"] ?? "30") ?? 30
 let width = Int(environment["MONIVIEW_TEST_WIDTH"] ?? "1920") ?? 1920
 let height = Int(environment["MONIVIEW_TEST_HEIGHT"] ?? "1080") ?? 1080
@@ -265,7 +272,7 @@ var cadenceWindows = 0, cadencePassWindows = 0
 var cadenceSources = 0, cadenceGenerated = 0
 var cadenceElapsed = 0.0
 var spatialTargetSamples = 0
-var demotedSamples = 0, demotedGenerationWindows = 0
+var demotedSamples = 0, demotedGenerationWindows = 0, demotedLateSamples = 0, fullLateSamples = 0
 var activitySamples = 0, missingActivitySamples = 0, mismatchedActivitySamples = 0
 let activityProbe = DispatchSource.makeTimerSource(queue: .main)
 activityProbe.schedule(deadline: .now() + 0.05, repeating: 0.05)
@@ -417,12 +424,14 @@ stats.setEventHandler {
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
         spatialTargetSamples += 1
     }
-    if testSpatialOverload || require120, (6...16).contains(tick) {
+    if testSpatialOverload || require120 || requireCadence, (6...16).contains(tick) {
         // An over-budget tier must demote its generated midpoint's spatial pass instead of
         // dropping pairs. The demotion restores itself after sustained comfortable pairs, so
         // the run records whether it was ever observed rather than sampling one fixed tick.
         if preview.testMidpointSpatialDemoted { demotedSamples += 1 }
         if gen > 0 { demotedGenerationWindows += 1 }
+        if tick >= 12, preview.testMidpointSpatialDemoted { demotedLateSamples += 1 }
+        if tick >= 12, !preview.testMidpointSpatialDemoted { fullLateSamples += 1 }
     }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
@@ -650,6 +659,13 @@ stats.setEventHandler {
             validateCadencePresentations(cadenceEvents, multiplier: Int(expectedMultiplier))
         }
         if followEnabled && repeatDivisor > 1 { requireFixture(totalDuplicateSkips > 0, "identical pairs were not skipped") }
+        if requireCadence, !require120, !testSpatialOverload {
+            // A 2x acceptance run has headroom, so it must return to the full-quality midpoint
+            // after any transient shortfall. A trigger that reads a fixed phase offset as a
+            // shortfall kept it demoted for the whole run instead, which this catches.
+            requireFixture(fullLateSamples > 0,
+                           "comfortable 2x run never restored its midpoint (demoted in \(demotedLateSamples) late samples)")
+        }
         if testFollowSwitch {
             requireFixture(followSwitchSampleTicks == [18, 19], "Follow-switch did not record both recovery samples")
             requireFixture(originalFollowSetting && preview.settings.skipsExactDuplicateInterpolation == originalFollowSetting,

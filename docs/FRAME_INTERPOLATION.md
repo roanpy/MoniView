@@ -32,7 +32,7 @@ The aligned quick capture-rate field shows up to four supported shortcuts plus A
 
 | Preset / 预设 | Strength / 强度 | Target / 放大目标 | Interpolation / 插帧 |
 | --- | --- | --- | --- |
-| Smooth / 流畅优先 | 0.55 | Source resolution / 原始输入 | Enables Flow Beta with force and Follow / 开启光流档及强制、跟随 |
+| Smooth / 流畅优先 | 0.55 | Display backing size, bounded to the visible viewport / 匹配屏幕，按可见视口限制 | Enables Flow Beta with force and Follow / 开启光流档及强制、跟随 |
 | Quality / 画质优先 | 0.80 | Display backing size / 匹配屏幕 | Enables the available quality engine with force and Follow / 开启可用高质量档及强制、跟随 |
 | Native enhancement / 原生增强 | 1.00 | Display backing size / 匹配屏幕 | Off; remembers the engine for later enable / 关闭，保留引擎供再次开启 |
 
