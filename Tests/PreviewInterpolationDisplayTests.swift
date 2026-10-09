@@ -430,8 +430,13 @@ stats.setEventHandler {
         // the run records whether it was ever observed rather than sampling one fixed tick.
         if preview.testMidpointSpatialDemoted { demotedSamples += 1 }
         if gen > 0 { demotedGenerationWindows += 1 }
-        if tick >= 12, preview.testMidpointSpatialDemoted { demotedLateSamples += 1 }
-        if tick >= 12, !preview.testMidpointSpatialDemoted { fullLateSamples += 1 }
+        // The fixture minimizes and restores the window at ticks 13 and 14, and that path
+        // resets the ladder, so a full-quality reading after it proves nothing. Sample the
+        // steady window before it and require that generated frames were actually presenting.
+        if (9...12).contains(tick) {
+            if preview.testMidpointSpatialDemoted { demotedLateSamples += 1 }
+            else if gen > 0 { fullLateSamples += 1 }
+        }
     }
     let skippedDuplicates = frames.takeDuplicateSkips(); totalDuplicateSkips += skippedDuplicates
     if testInterpolationMode == .quality, let work = frames.currentInterpolationWorkingSize() {
@@ -664,7 +669,7 @@ stats.setEventHandler {
             // after any transient shortfall. A trigger that reads a fixed phase offset as a
             // shortfall kept it demoted for the whole run instead, which this catches.
             requireFixture(fullLateSamples > 0,
-                           "comfortable 2x run never restored its midpoint (demoted in \(demotedLateSamples) late samples)")
+                           "comfortable 2x run never restored its midpoint while generating frames (demoted in \(demotedLateSamples) steady samples)")
         }
         if testFollowSwitch {
             requireFixture(followSwitchSampleTicks == [18, 19], "Follow-switch did not record both recovery samples")

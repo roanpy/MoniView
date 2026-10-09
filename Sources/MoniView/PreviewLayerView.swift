@@ -497,6 +497,38 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             }
         }
     }
+
+    /// Cadence evidence for the midpoint-quality ladder. A presentation interval that stretches
+    /// past its slot is a dropped slot; a fixed phase behind a deadline is not, which is why this
+    /// measures intervals rather than comparing presentation times with deadlines. Every accepted
+    /// presentation advances the interval, but only generated and pair-endpoint frames judge it,
+    /// so a native fallback resets the measurement instead of looking like a shortfall.
+    private func notePresentationInterval(_ interval: Double, slot: Double) {
+        guard slot > 0, interval > 0 else { return }
+        // A pause longer than four slots is not evidence either way, but it does break a run.
+        guard interval <= slot * 4 else {
+            timelyPresentations = 0
+            untimelyPresentedPairs = 0
+            return
+        }
+        if interval > slot * 1.5 {
+            untimelyPresentedPairs = min(8, untimelyPresentedPairs + 1)
+            timelyPresentations = 0
+            if untimelyPresentedPairs >= 3 { midpointSpatialDemoted = true }
+        } else {
+            untimelyPresentedPairs = max(0, untimelyPresentedPairs - 1)
+            timelyPresentations = min(600, timelyPresentations + 1)
+        }
+        // Restore on the same signal that demoted: a sustained run of slots that all got their
+        // frame. The inference ladder's cost test is not usable here because a high tier's
+        // inference alone exceeds it, and an output rate that uses every slot has no headroom.
+        if midpointSpatialDemoted, timelyPresentations >= 90, slot >= 0.012,
+           CACurrentMediaTime() - lastMidpointRestoreAt > 10 {
+            midpointSpatialDemoted = false
+            lastMidpointRestoreAt = CACurrentMediaTime()
+            timelyPresentations = 0
+        }
+    }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
         midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
@@ -553,6 +585,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         presentationEpoch &+= 1
         // Output-size changes alter midpoint cost; a rung blocked at one size may fit at another.
         blockedRaiseTarget = nil; comfortableMidpoints = 0
+        // A new output size invalidates the previous size's cadence evidence: neither the
+        // demotion nor a nearly complete restore may carry over into it.
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0
+        untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
         forceDraw = true
         requestRender()
     }
@@ -1279,10 +1315,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 #endif
                 if generationIsCurrent, self.awaitingSourcePresentation?.sequence == presentedSequence, !wasGenerated { self.awaitingSourcePresentation = nil }
                 guard self.presentationEpoch == epoch else { self.requestRenderIfStateChanged(); return }
+                // Every accepted presentation advances the cadence measurement; only the pair's
+                // own frames judge it, so a native fallback between pairs resets the interval.
+                let presentationInterval = self.lastAcceptedPresentationAt > 0 ? time - self.lastAcceptedPresentationAt : 0
+                self.lastAcceptedPresentationAt = time
                 if wasGenerated {
                     self.lastGeneratedPresentationTime = time
                     self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time)
-                    self.lastAcceptedPresentationAt = time
+                    self.notePresentationInterval(presentationInterval, slot: period)
                 }
                 else {
                     if wasEndpoint, let midpoint = self.presentedMidpoint,
@@ -1313,29 +1353,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // stricter quality gate above reports for its own purpose. What costs a
                         // 120 Hz output rate is a slot that never got a frame, so the demotion
                         // counts presentation intervals that stretch past their slot instead.
-                        if self.lastAcceptedPresentationAt > 0 {
-                            let interval = time - self.lastAcceptedPresentationAt
-                            if interval > period * 1.5, interval <= period * 4 {
-                                self.untimelyPresentedPairs = min(8, self.untimelyPresentedPairs + 1)
-                                self.timelyPresentations = 0
-                                if self.untimelyPresentedPairs >= 3 {
-                                    self.midpointSpatialDemoted = true
-                                }
-                            } else if interval <= period * 1.5 {
-                                self.untimelyPresentedPairs = max(0, self.untimelyPresentedPairs - 1)
-                                self.timelyPresentations = min(600, self.timelyPresentations + 1)
-                            }
-                            // Restore on the same signal that demoted: a sustained run of slots
-                            // that all got their frame. The inference-size ladder's cost test is
-                            // not usable here because a high tier's inference alone exceeds it.
-                            if self.midpointSpatialDemoted, self.timelyPresentations >= 90,
-                               period >= 0.012, CACurrentMediaTime() - self.lastMidpointRestoreAt > 10 {
-                                self.midpointSpatialDemoted = false
-                                self.lastMidpointRestoreAt = CACurrentMediaTime()
-                                self.timelyPresentations = 0
-                            }
-                        }
-                        self.lastAcceptedPresentationAt = time
+                        self.notePresentationInterval(presentationInterval, slot: period)
                     } else if wasEndpoint {
                         self.comfortableMidpoints = 0
                     }
@@ -1509,6 +1527,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // drops to the cheap resize instead of the renderer dropping pairs.
                         if succeeded, wasGenerationBatch, !wasSmoothMidpoint {
                             self.midpointSpatialDemoted = true
+                            // The evidence that would restore it starts over: the previous run of
+                            // on-slot presentations was measured at the full pass this pair could
+                            // not afford.
+                            self.timelyPresentations = 0
                         }
                         let forcedContinuation = succeeded && expectedSettings.forceFrameInterpolation
                             && lower == nil
