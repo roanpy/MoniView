@@ -2,31 +2,43 @@
 
 ## Contract / 行为边界
 
-This feature is off by default and requires the public VideoToolbox low-latency frame processor on a supported macOS 26+ GPU. It generates one midpoint between two source frames: a **2× target**, not a guarantee that every midpoint reaches the screen. The info card reports source and generated frames from actual drawable-presented callbacks. Output FPS is their sum in a shared sampling window, including source-only fallback; redraws of the same source and retired-stream callbacks do not count. Capture FPS, recording and PNG export remain based on original source frames. Source quality, gameplay input latency and HDMI-to-screen latency are not improved merely by generating frames.
+Interpolation is off until the user enables it. The public VideoToolbox path requires a supported macOS 26+ GPU and generates one midpoint; Flow Beta uses the app’s Metal engine and supports 2× or 3×. These are targets, not guarantees that every generated frame reaches the screen. The info card reports source and generated frames from actual drawable-presented callbacks. Output FPS is their sum in a shared sampling window, including source-only fallback; redraws of the same source and retired-stream callbacks do not count. Capture FPS, recording and PNG export remain based on original source frames. Source quality, gameplay input latency and HDMI-to-screen latency are not improved merely by generating frames.
 
-默认关闭，需要 macOS 26+ 和系统支持的 GPU。使用 Apple 公开 VideoToolbox 低延迟处理器生成两个原帧之间的一张中间帧：**目标为 2×，不保证每张生成帧都能呈现**。信息卡的原帧与生成帧数来自实际呈现回调；输出 FPS 使用同一取样窗口的两者总和，回退时仍显示原帧输出数，同一原帧重绘和旧流回调不重复计数。采集、录制和 PNG 导出仍以原始输入帧为基础；插帧不会凭空提高源画质或降低操作、HDMI 到屏幕的总延迟。
+插帧初始关闭。Apple 公开 VideoToolbox 路径需要 macOS 26+ 和系统支持的 GPU、每对补一张；自研 Metal 光流 Beta 支持 2× 或 3×。**倍率是目标，不保证每张生成帧都能呈现**。信息卡的原帧与生成帧数来自实际呈现回调；输出 FPS 使用同一取样窗口的两者总和，回退时仍显示原帧输出数，同一原帧重绘和旧流回调不重复计数。采集、录制和 PNG 导出仍以原始输入帧为基础；插帧不会凭空提高源画质或降低操作、HDMI 到屏幕的总延迟。
 
 ## Simple controls and override / 简单控制与强制模式
 
-The multiplier selector offers Off / 2×. Quality is separate: Low (adaptive), Medium (up to 720p), High (up to 1080p). Existing persisted Smooth/Clear values still decode; Medium is the default when first enabling the new selector. Higher multipliers are not implemented and are not offered as working options.
+Interpolation is a switch, not a multiplier choice: the renderer picks the smallest step that lifts the measured content rate to 60 FPS within the panel refresh limit. 30 FPS content on a 60 Hz or 120 Hz panel therefore stays on the single-midpoint 2× path, which is the cheap and correct choice. The flow-blend tier can also generate a second midpoint (phases 1/3 and 2/3) for content below 25 FPS, where doubling cannot reach 60; the VideoToolbox processor produces only the midpoint and stays on 2×. Quality is separate: Low (adaptive), Medium (up to 720p), High (up to 1080p), Flow Beta. Existing persisted Smooth/Clear values still decode. The 20→60 three-phase path passed synthetic native-window presentation and restart checks on the local host; real-game motion quality remains separately unaccepted.
 
-Flow Beta is a fourth quality tier using the app's own Metal optical-flow blend engine instead of the VideoToolbox processor: sparse bidirectional block matching over a three-level luma pyramid with a confidence gate, where ambiguous pixels fall back to cross-dissolve. On this M5 Max the 1280×720 fixture measures about 0.7 ms GPU median with an idle GPU and roughly 1–7 ms while the preview itself loads the GPU, versus 15–22 ms for the VT processor at the same size; the same admission, budget and deadline machinery still applies, so a busy GPU backs off to source frames exactly as with other tiers. Above 40 FPS input the working size starts at a 1280 long edge. The tier currently shares the macOS 26+ interpolation-section gate even though the engine itself is plain Metal. Expect softer motion boundaries and dissolve fallbacks on flat, repeated, occluded or cut content; it is a beta for real-motion acceptance, not a quality promise.
+Flow Beta is a fourth quality tier using the app's own Metal optical-flow blend engine instead of the VideoToolbox processor: sparse bidirectional block matching over a three-level luma pyramid with a confidence gate, where ambiguous pixels fall back to cross-dissolve. On this M5 Max the 1280×720 fixture measures about 0.7 ms GPU median with an idle GPU and roughly 1–7 ms while the preview itself loads the GPU, versus 15–22 ms for the VT processor at the same size; the same admission, budget and deadline machinery still applies, so a busy GPU backs off to source frames exactly as with other tiers. Above 40 FPS input the working size starts at a 1280 long edge. The UI checks Metal capability independently of VideoToolbox; unavailable VT presets fall back to an available engine. Expect softer motion boundaries and dissolve fallbacks on flat, repeated, occluded or cut content; it is a beta for real-motion acceptance, not a quality promise.
 
-倍率提供关闭／2×，质量单独提供低（自适应）、中（最高720p）、高（最高1080p）。旧流畅／清晰设置仍可读取；新倍率首次启用默认中档。未实现的更高倍率不作为可用选项展示。
+插帧是开关而非倍率选择：渲染器按实测内容帧率，在屏幕刷新率允许范围内选择能把它提升到 60 FPS 的最小步长。30 FPS 内容在 60/120 Hz 屏上因此维持单中点的 2× 路径，这是最经济且正确的选择。光流档还可为低于 25 FPS 的内容生成第二个中点（相位 1/3 与 2/3），那种情况 2× 到不了 60；VideoToolbox 处理器仅产出中点，固定 2×。质量单独提供低（自适应）、中（最高720p）、高（最高1080p）、光流 Beta；旧流畅／清晰设置仍可读取。20→60 的三相位路径已通过本机合成源原生窗口呈现与重启检查；真实游戏运动画质仍需单独验收。
 
-光流 Beta 是第四个质量档，使用应用自研 Metal 光流混合引擎而非 VideoToolbox 处理器：三级亮度金字塔上的稀疏双向块匹配加置信度门控，不确定像素回退为交叉淡化。本台 M5 Max 的 1280×720 夹具实测：GPU 空闲时中位约 0.7 ms，预览自身占用 GPU 时约 1–7 ms；同尺寸 VT 处理器为 15–22 ms。准入、预算和呈现期限机制不变，GPU 繁忙时与其他档一样回退原帧。输入超过 40 FPS 时工作尺寸从长边 1280 开始。该档目前仍随插帧区共享 macOS 26+ 门槛，引擎本身只依赖 Metal。平坦、重复纹理、遮挡或切场景处可能出现运动边缘变软与淡化回退；本档为实机运动画质验收的 Beta，不是画质承诺。
+光流 Beta 是第四个质量档，使用应用自研 Metal 光流混合引擎而非 VideoToolbox 处理器：三级亮度金字塔上的稀疏双向块匹配加置信度门控，不确定像素回退为交叉淡化。本台 M5 Max 的 1280×720 夹具实测：GPU 空闲时中位约 0.7 ms，预览自身占用 GPU 时约 1–7 ms；同尺寸 VT 处理器为 15–22 ms。准入、预算和呈现期限机制不变，GPU 繁忙时与其他档一样回退原帧。输入超过 40 FPS 时工作尺寸从长边 1280 开始。界面独立检测 Metal 能力，不再依赖 VideoToolbox 门槛；不可用的 VT 预设回退到可用引擎。平坦、重复纹理、遮挡或切场景处可能出现运动边缘变软与淡化回退；本档为实机运动画质验收的 Beta，不是画质承诺。
 
-Force interpolation attempts is off by default. It ignores measured performance admission and budget-driven quality reductions/cooldowns, but retains increasing stable PTS, runtime/size support, the screen's refresh limit, source freshness, presentation deadlines, single GPU command concurrency, bounded drawable ownership and GPU-error recovery. It is an attempt, not guaranteed FPS. Cost and actual generated/output counts remain visible. The override is stored as an optional field so older saved settings decode unchanged.
+Enabling the interpolation master switch sets force attempts on. The Smoothness and Quality presets enable both; the user can turn force off explicitly afterwards. Force bypasses measured admission. Successful over-budget processing no longer reduces source-frame spatial scaling: the selected target and existing low-latency viewport bound are preserved. Low can reduce inference resolution; High/Medium keep their advertised midpoint limits. When no permitted inference reduction remains, Force continues deadline-safe attempts using the existing measurements instead of entering a two-second budget cooldown and repeated calibration. GPU failures still enter recovery cooldown. Increasing stable PTS, runtime/size support, the screen's refresh limit, source freshness, presentation deadlines, single GPU command concurrency and bounded drawable ownership remain mandatory. Cost and actual generated/output counts remain visible; Force does not guarantee FPS. The override is optional so older saved settings decode unchanged.
 
-强制尝试默认关闭，忽略测得的性能预算准入以及预算触发的降档／冷却；仍保留稳定递增 PTS、系统／尺寸支持、屏幕刷新率上限、原帧时效、呈现期限、单 GPU 命令、drawable 有界保活和 GPU 错误恢复。它表示持续尝试，不保证帧数；负担与实际生成／输出继续显示。新增字段可选，兼容旧保存设置。
+开启插帧总开关时默认开启强制尝试，流畅与画质预设同时开启两者；用户可主动关闭强制。强制绕过实测预算准入。成功处理超预算不再降低原始帧的空间放大：所选目标和既有低延迟可见区域限制保持生效；低档可降低推理尺寸，中高档保留各自中间帧上限。没有允许的推理降档时，强制保留测量结果并持续尝试满足期限的帧对，不再进入两秒预算暂停和反复预热；GPU失败仍进入恢复冷却。稳定递增PTS、系统与尺寸支持、屏幕刷新率、原帧时效、呈现期限、单GPU命令和drawable有界保活仍是必要条件。负担与实际生成、输出继续显示，强制不保证帧数；字段可选，兼容旧保存设置。
 
 On a 60 Hz display, 30→60 is eligible; 45→90 and 50→100 are not. Force does not bypass this physical limit. Prefer native 60 capture if advertised, without silently changing the user's selected capture rate. Converting 45/50 to exactly 60 would require a separately validated variable-phase frame-rate conversion pipeline. Native 90/120 capture choices appear only when advertised for the selected resolution; they do not imply 180/240 interpolation support.
 
 60 Hz 屏幕可准入30→60；45→90、50→100不可准入，强制开关也不绕过物理限制。采集卡上报原生60时可优先选择，但不自动改掉用户采集设置。45/50→精确60需要单独验证的可变相位转换。当前分辨率上报90/120才显示对应采集选择，不意味着插帧支持180/240。
 
-The aligned quick capture-rate field shows at most four advertised canonical rates plus Auto, including 90/120 on suitable hardware; a selected canonical rate remains in the shortcuts. All advertised rates, including fractional rates and lower endpoints, remain in the dropdown.
+The aligned quick capture-rate field shows up to four supported shortcuts plus Auto, including 90/120 on suitable hardware; the selected supported rate remains in the shortcuts; fractional labels use three slots to leave room for the measured-content reading. All advertised rates, including fractional rates and lower endpoints, remain in the dropdown.
 
-对齐的采集快捷栏最多显示四个设备上报的常用帧率加自动，支持时包含90/120，并保留已选常用值；所有档位（含分数帧率及低端点）仍在下拉菜单。
+对齐的采集快捷栏显示最多四个受支持的快捷帧率加自动，支持时包含90/120，并保留当前受支持的选择；小数标签时显示三个快捷档，给实测读数留空间；所有档位（含分数帧率及低端点）仍在下拉菜单。
+
+## Enhancement presets / 增强预设
+
+| Preset / 预设 | Strength / 强度 | Target / 放大目标 | Interpolation / 插帧 |
+| --- | --- | --- | --- |
+| Smooth / 流畅优先 | 0.60 | Display backing size, bounded to the visible viewport / 匹配屏幕，按可见视口限制 | Enables Flow Beta with force; Follow off (capture cadence) / 开启光流档及强制，关闭跟随（采集节奏） |
+| Quality / 画质优先 | 0.80 | Display backing size / 匹配屏幕 | Enables the available quality engine with force and Follow / 开启可用高质量档及强制、跟随 |
+| Native enhancement / 原生增强 | 1.00 | Display backing size / 匹配屏幕 | Off; remembers the engine for later enable / 关闭，保留引擎供再次开启 |
+
+Native enhancement keeps source frames, enables enhancement and removes the low-latency visible-size cap so the default target uses the current display's backing size even in a smaller window. It does not mean native input resolution. Strength 1.00 is sharpening/enhancement strength, not an upscaling multiplier. Previously saved manual values are unchanged until the user chooses a preset. Choosing Smoothness or Quality after Native enables interpolation for that preset's engine.
+
+原生增强指保持原始帧率、关闭插帧，默认按当前屏幕绘制像素尺寸放大；不是保持采集分辨率。1.00 是增强强度而非放大倍率。旧保存的手动值不被新默认值覆盖；再次选择预设时才应用新组合。从原生增强切回流畅或画质会重新开启插帧；没有可用引擎时保持关闭并显示插帧不可用。
 
 ## Independent dimensions / 三种尺寸分开
 
@@ -56,9 +68,9 @@ Interpolation needs the current source before computing its midpoint, and delays
 
 ## Composition and resource lifetime / 组合与资源生命周期
 
-Color and sharpening apply once after midpoint generation. MetalFX/Lanczos spatial enlargement remains available for source endpoints and Clear midpoints. Smooth midpoints deliberately skip intermediate spatial scaling and use one inexpensive final resize to the visible area. The standalone AI super-resolution session is suspended while interpolation is selected; its preference is retained and the enhancement panel explains the pause. Apple also offers joint temporal/spatial interpolation, but that API restricts the joint path to 2× spatial scaling and one generated midpoint. It has not been enabled or certified here. Independent 3×/4× temporal processing requires separate presentation/budget/quality acceptance; successful one-shot processor calls are not throughput proof.
+Color applies once after midpoint generation. Every tier except Low runs a generated midpoint through the same spatial enlargement as its neighbouring source frames, so consecutive presented frames share one scaling quality; only Low keeps the cheaper inference-size midpoint with a single final resize, and a tier whose pairs keep missing their period temporarily falls back to that cheap midpoint until sustained comfortable pairs allow the full pass again. Sharpening is applied after the final fit, at display resolution, because a shrunk frame averages away acutance added before the resize. Measured on the M5 Max with a 1080p source at Match Display, the extra midpoint pass costs about a millisecond per pair. The standalone AI super-resolution session is suspended while interpolation is selected; its preference is retained and the enhancement panel explains the pause. Apple also offers joint temporal/spatial interpolation, but that API restricts the joint path to 2× spatial scaling and one generated midpoint. It has not been enabled or certified here. Independent 3×/4× temporal processing requires separate presentation/budget/quality acceptance; successful one-shot processor calls are not throughput proof.
 
-生成中间帧后只执行一次色彩及锐化，原帧端点和清晰档中间帧可继续使用 MetalFX/Lanczos 空间放大。流畅档中间帧跳过中间放大，只做一次较轻的最终窗口缩放。选择插帧期间暂停独立 AI 超分会话、保留原有选项，增强面板显示暂停说明。Apple 另有联合时间／空间处理接口，但联合路径仅支持 2× 空间放大及一张中间帧；当前未启用、未认证。独立 3×/4× 插帧还需分别验证呈现、负担与画质，单次处理成功不是实时性能证明。
+生成中间帧后只执行一次色彩处理；除低档外，中间帧与原帧端点使用同一套空间放大，使相邻上屏帧的放大质量一致，低档仍保留推理尺寸加一次轻量最终缩放；若某档的帧对持续超期，会暂时退回该省算中间帧，待连续稳定后再自动恢复完整放大。锐化改在最终适配之后、按显示分辨率执行，否则缩小窗口会把先前加上的锐度平均掉。本机 M5 Max、1080p 源、匹配屏幕实测：多出的中间帧放大每帧对约 1 毫秒。选择插帧期间暂停独立 AI 超分会话、保留原有选项，增强面板显示暂停说明。Apple 另有联合时间／空间处理接口，但联合路径仅支持 2× 空间放大及一张中间帧；当前未启用、未认证。独立 3×/4× 插帧还需分别验证呈现、负担与画质，单次处理成功不是实时性能证明。
 
 Normal preview retains only the latest source. Interpolation additionally retains one preceding reference and one fixed pending endpoint, with no accumulating capture queue. A shared semaphore limits GPU submissions to one in flight, while presentation tokens separately cap future unpresented drawables at three. Completion resources retain sessions, pixel buffers, texture references and CI tasks through GPU completion, including partial failure. Presentation deadlines cover generated/source/fallback frames across setting changes. A lost presentation callback after GPU completion retires the old layer and reconstructs the preview instead of reusing tokens whose old drawable might still appear.
 
@@ -123,9 +135,9 @@ Apple's public API permits resolution and frame-rate enhancement together; they 
 
 [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) separates frame-rate multiplier from optical-flow processing scale and offers lower-cost lite models. [RIFE](https://github.com/hzwer/ECCV2022-RIFE) documents arbitrary-time interpolation. These are useful design references, not Apple throughput measurements. A Core ML/Metal prototype could test 2× and variable phases at 720p/1080p using identical input sequences, display size, actual presentation counts, P95 total cost, artifacts and added latency. Do not ship a model or third-party runtime until its license, conversion and measured benefit are verified; no such backend was added by this change. Flowframes and Stellaria code were not copied.
 
-RIFE code and weights are both MIT, so commercial or closed-source use is permitted; the blocker here is measured throughput, not licensing. A local MLX evaluation of a RIFE-style model on this M5 Max measured roughly 168 ms at 854×480 and 260 ms at 720p per pair — far above the 33 ms slot of 30→60, let alone 8.3 ms at 60→120 — so the Core ML/MLX route stays shelved until a converted model demonstrably fits the slot on the target machine. The shipped Flow Beta tier instead follows the Lossless-Scaling-style design: a small fixed-cost Metal flow pipeline with no model weights and no third-party runtime. Flowframes and Stellaria code were not copied.
+RIFE upstream code uses MIT; the exact selected model-weight artifact requires separate terms verification. No RIFE weights are bundled. A local MLX evaluation of a RIFE-style model on this M5 Max measured roughly 168 ms at 854×480 and 260 ms at 720p per pair — far above the 33 ms slot of 30→60, let alone 8.3 ms at 60→120 — so the Core ML/MLX route stays shelved until a converted model demonstrably fits the slot on the target machine. The shipped Flow Beta tier instead follows the Lossless-Scaling-style design: a small fixed-cost Metal flow pipeline with no model weights and no third-party runtime. Flowframes and Stellaria code were not copied.
 
-可参考倍率与光流工作尺寸分离、lite模型和任意时间插值，但开源说明不等于苹果端实测。RIFE 代码与权重均为 MIT，商用与闭源使用均允许；此处搁置原因是实测性能而非许可。本机 MLX 评估在 M5 Max 上测得 854×480 约 168 ms、720p 约 260 ms 每对，远高于 30→60 的 33 ms 时隙，更远于 60→120 的 8.3 ms，因此 Core ML/MLX 路线在转换模型实测进入时隙前继续搁置。随附的光流 Beta 档采用小黄鸭式固定成本 Metal 光流设计：无模型权重、无第三方运行时。模型许可、转换及收益确认前不随产品分发；未复制 Flowframes 或 Stellaria 的代码。
+可参考倍率与光流工作尺寸分离、lite模型和任意时间插值，但开源说明不等于苹果端实测。RIFE 上游代码采用 MIT；具体选用权重的条款仍需单独核实，产品未随附 RIFE 权重。本机 MLX 评估在 M5 Max 上测得 854×480 约 168 ms、720p 约 260 ms 每对，远高于 30→60 的 33 ms 时隙，更远于 60→120 的 8.3 ms，因此 Core ML/MLX 路线在转换模型实测进入时隙前继续搁置。随附的光流 Beta 档采用小黄鸭式固定成本 Metal 光流设计：无模型权重、无第三方运行时。模型许可、转换及收益确认前不随产品分发；未复制 Flowframes 或 Stellaria 的代码。
 
 ## Capture versus content cadence / 采集与内容节奏
 
@@ -133,52 +145,14 @@ Selecting 30 FPS configures the UVC stream accepted by the Mac; it does not chan
 
 选30 FPS配置Mac收到的UVC流，不会改变主机／电脑的HDMI输出或游戏帧率。界面采集帧率来自收到的时间戳，不是HDMI源遥测。60流可能承载重复的30内容、静止画面、菜单或设备重复输出，不能依据品牌区分。应保留原始PTS、采集和录制节奏。
 
-The Follow control or optional duplicate-skipping setting enables exact cadence measurement. The detector compares all active pixels (not padding or a sparse thumbnail) and relevant image metadata on supported 420v/420f/BGRA buffers. It needs at least eight adjacent-pair samples and reports a rate only when repeats are both present and not overwhelming; the repeat ratio is capped at 3×. Thus 30-in-60 can estimate about 30, and 40-in-60 about 40, while all-identical static input, mostly unique input, noisy/compressed near-duplicates, or unstable timestamps can produce no estimate. This is an exact-repeat estimate of visible content updates, never game-FPS telemetry or brand recognition. The default has both controls off.
+Content cadence is measured on a bounded serial input observer, independently of drawing and interpolation switches. It compares original buffers and PTS, rejects gaps or changed epochs, and expires stale estimates. Static content cannot establish game-engine FPS. Tolerant comparison estimates content updates; only exact evidence skips a picture. A window-edge overshoot is capped by the measured signal rate.
 
-When duplicate skipping is enabled, identical adjacent pairs skip midpoint inference while preserving their source presentation. For a later unique frame, interpolation retains the last presented unique buffer and its original PTS; midpoint timing and endpoint phase use the actual PTS interval between those unique endpoints. Only intervals within one to three stable capture ticks are admitted; stale or irregular intervals fall back to a native source frame. With skipping off, inference continues to use adjacent source frames and their cadence.
+内容节奏由有界输入队列测量，与绘制负载、插帧开关独立；使用原始缓冲与 PTS，缺帧、代际切换和过期读数不作为当前证据。静止画面不能确定游戏引擎帧率。宽容比较用于估计，严格重复证据才跳过画面；估计不得超出测得的采样率。
 
-Follow waits for a stable estimate, selects the nearest supported capture rate at or above it (or the device's highest supported rate if none reaches it), and applies changes only while preview is visible and recording is stopped. A successful automatic change starts a 15-second cooldown. The setting changes only the UVC rate delivered to the Mac; it cannot change the console's output. Once capture is reduced to the observed content rate, repeats may disappear, so a later source speedup is not detectable and must be selected manually. Exact near-duplicates remain distinct deliberately. Diagnostics count skipped inference pairs separately from the estimated content cadence.
+Follow is now the interpolation basis switch, using the same persisted choice as duplicate skipping. It defaults on when no explicit choice exists. On: pair distinct content timestamps; off: pair capture timestamps. Neither setting changes hardware capture FPS. Keep 60 FPS capture to observe content changing from 30 back to 60. Flow/quality presets enable interpolation and force; Flow defaults Follow off and Quality defaults Follow on; Native enhancement explicitly turns interpolation off. The HUD reports the actual pair basis used by the renderer separately from the estimated content reading.
 
-「跟随」或可选的重复帧跳过设置会启用精确节奏测量。检测器比较受支持的420v/420f/BGRA缓冲区全部有效像素（不含padding，不使用稀疏缩略图）及相关图像信息。至少需要8个相邻帧样本；只有存在重复、且重复没有压倒性占比时才报告节奏，倍率最多3×。因此60信号中的30节奏可估为约30，40节奏可估为约40；完全相同的静止输入、几乎全唯一的输入、带噪／压缩的近似重复或不稳定时间戳都可能没有估算。这只是可见画面更新的精确重复估算，不是游戏内部FPS遥测或品牌识别。默认两个开关都关闭。
+“跟随内容帧率”与跳过重复画面共用同一个状态；没有明确保存选择时默认开启。开启按不同内容画面的 PTS 配对，关闭按采集 PTS 配对，两者都不更改硬件采集档位。保留 60 帧采集才能观察内容从 30 恢复到 60。流畅／画质预设开启插帧与强制，流畅默认关闭跟随、画质默认开启跟随，原生增强明确关闭插帧；HUD 的实际配对依据与内容估计分开统计。
 
-启用重复跳过后，完全相同的相邻帧只跳过中点推理，原始端点仍照常呈现。遇到后续唯一帧时，插帧保留上一个实际上屏的唯一缓冲区及其原始PTS；中点时刻和端点相位按两个唯一端点之间的实际PTS间隔计算。仅接纳1到3个稳定采集周期内的间隔；过期或不规则间隔回退为原帧。关闭跳过时，推理仍使用相邻采集帧及其采集节奏。
+Integer 3× is selected automatically when appropriate. It does not implement constant 60 FPS for every variable 20–30 FPS sequence: 24/25 may still produce 48/50 FPS on a 60 Hz display. A separately validated target-time-grid resampler is required for that guarantee.
 
-跟随会等待估算稳定，选择不低于估算值的最近支持档位（若没有更高档，则使用设备最高档），并且仅在预览可见、未录制时改档。成功的自动改档后冷却15秒。它只改变Mac收到的UVC采集率，不能改变主机输出。采集率降到观测内容节奏后，重复帧可能消失，因此不能再发现之后的源内容加速；需要手动调高。近似重复仍按不同帧处理。跳过推理计数与内容节奏估算分开记录。
-
-Presented interval P95 uses actual positive drawable presented times for unique source presentations and generated frames, with a bounded 120-interval history. Same-source redraws and retired-stream callbacks do not contribute. Hidden previews reset the interval baseline and report presentation paused; neither invisible-window zero FPS nor callback/GPU timing is HDMI latency. Averages such as 80–90 FPS alone cannot prove even frame pacing.
-
-呈现间隔P95按唯一原帧及生成帧的实际正值presentedTime计算，最多保留120个间隔；同帧重绘与旧流回调排除。不可见时清空间隔基线并报告暂停呈现。不可见的0 FPS、回调／GPU耗时都不是HDMI总延迟；80～90平均FPS本身不能证明均匀帧间隔。
-
-### Priorities after this baseline / 后续优先级
-
-1. Keep the window genuinely visible and measure actual presentation intervals, source retention, missed endpoints and P95 costs under fixed input/settings. Do not use invisible-window zero FPS as a throughput sample. Prefer stable original 60 to an uneven forced 80–90.
-2. Validate exact-repeat estimates, unique-endpoint PTS pacing and scene cuts on real UVC motion. Exact duplicate skipping is a cost optimization and cadence clue, not inferred game telemetry.
-3. Prototype arbitrary-phase interpolation for 45/50→60 and 3× only after an engine actually supplies the required phases. Reuse existing bounded buffer ownership; no unbounded frame queue.
-4. Compare Apple's temporal processor with a license-verified lite RIFE Core ML/Metal prototype at identical input, output size and actual cadence. Ship a replacement only if quality and end-to-end cost beat the current path. Lossless Scaling's Windows/DirectX model and its Linux community ports are design references, not a macOS backend available to this app. See its [official requirements](https://store.steampowered.com/app/993090/Lossless_Scaling_2/).
-
-先用真实UVC运动验收完全重复估算、唯一端点PTS节奏与切场景行为；可变相位及3×必须由引擎真正提供；RIFE轻量原型需核实许可并同条件对照，不能把小黄鸭Windows／Linux能力当作本程序Mac后端。
-
-### Source references for duplicate policy / 去重策略来源
-
-- [FFmpeg mpdecimate](https://ffmpeg.org/ffmpeg-filters.html#mpdecimate): approximate block-difference thresholds; reviewed as behavior only, no GPL code copied.
-- [FFmpeg scene detection](https://ffmpeg.org/ffmpeg-filters.html#scdet): scene changes are a separate problem from exact duplicates.
-- [mpv interpolation/display sync](https://mpv.io/manual/master/#options-interpolation): display pacing is distinct from source cadence.
-- [Apple pixel-buffer lock](https://developer.apple.com/documentation/corevideo/cvpixelbufferlockbaseaddress(_:_:)) and [row-stride guidance](https://developer.apple.com/library/archive/qa/qa1829/_index.html): CPU access locks and per-row stride handling.
-
-The implementation here is independently written with exact active-byte comparisons, default disabled; it introduces no borrowed GPL runtime. Repeated source pictures retain their original timestamps and source presentation. Precise duplicates and static scenes are deliberately not labelled as a lower game FPS.
-
-### What the input can tell us / 输入监测边界
-
-The current app accepts AVFoundation video devices. Device-advertised modes and sample PTS describe the stream delivered to the Mac, not the console's internal game rendering FPS. Exact repeats can also be static content; noisy repeats may differ. Selecting 30 FPS limits the capture stream and does not remotely set the console's HDMI output. This app has no EDID control, HDMI source telemetry or game process integration.
-
-当前只接入 AVFoundation 视频设备。设备上报格式与收到的时间戳描述 Mac 收到的流，不能确认游戏内部渲染帧率。相同画面也可能来自静止场景；重复画面经过压缩或噪声后也可能不完全相同。选择 30 FPS 限制采集流，不会远程改变主机 HDMI 输出。本程序没有 EDID 控制、HDMI 源遥测或游戏进程接口。
-
-A console connected directly to an ordinary Mac HDMI output cannot be captured through that output. Receiving another machine's video still needs capture hardware or a separate supported transport. Capturing games running on this same Mac through ScreenCaptureKit is a possible separate input backend, but is **not implemented** in this release. ScreenCaptureKit's requested capture interval would still not certify a game's own render FPS.
-
-普通 Mac HDMI 输出口不能作为主机视频输入；其他机器的画面仍需采集硬件或另外支持的传输方案。本机游戏可考虑单独实现 ScreenCaptureKit 输入，但本版**未实现**，其采集间隔也不能认证游戏内部帧率。
-
-References: [AVFoundation capture frame duration](https://developer.apple.com/documentation/avfoundation/avcapturedevice/activevideominframeduration), [ScreenCaptureKit capture interval](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/minimumframeinterval).
-
-### Compact controls / 紧凑面板
-
-The primary enhancement panel keeps scaling, multiplier, quality and measured output together. Force and exact-duplicate skipping are under More options; long explanations are tooltips. Budget percentage is processing cost against the interpolation admission budget, not whole-system GPU usage. The panel is height-bounded and scrolls in small windows; detailed sizes and pacing remain in Video Info. / 主面板保留放大、倍率、质量与实测输出；强制和完全重复检测收进更多选项，长说明改成帮助提示。预算百分比不是整机 GPU 占用率；面板限制高度，小窗口可滚动，详细尺寸与呈现节奏在画面信息中。
+3× 在合适条件下自动选择。它不等于任意 20–30 波动序列恒定输出 60：60Hz 屏上的 24/25 内容仍可能输出 48/50。恒定目标时间网格的重采样仍待独立实现和验收。

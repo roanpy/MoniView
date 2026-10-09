@@ -14,9 +14,13 @@ Live preview, audio monitoring, recording, color tools, and MetalFX spatial scal
 
 </div>
 
-> **Status: early preview (0.2.0).** MoniView is a local developer build with ad-hoc signing. It is not notarized and is not on the Mac App Store. It targets macOS 14 or later. The interface follows the system language: English or Simplified Chinese.
+> **Status: early preview (0.2.0).** MoniView is a local developer build with ad-hoc or explicitly selected development signing. It is not notarized and is not on the Mac App Store. It targets macOS 14 or later. The interface follows the system language: English or Simplified Chinese.
 
 MoniView turns a USB (UVC) capture card into a low-latency monitor window for an HDMI source: a camera, a console, or any other HDMI output.
+
+### Interface language
+
+English and Simplified Chinese are bundled locally. macOS selects the interface from the app language preference, or the system language order when no app preference is set. Quit and reopen MoniView after changing that preference. This includes settings, diagnostics and camera/microphone permission descriptions; device and source-window names retain their original names. `Scripts/test-localization.sh` checks resource parity, format arguments, UI keys, Foundation lookups and language fallback. Visual layout checks remain separate.
 
 ## What it does
 
@@ -44,15 +48,19 @@ swift build -c release
 open build/MoniView.app
 ```
 
-Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and an ad-hoc signature.
+Only the Swift toolchain is needed; the Xcode Command Line Tools are enough and no Xcode project or full IDE is required. `Scripts/build-app.sh` wraps the SwiftPM release binary into `build/MoniView.app` with `Resources/MoniView.icns`, the bundled `PrivacyInfo.xcprivacy`, and a local signature (ad-hoc by default).
 
 The optional AI path requires an Apple Swift 6.2+ / macOS SDK 26+ build and supported macOS 26+ hardware at runtime. Older Apple compilers build the spatial fallback; the deployment target remains macOS 14. A custom new compiler paired with an old SDK can explicitly package the fallback with `MONIVIEW_DISABLE_AI=1 ./Scripts/build-app.sh`. See [AI engineering notes](docs/AI_UPSCALING.md).
 
-The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version.
+The script takes optional overrides: `MONIVIEW_VERSION`, `MONIVIEW_BUILD`, `MONIVIEW_ARCH`, `MONIVIEW_SIGN_IDENTITY`, `MONIVIEW_DISABLE_AI=1`, and `MONIVIEW_ENTITLEMENTS=1` to sign with `Resources/MoniView.entitlements` and the hardened runtime for sandbox verification. It verifies the signature, checks the bundled resources, and prints the architecture and version. For compilation/resource preparation without signing, use `MONIVIEW_PREPARE_ONLY=1 ./Scripts/build-app.sh`; this stages a separate `build/store-preparation/MoniView.app` without signing, installing or enabling App Sandbox. See [Store preparation](docs/APP_STORE.md) and [draft bilingual metadata](docs/STORE_METADATA.json).
 
-On first launch, grant camera access for video. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects the USB video device and a matching audio input, and other inputs can be chosen in settings.
+Camera access is requested when a video input is selected; with no eligible USB capture card, startup does not request camera permission. Microphone permission is needed only to monitor or record audio, including the capture card's audio input; video-only monitoring does not require it. MoniView auto-selects an external USB video device and a matching audio input. Without one, video stays disconnected instead of automatically opening a built-in or wireless camera, including after unplugging the capture device. Cameras remain available for explicit selection in settings.
+
+Help → Getting Started provides offline setup and permission-recovery instructions; Help also links to privacy and support.
 
 The bottom buttons are Record, Info, Quality, Color, and Settings. A click on the image closes the open panel.
+
+Quality, Color and Settings panels gently rise and fade in above the toolbar. Switching keeps the card's bottom edge fixed while its height adjusts, with sequential content fades. The system's Reduce Motion preference removes scaling, movement and animated height changes.
 
 **Window > Always on Top** keeps the preview above normal windows and remembers the choice across launches. Native full screen temporarily uses the normal window level; leaving full screen restores the saved preference. It does not change Spaces behavior or raise save panels and other app windows.
 
@@ -105,11 +113,11 @@ This is what one device reported under test, not a general performance claim.
 
 ## Privacy
 
-Camera access is required to read video from the UVC capture card. Microphone access is only required to monitor or record audio. MoniView runs entirely on the local machine, collects nothing, and sends nothing to any external service. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Exported media is written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
+Camera access is required for a selected UVC capture card or manually selected camera. Microphone access is only required to monitor or record audio. MoniView processes media locally without telemetry or automatic uploads. Settings store device identifiers locally; Help links open GitHub in your browser, and voluntarily submitted feedback is handled by GitHub. The app bundles a privacy manifest (`PrivacyInfo.xcprivacy`) that declares no tracking and no collected data. Exported media is written to the file you choose in the save panel, and the diagnostics snapshot is written to `~/Library/Logs/MoniView/diagnostics.json`; both stay local. Capture card serial numbers, device identifiers, and diagnostic logs can be personally identifying, so do not attach them to public issues. See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
 
 ## Platform and roadmap
 
-MoniView is macOS only today. It is built as an ad-hoc signed local app, not a notarized or Mac App Store build, so the current artifact is not Store-submittable; see [docs/APP_STORE.md](docs/APP_STORE.md) for the distribution checklist and the remaining gaps. An iPad version would need a separate UIKit touch target, audio playback adaptation, and its own signing; a Mac `.app` cannot be installed on iPad. The iOS version is not part of this repository, and later versions may be closed source. Existing releases keep the license they shipped with.
+MoniView is macOS only today. It is built as a locally signed development app, not a notarized or Mac App Store build, so the current artifact is not Store-submittable; see [docs/APP_STORE.md](docs/APP_STORE.md) for the distribution checklist and the remaining gaps. An iPad version would need a separate UIKit touch target, audio playback adaptation, and its own signing; a Mac `.app` cannot be installed on iPad. The iOS version is not part of this repository, and later versions may be closed source. Existing releases keep the license they shipped with.
 
 The planned direction is shared media/model code with small native platform shells, not a larger desktop control panel. Existing reusable seams and remaining platform dependencies are documented in [platform boundaries](docs/PLATFORM_BOUNDARIES.md); no iPad target is implemented by this review.
 
@@ -137,6 +145,16 @@ See [the local validation record](docs/LOCAL_VALIDATION.md) for the tested Mac, 
 
 ### Experimental frame interpolation
 
-Off by default on supported macOS 26+ hardware. A separate Off/2× selector and Low/Medium/High quality tiers target 2× preview FPS; a Flow Beta tier runs the app's own Metal optical-flow engine (no model weights, no third-party runtime) at far lower measured cost than the VideoToolbox processor. Automatic mode checks processing cost; the optional force switch ignores the cost budget, while preserving display eligibility, deadlines and resource bounds. Source endpoints and Clear midpoints can use MetalFX/Lanczos scaling; Smooth midpoints use one lighter final resize. Standalone AI upscaling is suspended while interpolating and resumes eligibility when interpolation is off. Interpolation itself leaves capture/recording FPS unchanged. See [dimension, latency, resource and validation boundaries](docs/FRAME_INTERPOLATION.md).
+Available engines depend on runtime capabilities. Flow Beta uses this app's own Metal optical-flow engine; the other tiers use VideoToolbox where supported. There are no LSFG code or model weights in Flow Beta. Turning on Smooth motion also turns on Force interpolation attempts; valid input, screen refresh limits and presentation deadlines still apply. Standalone AI super-resolution pauses during interpolation and becomes eligible again when it is turned off.
 
-Capture FPS describes frames delivered by the selected device, not a game's internal render rate. Selecting 30 FPS limits the capture stream and cannot control the source console. Follow estimates cadence only from exact adjacent-frame repeats, when Follow or duplicate skipping is enabled; static scenes, compressed/noisy repeats, and a capture rate already reduced to the content rate can leave it unavailable. Follow waits for a stable estimate, changes only the Mac's capture rate, and pauses while recording; a later source speedup must be selected manually. This is not game-FPS telemetry. This release has no ScreenCaptureKit input backend. See [input and interpolation limits](docs/FRAME_INTERPOLATION.md).
+Enhancement presets are Smoothness (strength 0.60, Match Display bounded to the visible viewport), Quality (0.80, Match Display), and Native enhancement (1.00, Match Display, interpolation off). Smoothness keeps MetalFX enlargement on source frames. A measured presentation shortfall can temporarily reduce only the generated frames' spatial pass; full processing returns after sustained recovery with display headroom. The Flow scheduler uses measured completion cost without an extra fractional-slot reserve. Smoothness and Quality apply complete combinations: enhancement on, their interpolation engine on and force attempts on. Smoothness defaults to capture cadence (Follow off); Quality defaults to distinct content cadence (Follow on). Native enhancement turns interpolation off. Editing any covered control afterwards marks the panel as custom; re-picking a preset reapplies its whole combination. Scaling target remains independent of strength.
+
+Interpolation overload does not reduce source-frame spatial quality: the selected enlargement target and existing low-latency viewport bound stay in effect. Low can reduce midpoint inference resolution; High/Medium retain their advertised limits. Force continues successful deadline-safe attempts without repeatedly pausing and warming up. Actual GPU errors and presentation deadlines still apply. With no generated presentations in the sampled window, the HUD shows the current pause/fallback reason rather than an old interpolation target.
+
+Capture FPS is independent of the content estimate and interpolation Follow. Follow on pairs distinct content timestamps: a 30 FPS game in 60 FPS capture targets 30×2=60. Follow off pairs capture timestamps and may target 60×2=120, including repeated content; this does not provide 120 unique game frames. Input estimation runs independently of drawing and returns unknown for stale/static evidence. Capture choices never automatically decrease under Follow. This is an estimate, not internal game telemetry.
+
+Flow can generate two intermediate phases for low-rate content such as 20 FPS (3×). Integer 3× is not a variable20–30→constant60 resampler. Current 30→60 switch/restart and 20→60 three-phase fixtures passed; the final 60→120 stress configurations did not pass the strict sustained gate. See [current validation](docs/LOCAL_VALIDATION.md), [processing rules](docs/FRAME_INTERPOLATION.md) and [next beta plan](docs/NEXT_BETA.md). A Mac window can also be selected through ScreenCaptureKit; a fitted-overlay candidate is available for same-display ordinary windows and remains experimental; iPad is not implemented.
+
+### Fitted local window preview (experimental)
+
+In Capture settings, select a running Mac window and choose **Fit over source window (experimental)**. The existing preview follows a fully visible ordinary source window on the same display; mouse clicks pass to the source. Use the menu bar MoniView icon or Dock to return to controls. Moving follows the source; resizing briefly reveals it until fresh matching-size capture arrives. Recording/fullscreen/cross-display cases are excluded. Other overlapping windows and app/Space changes exit the mode. The source app must keep running; reduced GPU load or universal game compatibility is not promised. Runtime acceptance is documented separately in [LOCAL_VALIDATION](docs/LOCAL_VALIDATION.md).

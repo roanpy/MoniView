@@ -10,6 +10,17 @@ struct ContentCadencePolicyTests {
     }
 
     static func main() {
+        check(ContentCadencePolicy.boundedObservedRate(61, signalFPS: 60) == 60,
+              "Window-edge overshoot cannot exceed the delivered sampling rate")
+        check(ContentCadencePolicy.boundedObservedRate(40, signalFPS: 60) == 40,
+              "Nonstandard content cadence is preserved")
+        check(ContentCadencePolicy.boundedObservedRate(30, signalFPS: 20) == 20,
+              "A low capture rate cannot establish faster content updates")
+        check(ContentCadencePolicy.boundedObservedRate(nil, signalFPS: 60) == nil &&
+              ContentCadencePolicy.boundedObservedRate(.nan, signalFPS: 60) == nil,
+              "Invalid or absent observations stay unknown")
+        check(ContentCadencePolicy.boundedObservedRate(29.97, signalFPS: nil) == 29.97,
+              "An absent stable signal rate does not invent a replacement")
         check(ContentCadencePolicy.nextStabilityStreak(previous: nil, current: 30, streak: 4) == 0,
               "First cadence sample starts a fresh streak")
         check(ContentCadencePolicy.nextStabilityStreak(previous: 29.97, current: 29.975, streak: 4) == 5,
@@ -63,6 +74,23 @@ struct ContentCadencePolicyTests {
               endpointDeadline: midpoint + slot, slot: slot, presentationIntervalP95: slot * 1.5),
               "Poor presentation P95 does not qualify")
 
-        print("ContentCadencePolicy: \(checks) checks passed (stability, fractional rate selection, unique PTS cadence, and presentation qualification).")
+                // Snapping: jitter between standard rates must resolve to the nearest one.
+        check(ContentCadencePolicy.quantizedRate(30.0) == 30, "An exact standard rate is unchanged")
+        check(ContentCadencePolicy.quantizedRate(29.97) == 29.97, "Fractional standard rate is preserved")
+        check(ContentCadencePolicy.quantizedRate(30.4) == 30, "Slight overshoot resolves to 30")
+        check(ContentCadencePolicy.quantizedRate(37.5) == 40, "A value between two rates resolves to the nearer one")
+        check(ContentCadencePolicy.quantizedRate(41.25) == 40, "Clear overshoot still resolves to 40")
+        check(ContentCadencePolicy.quantizedRate(59.0) == 60, "A near-60 reading is not pushed down to 50")
+        check(ContentCadencePolicy.quantizedRate(59.4) == 60, "Slight undershoot still reads as 60")
+        check(ContentCadencePolicy.quantizedRate(47.5) == 48, "47.5 resolves to 48")
+        check(ContentCadencePolicy.quantizedRate(50.5) == 50, "50.5 resolves to 50")
+        check(ContentCadencePolicy.quantizedRate(20.2) == 20, "Low content resolves to 20")
+        check(ContentCadencePolicy.quantizedRate(33.0) == 30, "33 FPS resolves to 30")
+        for invalid in [0.0, -5, Double.nan, Double.infinity] {
+            check(ContentCadencePolicy.quantizedRate(invalid) == nil, "Invalid rate is not quantized")
+        }
+        let missing: Double? = nil
+        check(ContentCadencePolicy.quantizedRate(missing) == nil, "Missing rate is not quantized")
+print("ContentCadencePolicy: \(checks) checks passed (stability, fractional rate selection, unique PTS cadence, and presentation qualification).")
     }
 }
