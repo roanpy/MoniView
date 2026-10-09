@@ -316,17 +316,17 @@
 
 "选预设即可，下面可继续微调。" = "Choose a preset, then fine-tune below.";
 
-"匹配屏幕 · 光流插帧 · 跟随内容 · 增强 0.55" = "Match Display · Flow · Content cadence · Strength 0.55";
+"匹配屏幕 · 光流插帧 · 跟随内容 · 增强 0.60" = "Match Display · Flow · Content cadence · Strength 0.60";
 
 "匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.80" = "Match display · High interpolation · Content cadence · Strength 0.80";
 
 "显示最近有效插帧配对；实际呈现见输出帧率。" = "Shows the most recent valid interpolation pair; see output FPS for actual presentation.";
 
-"匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.55" = "Match Display · High interpolation · Content cadence · Strength 0.55";
+"匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.60" = "Match Display · High interpolation · Content cadence · Strength 0.60";
 
-"匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.55" = "Match Display · interpolation · Content cadence · Strength 0.55";
+"匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.60" = "Match Display · interpolation · Content cadence · Strength 0.60";
 
-"匹配屏幕 · 插帧不可用，已关闭 · 增强 0.55" = "Match Display · interpolation unavailable, off · Strength 0.55";
+"匹配屏幕 · 插帧不可用，已关闭 · 增强 0.60" = "Match Display · interpolation unavailable, off · Strength 0.60";
 
 "匹配屏幕 · 光流插帧（回退）· 跟随内容 · 增强 0.80" = "Match display · Flow fallback · Content cadence · Strength 0.80";
 

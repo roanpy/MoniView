@@ -1,6 +1,14 @@
 # Native validation / 原生验证记录
 
-## Current closeout — build 128, 2026-10-09 / 当前收尾验收
+## Preset strength adjustment — build 129, 2026-10-09 / 预设强度微调
+
+Smoothness now uses strength 0.60 instead of 0.55; Quality remains 0.80 and Native remains 1.00. The new-settings default, resolved-engine captions, both UI languages and both READMEs agree. Existing saved custom settings retain their values until a preset is selected. / 流畅强度由0.55调整为0.60；画质保持0.80，原生保持1.00。新设置默认值、引擎回退说明、中英文界面及README同步；已保存的自定义数值保留，重新选择预设时应用新值。
+
+Capture/preset compatibility and localization checks passed (`build/acceptance-129-capture.log`, `build/acceptance-129-localization.log`); release packaging passed (`build/acceptance-129-package.log`). Installed 0.2.0 (129), strict ad-hoc signature verified; built and installed binary SHA256 both `fbc580985d8ae9ca21f6fc50b3db5e821e21e7621851746ce92f80bc4435c421`; build 128 backed up. Native UI switching confirms Smoothness 0.60 with Flow and interpolation enabled, and Quality 0.80 with High1080p; the previous Quality selection was restored. / 预设兼容、本地化及发布构建通过，129版临时签名安装、严格验签及二进制哈希一致，128版已备份。实机界面切换确认流畅0.60／光流／插帧开启，画质0.80／高1080p；验收后还原之前选中的画质档。
+
+This raises the sharpening parameter, not the output resolution or interpolation multiplier. The build-128 GPU results below remain historical measurements at 0.55 and do not certify build 129 at 0.60. Live follow-up on build 128 recorded capture 59–61 FPS for about five minutes, but every sample was hidden/paused, so none was accepted as presentation evidence. Build 129 requested camera permission again; real-game detail and visible output acceptance remain pending. / 本次提高锐化参数，不改变放大尺寸或插帧倍数。下方128版GPU结果仍是0.55的历史实测，不代替129版0.60性能验收。128版后续约5分钟记录采集59–61帧，但全部样本处于隐藏暂停状态，均不计呈现验收。129版再次请求摄像头授权，真实游戏细节及可见输出验收仍待完成。
+
+## Validated GPU matrix — build 128, 2026-10-09 / 128版已验证GPU矩阵
 
 This section supersedes earlier ladder and performance claims for the listed configurations. All GPU runs use synthetic sources, the production renderer and this Mac's 120 Hz display; locked, occluded or minimized sampling returns SKIP, never PASS. / 本节替代下方同配置的历史阶梯与性能结论。GPU 测试使用合成源、生产渲染器及本机 120 Hz 屏幕；锁屏、遮挡或最小化期间的无效采样返回 SKIP，不算通过。
 

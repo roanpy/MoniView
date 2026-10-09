@@ -568,7 +568,7 @@ struct CaptureCompatibilityTests {
         let quality = CaptureManager.qualityPresets.first { $0.name == "画质优先" }!
         let native = CaptureManager.qualityPresets.first { $0.name == "原生增强" }!
         smooth.apply(to: &enabled, supported: [.flowBlend, .quality])
-        precondition(enabled.enhancementStrength == 0.55 && enabled.frameInterpolation == .flowBlend)
+        precondition(enabled.enhancementStrength == 0.60 && enabled.frameInterpolation == .flowBlend)
         precondition(enabled.forceFrameInterpolation && enabled.skipsExactDuplicateInterpolation, "smooth explicitly enables force and content follow")
         quality.apply(to: &enabled, supported: [.flowBlend, .quality])
         precondition(enabled.enhancementStrength == 0.80 && enabled.upscaleTarget == .screen)

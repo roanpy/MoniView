@@ -538,10 +538,10 @@ struct MainView: View {
             return "原生帧率 · 匹配屏幕 · 增强 1.00；开启插帧可继续微调。"
         case "流畅优先":
             switch engine {
-            case .flowBlend: return "匹配屏幕 · 光流插帧 · 跟随内容 · 增强 0.55"
-            case .quality: return "匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.55"
-            case .off: return "匹配屏幕 · 插帧不可用，已关闭 · 增强 0.55"
-            default: return "匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.55"
+            case .flowBlend: return "匹配屏幕 · 光流插帧 · 跟随内容 · 增强 0.60"
+            case .quality: return "匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.60"
+            case .off: return "匹配屏幕 · 插帧不可用，已关闭 · 增强 0.60"
+            default: return "匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.60"
             }
         default:
             switch engine {

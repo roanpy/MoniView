@@ -135,7 +135,7 @@ struct PictureSettings: Equatable, Codable {
     var vibrance = 0.0
     var lowLatency = true
     var enhancementEnabled = true
-    var enhancementStrength = 0.55
+    var enhancementStrength = 0.60
     var upscaleTarget: UpscaleTarget = .native
     var upscaleMethod: UpscaleMethod = .metalFX
     // Optional keeps old persisted settings decodable; absence means off.
@@ -1820,7 +1820,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // Flow at the visible viewport: the cheapest tier that still enlarges with MetalFX,
         // and the midpoint ladder drops its own spatial pass whenever pairs run late, so a
         // 60->120 output rate keeps its slots. Source frames stay enlarged either way.
-        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.55,
+        QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.60,
                       upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .flowBlend),
         // Display-sized: midpoints and endpoints scale up to the window. Sharper, and it
         // costs more, so the target rate may not hold on a busy GPU.
