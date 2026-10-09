@@ -119,9 +119,15 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// renderer starts dropping pairs; sustained comfortable pairs restore the full pass.
     private var midpointSpatialDemoted = false
     private var lastMidpointRestoreAt = 0.0
-    private var untimelyPresentedPairs = 0
     private var lastAcceptedPresentationAt = 0.0
-    private var timelyPresentations = 0
+    /// Rolling presentation-interval durations, oldest first, covering every accepted frame rather
+    /// than only pair frames: a native fallback fills the gap a missing midpoint leaves, and
+    /// sampling pair frames alone therefore read a half-rate run as perfectly on time. The ladder
+    /// compares their mean with the intended interval, which is the quantity the user sees as
+    /// output FPS.
+    private var intervalDurations: [Double] = []
+    private var lastIntervalSlot = 0.0
+    private static let intervalWindow = 32
     private var interpolationDimensions: FrameInterpolationPolicy.Dimensions?
     /// Recent exact adjacent-pair outcomes estimate content cadence; per-pair PTS intervals
     /// independently set midpoint budget and presentation timing.
@@ -151,7 +157,11 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     var injectInterpolationOverBudget = false
     private(set) var injectedOverBudgetCount = 0
     var testMidpointSpatialDemoted: Bool { midpointSpatialDemoted }
-    var testUntimelyPresentedPairs: Int { untimelyPresentedPairs }
+    /// Mean presentation interval as a multiple of the intended slot: 1.0 is on rate.
+    var testMeanIntervalRatio: Double {
+        guard lastIntervalSlot > 0, !intervalDurations.isEmpty else { return 0 }
+        return intervalDurations.reduce(0, +) / Double(intervalDurations.count) / lastIntervalSlot
+    }
     #endif
     #if MONIVIEW_PREVIEW_TESTING
     private func trace(_ value: String) { if ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" { print(value) } }
@@ -333,7 +343,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // generated has reached the display for this configuration yet.
             frames.clearGeneratedPresentationEvidence()
             adaptiveLongEdge = nil; interpolationDimensions = nil
-            midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
+            midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; lastAcceptedPresentationAt = 0; intervalDurations.removeAll()
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
             queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
@@ -456,7 +466,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private func adoptSourceStreamEpoch(_ streamEpoch: UInt64) {
         sourceStreamEpoch = streamEpoch; presentationEpoch &+= 1
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; lastAcceptedPresentationAt = 0; intervalDurations.removeAll()
         // A blank registration belongs to the input that was replaced: its next confirm, failure or
         // timeout must not rebuild the layer the new stream is drawing into.
         clearBlankTracking()
@@ -503,35 +513,37 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// measures intervals rather than comparing presentation times with deadlines. Every accepted
     /// presentation advances the interval, but only generated and pair-endpoint frames judge it,
     /// so a native fallback resets the measurement instead of looking like a shortfall.
-    private func notePresentationInterval(_ interval: Double, slot: Double) {
+    private func notePresentation(interval: Double, slot: Double) {
         guard slot > 0, interval > 0 else { return }
-        // A pause longer than four slots is not evidence either way, but it does break a run.
+        // A pause longer than four intervals is not evidence either way, but it does break the run.
         guard interval <= slot * 4 else {
-            timelyPresentations = 0
-            untimelyPresentedPairs = 0
+            intervalDurations.removeAll()
             return
         }
-        if interval > slot * 1.5 {
-            untimelyPresentedPairs = min(8, untimelyPresentedPairs + 1)
-            timelyPresentations = 0
-            if untimelyPresentedPairs >= 3 { midpointSpatialDemoted = true }
-        } else {
-            untimelyPresentedPairs = max(0, untimelyPresentedPairs - 1)
-            timelyPresentations = min(600, timelyPresentations + 1)
+        lastIntervalSlot = slot
+        intervalDurations.append(interval)
+        if intervalDurations.count > Self.intervalWindow {
+            intervalDurations.removeFirst(intervalDurations.count - Self.intervalWindow)
         }
-        // Restore on the same signal that demoted: a sustained run of slots that all got their
-        // frame. The inference ladder's cost test is not usable here because a high tier's
-        // inference alone exceeds it, and an output rate that uses every slot has no headroom.
-        if midpointSpatialDemoted, timelyPresentations >= 90, slot >= 0.012,
-           CACurrentMediaTime() - lastMidpointRestoreAt > 10 {
+        let mean = intervalDurations.reduce(0, +) / Double(intervalDurations.count)
+        // Sustained cadence above the intended interval is the shortfall the midpoint's spatial
+        // pass can pay for; a window that is only occasionally a refresh late is not.
+        if intervalDurations.count >= 8, mean > slot * 1.15 {
+            midpointSpatialDemoted = true
+        }
+        // Restore on the same signal that demoted: a full window presenting at its slot rate. The
+        // inference ladder's cost test is not usable here because a high tier's inference alone
+        // exceeds it, and an output rate that uses every slot has no headroom at all.
+        if midpointSpatialDemoted, intervalDurations.count == Self.intervalWindow, mean <= slot * 1.05,
+           slot >= 0.012, CACurrentMediaTime() - lastMidpointRestoreAt > 10 {
             midpointSpatialDemoted = false
             lastMidpointRestoreAt = CACurrentMediaTime()
-            timelyPresentations = 0
+            intervalDurations.removeAll()
         }
     }
     private func resetInterpolationForDisplay() {
         adaptiveLongEdge = nil; interpolationDimensions = nil
-        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
+        midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; lastAcceptedPresentationAt = 0; intervalDurations.removeAll()
         presentationEpoch &+= 1; presentedMidpoint = nil
         // The step belongs to the pair that published it. A display change resets the cadence
         // window and the cost history, so leaving the last step in place would let the panel
@@ -588,7 +600,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // A new output size invalidates the previous size's cadence evidence: neither the
         // demotion nor a nearly complete restore may carry over into it.
         midpointSpatialDemoted = false; lastMidpointRestoreAt = 0
-        untimelyPresentedPairs = 0; lastAcceptedPresentationAt = 0; timelyPresentations = 0
+        lastAcceptedPresentationAt = 0; intervalDurations.removeAll()
         forceDraw = true
         requestRender()
     }
@@ -1262,7 +1274,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let epoch = presentationEpoch
         let wasGenerated = generatedMidpoint
         let wasEndpoint = endpointPresentation != nil
-        let period = activePresentationSlot > 0 ? activePresentationSlot : (sourceFPS > 0 ? 0.5 / sourceFPS : 0)
+        // Native presentations follow the source period, not the half-slot a pair uses.
+        let period = activePresentationSlot > 0 ? activePresentationSlot : (sourceFPS > 0 ? 1 / sourceFPS : 0)
         let sourceBufferForPresentation = buffer
         let sourcePTSForPresentation = sourcePTS
         let sourceWasUniqueForPresentation = sourceIsUniqueContent && uniqueReferenceEligible
@@ -1319,10 +1332,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 // own frames judge it, so a native fallback between pairs resets the interval.
                 let presentationInterval = self.lastAcceptedPresentationAt > 0 ? time - self.lastAcceptedPresentationAt : 0
                 self.lastAcceptedPresentationAt = time
+                self.notePresentation(interval: presentationInterval, slot: period)
                 if wasGenerated {
                     self.lastGeneratedPresentationTime = time
                     self.presentedMidpoint = (presentedSequence, time, presentationTime ?? time)
-                    self.notePresentationInterval(presentationInterval, slot: period)
                 }
                 else {
                     if wasEndpoint, let midpoint = self.presentedMidpoint,
@@ -1353,7 +1366,6 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // stricter quality gate above reports for its own purpose. What costs a
                         // 120 Hz output rate is a slot that never got a frame, so the demotion
                         // counts presentation intervals that stretch past their slot instead.
-                        self.notePresentationInterval(presentationInterval, slot: period)
                     } else if wasEndpoint {
                         self.comfortableMidpoints = 0
                     }
@@ -1530,7 +1542,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                             // The evidence that would restore it starts over: the previous run of
                             // on-slot presentations was measured at the full pass this pair could
                             // not afford.
-                            self.timelyPresentations = 0
+                            self.intervalDurations.removeAll()
                         }
                         let forcedContinuation = succeeded && expectedSettings.forceFrameInterpolation
                             && lower == nil

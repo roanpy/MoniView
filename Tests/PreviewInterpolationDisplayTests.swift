@@ -178,7 +178,8 @@ preview.suppressBlankPresentedCallbacks = testBlankFailure
 // configurable: a 960x540 window is not representative of a near-fullscreen preview.
 let testWindowWidth = Int(environment["MONIVIEW_TEST_WINDOW_WIDTH"] ?? "960") ?? 960
 let testWindowHeight = Int(environment["MONIVIEW_TEST_WINDOW_HEIGHT"] ?? "540") ?? 540
-let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: testWindowWidth, height: testWindowHeight), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+// .miniaturizable is required: the smoke test's minimize/restore step was a silent no-op without it.
+let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: testWindowWidth, height: testWindowHeight), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
 window.title = "MoniView — synthetic interpolation validation"
 if testFullscreen {
     // This helper window must be the primary window in its own fullscreen Space.
@@ -272,6 +273,7 @@ var cadenceWindows = 0, cadencePassWindows = 0
 var cadenceSources = 0, cadenceGenerated = 0
 var cadenceElapsed = 0.0
 var spatialTargetSamples = 0
+var minimizeObserved = false, restoreObserved = false
 var demotedSamples = 0, demotedGenerationWindows = 0, demotedLateSamples = 0, fullLateSamples = 0
 var activitySamples = 0, missingActivitySamples = 0, mismatchedActivitySamples = 0
 let activityProbe = DispatchSource.makeTimerSource(queue: .main)
@@ -365,11 +367,17 @@ stats.schedule(deadline:.now()+1, repeating:1)
 stats.setEventHandler {
     let sampleTime = CACurrentMediaTime()
     tick += 1
-    if requireCadence, (6...12).contains(tick) || (testRestart && (21...25).contains(tick)) {
+    if requireCadence, (1...12).contains(tick) || (testRestart && (21...25).contains(tick)) {
         guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible) else {
             print("SKIP 2x/restart acceptance: fixture is not visible; exit 2, not a pass")
             input.cancel(); stats.cancel(); exit(2)
         }
+    }
+    // The minimize/restore at ticks 13 and 14 is part of this smoke test: prove it happened and
+    // that the pipeline resumed, instead of letting a silent failure pass as "restored".
+    if tick == 16, !testFollowSwitch, !require120, !testRestart {
+        requireFixture(minimizeObserved && restoreObserved,
+                       "the minimize/restore smoke test did not run (minimized=\(minimizeObserved), restored=\(restoreObserved))")
     }
     // Tick 5 samples eligibility for the tick 5→6 interval counted by strict stats.
     // The smoke test's own minimize/restore at ticks 13/14 runs only when require120 is false.
@@ -505,7 +513,7 @@ stats.setEventHandler {
     requireFixture(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
     print("tick=\(tick) newCADcount=\(newCADCount) window=\(String(format: "%.3f", cadWindowDuration))s capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) engine=\(frames.currentEngine()) spatial=\(frames.currentEnhancedSize() ?? "native") work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
     if require120 || requireCadence || testSpatialOverload {
-        print("   midpoint-spatial=\(preview.testMidpointSpatialDemoted ? "cheap" : "full") lateness=\(preview.testUntimelyPresentedPairs)")
+        print(String(format: "   midpoint-spatial=%@ intervalMean=%.2f slot", preview.testMidpointSpatialDemoted ? "cheap" : "full", preview.testMeanIntervalRatio))
     }
     if testFollowSwitch && (tick == 18 || tick == 19) {
         let basis = frames.currentInterpolationBasisFPS()
@@ -571,7 +579,12 @@ stats.setEventHandler {
     }
     if tick == 8 && !testFollowSwitch && !require120 && !requireCadence && testInterpolationMode != .flowBlend && environment["MONIVIEW_TEST_KEEP_EFFICIENT"] != "1" { preview.settings.interpolationMode = .quality; preview.configureInterpolation(); preview.requestRender() }
     if tick == 13 && !testFollowSwitch && !require120 { window.miniaturize(nil) }
-    if tick == 14 && !testFollowSwitch && !require120 { window.deminiaturize(nil); window.makeKeyAndOrderFront(nil) }
+    if tick == 14, !testFollowSwitch, !require120 {
+        // Miniaturizing animates, so the state is only readable on the following tick.
+        if window.isMiniaturized { minimizeObserved = true }
+        window.deminiaturize(nil); window.makeKeyAndOrderFront(nil)
+    }
+    if tick >= 15, !window.isMiniaturized { restoreObserved = true }
     if tick == stopAt && !testFollowSwitch {
         if testEngineSwitch {
             preview.settings.frameInterpolation = .quality
@@ -668,8 +681,8 @@ stats.setEventHandler {
             // A 2x acceptance run has headroom, so it must return to the full-quality midpoint
             // after any transient shortfall. A trigger that reads a fixed phase offset as a
             // shortfall kept it demoted for the whole run instead, which this catches.
-            requireFixture(fullLateSamples > 0,
-                           "comfortable 2x run never restored its midpoint while generating frames (demoted in \(demotedLateSamples) steady samples)")
+            requireFixture(demotedLateSamples == 0 && fullLateSamples >= 3,
+                           "comfortable 2x run did not hold full-quality midpoints in its steady window (full \(fullLateSamples), cheap \(demotedLateSamples))")
         }
         if testFollowSwitch {
             requireFixture(followSwitchSampleTicks == [18, 19], "Follow-switch did not record both recovery samples")
