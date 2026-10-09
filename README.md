@@ -10,7 +10,7 @@ Live preview, audio monitoring, recording, color tools, and MetalFX spatial scal
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?logo=apple)
 ![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-f05138?logo=swift&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/license-MIT-16a34a.svg)](LICENSE)
+[![License: All Rights Reserved](https://img.shields.io/badge/license-All%20Rights%20Reserved-orange.svg)](LICENSE)
 
 </div>
 
@@ -137,7 +137,7 @@ The [engineering review](docs/REVIEW.md) separates submitted fixes from hardware
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+All rights reserved. Source is published for viewing; use, modification and redistribution require prior written permission. See [LICENSE](LICENSE). Earlier MIT releases retain their original permissions. Public visibility does not make this an open-source license; GitHub viewing/forking rights still apply.
 
 ### Native validation
 

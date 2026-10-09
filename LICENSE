@@ -1,21 +1,33 @@
-MIT License
+MoniView — All Rights Reserved
 
-Copyright (c) 2026 Yann Pan
+Copyright (c) 2026 Yann Pan. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This repository is made publicly available for viewing only. Except for rights
+required by applicable law or the hosting platform's terms, no permission is
+granted to use, reproduce, modify, distribute, sublicense, sell, or create
+derivative works from this software or its documentation without prior written
+permission from the copyright holder. To request permission, contact roanpy via
+https://github.com/roanpy/MoniView.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+These terms apply prospectively to versions first published under this notice.
+They do not revoke permissions granted for earlier versions distributed under
+the MIT License, or restrict rights in code already received under that license.
+Third-party material, if any, remains subject to its own license. A separate
+written license or distribution agreement may grant additional rights.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. TO THE EXTENT PERMITTED BY LAW,
+THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+中文说明（以英文条款为准）
+
+版权所有 (c) 2026 Yann Pan，保留所有权利。
+公开仓库仅供查看。除适用法律或托管平台条款规定的权利外，未经著作权人事先
+书面许可，不得使用、复制、修改、分发、再许可、销售本软件及文档，或制作
+衍生作品。授权申请请通过 https://github.com/roanpy/MoniView 联系 roanpy。
+本条款仅适用于首次按本声明发布的版本，不撤销早期 MIT 版本已授予的权利，
+也不限制已经按 MIT 获得的代码所附带的权利。第三方材料仍遵循各自许可证。
+另行签署的许可或分发协议可以授予额外权利。软件按现状提供，在法律允许的
+范围内不提供担保，著作权人不承担因软件或其使用而产生的索赔及损失责任。
