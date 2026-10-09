@@ -1,5 +1,21 @@
 # Native validation / 原生验证记录
 
+## Final acceptance for the smooth-preset ladder — build 126, 2026-10-09 / 流畅档阶梯最终验收
+
+**Repair / 修复.** The lateness trigger now counts presentation intervals past 1.5 slots on every pair frame rather than deadline lateness, a gap past four slots clears both counters, the cost-based demotion and a drawable-size change clear the restore evidence, and the restore needs 90 consecutive on-slot presentations, a slot of at least 12 ms and ten seconds since the last attempt. A locked session is refused with SKIP instead of being reported as a renderer failure. / 迟到触发改为在每个帧对帧上统计超过 1.5 时隙的呈现间隔，而不是期限迟到；超过四个时隙的停顿清零两个计数；成本降档与绘制尺寸变化清除恢复证据；恢复需连续 90 次按时隙呈现、时隙不低于 12 毫秒且距上次尝试超过 10 秒。锁屏会话以 SKIP 拒绝，不再误报为渲染器故障。
+
+**Acceptance on the final revision (f5b8e95) / 最终版本验收.** Three gates, all on the 120 Hz internal display, run one at a time with the production renderer.
+
+- Strict 60 to 120, viewport-sized target, flow engine, strength 0.55: 30/30 strict windows, source 58.50 + generated 58.53 = 117.03 FPS, mean interval 8.54 ms, P95 8.33 ms over 30 s. The midpoint spatial pass was demoted for that phase (cheap) and returned to full once interpolation stopped, which is the lever the rate needs. / 严格 60→120、视口目标、光流、强度0.55：30/30 窗口，原帧58.50＋生成58.53＝117.03帧，平均间隔8.54毫秒，P95 8.33毫秒，采样30秒。该阶段中间帧降为廉价路径，停止插帧后恢复完整，正是维持该帧率所需的杠杆。
+- Smooth 30 in 60 (the user's game shape), viewport target, flow, strength 0.55: 7/7 windows, 29.997 + 29.997 = 60 FPS, 209 complete pairs, interval P95 16.667 ms, midpoint spatial pass full throughout the steady window. / 流畅档 30 帧内容（用户实际形态）：7/7 窗口，29.997＋29.997＝60帧，209完整帧对，间隔P95 16.667毫秒，稳定窗口内中间帧保持完整。
+- Quality 30 in 60, viewport target, strength 0.80: 7/7 windows, 30.000 + 30.000 = 60 FPS, 210 complete pairs, interval P95 16.667 ms, midpoint spatial pass full. / 画质档 30 帧内容：7/7窗口，30.000＋30.000＝60帧，210完整帧对，间隔P95 16.667毫秒，中间帧保持完整。
+
+**Checks / 检查.** Capture compatibility (eight target-size assertions plus the preset matrix), 372 interpolation-policy checks, localization (284 keys per locale, 576 UI lookups, four permission messages) and a compile-only fixture run all passed. / 采集兼容（8项目标尺寸断言与预设矩阵）、372项插帧策略、本地化（每语言284键、576次界面查询、4项权限消息）与夹具仅编译全部通过。
+
+**Independent review / 独立复核.** A separate read-only agent refuted two earlier claims of this work: the first lateness trigger demoted the comfortable case permanently (a fixed 8.3 ms phase offset read as a shortfall), and the Smoothness summaries, both localization tables and the interpolation document still promised a source-size target. It then found three further holes in the rewritten trigger: intervals measured only from midpoint to endpoint, a gap longer than four slots not clearing the restore counter, and stale restore evidence surviving a cost demotion or a resize. All five findings were fixed before this acceptance. Its own GPU runs were inconclusive because the session was locked, which the fixture now reports as SKIP. / 独立只读代理反驳了本工作的两处说法：最初的迟到触发把固定 8.3 毫秒相位差当成短缺，使舒适场景长期降档；流畅摘要、两份本地化表与插帧文档仍声称原始尺寸目标。随后又指出改写后触发的三个漏洞：间隔只测「中间帧→端点」、超过四时隙的停顿不清零恢复计数、成本降档或缩放后仍继承恢复证据。五处均已在本验收前修正。其自身 GPU 运行因锁屏无法结论，夹具现以 SKIP 报告。
+
+**Limit / 边界.** These are synthetic sources and presentation-interval measurements on one host. Real game picture quality, HDMI latency, thermal behaviour over long sessions, and the subjective look of faces remain unverified. At a rate that uses every display slot the generated frames deliberately run without their spatial pass, so their detail stays below the source frames'. / 以上为合成源与单机呈现间隔测量；真实游戏画质、HDMI 延迟、长时间发热与脸部观感仍未验证。占满显示时隙的帧率下，生成帧按设计不执行空间放大，细节低于原帧。
+
 ## Smoothness preset enlargement and the 120 Hz output rate — build 124, 2026-10-09 / 流畅档放大与120Hz输出
 
 **Finding / 发现.** Smoothness was the only preset with a native processing target, so it never ran MetalFX: the 1920 to 3024 enlargement of the drawable was a plain resize. On one real captured frame at the preset's own strength, that path measured laplacian 4.34 and tenengrad 13.51, against 14.26 and 17.59 for the same frame enlarged by MetalFX at the same sharpening. The preset the user picks for fluidity was therefore also the softest by a factor of three in high-frequency energy. / 流畅优先是唯一使用原始处理目标的预设，因此从不执行 MetalFX：1920 到绘制尺寸 3024 的放大只是一次普通缩放。同一真实采集帧、同一预设强度下，该路径拉普拉斯 4.34、梯度 13.51，而同一帧经 MetalFX 放大后为 14.26 与 17.59。用户为流畅而选的预设，高频细节反而只有三分之一。
