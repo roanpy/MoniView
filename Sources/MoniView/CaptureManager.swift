@@ -1794,6 +1794,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let upscaleMethod: UpscaleMethod
         let upscaleTarget: UpscaleTarget
         let interpolation: FrameInterpolationMode
+        var followsContentRate = true
         var nativeFrameRate = false
 
         func apply(to settings: inout PictureSettings, supported: [FrameInterpolationMode]) {
@@ -1809,7 +1810,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 settings.preferredInterpolationQuality = resolved
                 settings.frameInterpolation = resolved
                 settings.forceFrameInterpolation = resolved != .off
-                settings.skipsExactDuplicateInterpolation = true
+                settings.skipsExactDuplicateInterpolation = followsContentRate
             }
         }
     }
@@ -1821,7 +1822,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // and the midpoint ladder drops its own spatial pass whenever pairs run late, so a
         // 60->120 output rate keeps its slots. Source frames stay enlarged either way.
         QualityPreset(name: "流畅优先", lowLatency: true, enhancementStrength: 0.60,
-                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .flowBlend),
+                      upscaleMethod: .metalFX, upscaleTarget: .screen, interpolation: .flowBlend, followsContentRate: false),
         // Display-sized: midpoints and endpoints scale up to the window. Sharper, and it
         // costs more, so the target rate may not hold on a busy GPU.
         QualityPreset(name: "画质优先", lowLatency: true, enhancementStrength: 0.80,
@@ -1865,7 +1866,8 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         let resolved = FrameInterpolationMode.availableQuality(preset.interpolation, supported: supportedInterpolationQualities)
         return settings.enhancementEnabled && settings.frameInterpolation == resolved &&
             settings.preferredInterpolationQuality == resolved &&
-            settings.forceFrameInterpolation == (resolved != .off) && settings.skipsExactDuplicateInterpolation
+            settings.forceFrameInterpolation == (resolved != .off) &&
+            settings.skipsExactDuplicateInterpolation == preset.followsContentRate
     }
 
     func startRecording(to url: URL) {

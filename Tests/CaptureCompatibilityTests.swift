@@ -569,9 +569,10 @@ struct CaptureCompatibilityTests {
         let native = CaptureManager.qualityPresets.first { $0.name == "原生增强" }!
         smooth.apply(to: &enabled, supported: [.flowBlend, .quality])
         precondition(enabled.enhancementStrength == 0.60 && enabled.frameInterpolation == .flowBlend)
-        precondition(enabled.forceFrameInterpolation && enabled.skipsExactDuplicateInterpolation, "smooth explicitly enables force and content follow")
+        precondition(enabled.forceFrameInterpolation && !enabled.skipsExactDuplicateInterpolation, "smooth enables force and uses capture cadence")
         quality.apply(to: &enabled, supported: [.flowBlend, .quality])
         precondition(enabled.enhancementStrength == 0.80 && enabled.upscaleTarget == .screen)
+        precondition(enabled.skipsExactDuplicateInterpolation, "quality explicitly follows content after smooth")
         let priorEngine = enabled.frameInterpolation
         enabled.skipsExactDuplicateInterpolation = false
         native.apply(to: &enabled, supported: [.flowBlend, .quality])
@@ -585,23 +586,25 @@ struct CaptureCompatibilityTests {
         precondition(enabled.frameInterpolation == .flowBlend && enabled.forceFrameInterpolation, "explicit enable defaults force-on after native")
         for capabilities: [FrameInterpolationMode] in [[.flowBlend, .quality], [.flowBlend], []] {
             for oldMode in FrameInterpolationMode.allCases {
-                for preset in CaptureManager.qualityPresets {
-                    var settings = PictureSettings()
-                    settings.enhancementEnabled = false
-                    settings.frameInterpolation = oldMode
-                    settings.forceFrameInterpolation = false
-                    settings.skipsExactDuplicateInterpolation = false
-                    preset.apply(to: &settings, supported: capabilities)
-                    let expected = preset.nativeFrameRate ? FrameInterpolationMode.off :
-                        FrameInterpolationMode.availableQuality(preset.interpolation, supported: capabilities)
-                    precondition(settings.enhancementEnabled && settings.frameInterpolation == expected)
-                    precondition(settings.forceFrameInterpolation == (expected != .off))
-                    precondition(preset.nativeFrameRate || settings.skipsExactDuplicateInterpolation)
-                    precondition(settings.upscaleTarget == preset.upscaleTarget && settings.enhancementStrength == preset.enhancementStrength)
+                for oldFollow in [false, true] {
+                    for preset in CaptureManager.qualityPresets {
+                        var settings = PictureSettings()
+                        settings.enhancementEnabled = false
+                        settings.frameInterpolation = oldMode
+                        settings.forceFrameInterpolation = false
+                        settings.skipsExactDuplicateInterpolation = oldFollow
+                        preset.apply(to: &settings, supported: capabilities)
+                        let expected = preset.nativeFrameRate ? FrameInterpolationMode.off :
+                            FrameInterpolationMode.availableQuality(preset.interpolation, supported: capabilities)
+                        precondition(settings.enhancementEnabled && settings.frameInterpolation == expected)
+                        precondition(settings.forceFrameInterpolation == (expected != .off))
+                        precondition(settings.skipsExactDuplicateInterpolation == (preset.nativeFrameRate ? oldFollow : preset.followsContentRate))
+                        precondition(settings.upscaleTarget == preset.upscaleTarget && settings.enhancementStrength == preset.enhancementStrength)
+                    }
                 }
             }
         }
-        print("PASS complete quality presets enable interpolation, content follow and force; native/no-engine disable safely")
+        print("PASS complete quality presets enable interpolation/force with their own cadence basis; native/no-engine disable safely")
     }
 
     static func main() {

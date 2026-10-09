@@ -32,7 +32,7 @@ The aligned quick capture-rate field shows up to four supported shortcuts plus A
 
 | Preset / 预设 | Strength / 强度 | Target / 放大目标 | Interpolation / 插帧 |
 | --- | --- | --- | --- |
-| Smooth / 流畅优先 | 0.60 | Display backing size, bounded to the visible viewport / 匹配屏幕，按可见视口限制 | Enables Flow Beta with force and Follow / 开启光流档及强制、跟随 |
+| Smooth / 流畅优先 | 0.60 | Display backing size, bounded to the visible viewport / 匹配屏幕，按可见视口限制 | Enables Flow Beta with force; Follow off (capture cadence) / 开启光流档及强制，关闭跟随（采集节奏） |
 | Quality / 画质优先 | 0.80 | Display backing size / 匹配屏幕 | Enables the available quality engine with force and Follow / 开启可用高质量档及强制、跟随 |
 | Native enhancement / 原生增强 | 1.00 | Display backing size / 匹配屏幕 | Off; remembers the engine for later enable / 关闭，保留引擎供再次开启 |
 
@@ -149,9 +149,9 @@ Content cadence is measured on a bounded serial input observer, independently of
 
 内容节奏由有界输入队列测量，与绘制负载、插帧开关独立；使用原始缓冲与 PTS，缺帧、代际切换和过期读数不作为当前证据。静止画面不能确定游戏引擎帧率。宽容比较用于估计，严格重复证据才跳过画面；估计不得超出测得的采样率。
 
-Follow is now the interpolation basis switch, using the same persisted choice as duplicate skipping. It defaults on when no explicit choice exists. On: pair distinct content timestamps; off: pair capture timestamps. Neither setting changes hardware capture FPS. Keep 60 FPS capture to observe content changing from 30 back to 60. Flow/quality presets enable interpolation, force and Follow; Native enhancement explicitly turns interpolation off. The HUD reports the actual pair basis used by the renderer separately from the estimated content reading.
+Follow is now the interpolation basis switch, using the same persisted choice as duplicate skipping. It defaults on when no explicit choice exists. On: pair distinct content timestamps; off: pair capture timestamps. Neither setting changes hardware capture FPS. Keep 60 FPS capture to observe content changing from 30 back to 60. Flow/quality presets enable interpolation and force; Flow defaults Follow off and Quality defaults Follow on; Native enhancement explicitly turns interpolation off. The HUD reports the actual pair basis used by the renderer separately from the estimated content reading.
 
-“跟随内容帧率”与跳过重复画面共用同一个状态；没有明确保存选择时默认开启。开启按不同内容画面的 PTS 配对，关闭按采集 PTS 配对，两者都不更改硬件采集档位。保留 60 帧采集才能观察内容从 30 恢复到 60。流畅／画质预设开启插帧、强制与跟随，原生增强明确关闭插帧；HUD 的实际配对依据与内容估计分开统计。
+“跟随内容帧率”与跳过重复画面共用同一个状态；没有明确保存选择时默认开启。开启按不同内容画面的 PTS 配对，关闭按采集 PTS 配对，两者都不更改硬件采集档位。保留 60 帧采集才能观察内容从 30 恢复到 60。流畅／画质预设开启插帧与强制，流畅默认关闭跟随、画质默认开启跟随，原生增强明确关闭插帧；HUD 的实际配对依据与内容估计分开统计。
 
 Integer 3× is selected automatically when appropriate. It does not implement constant 60 FPS for every variable 20–30 FPS sequence: 24/25 may still produce 48/50 FPS on a 60 Hz display. A separately validated target-time-grid resampler is required for that guarantee.
 
