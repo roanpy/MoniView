@@ -8,7 +8,7 @@ Offer a simple one-time paid download, provisionally US $0.99, with no subscript
 
 Developer Program membership is US $99 per year (regional pricing may differ). Paid distribution also requires the applicable paid-app agreement, banking and tax information. Qualifying developers enrolled in the Small Business Program receive its 15% commission rate; eligibility and the account's actual agreements must be checked. / 开发者会员通常每年 $99，地区定价可能不同；收费发行还需相关付费协议、银行与税务资料。符合资格并加入小企业计划后适用其 15% 佣金，不能默认账户已具备资格。
 
-The repository's MIT license permits selling copies while retaining its copyright/license notice. Paid App Store distribution can coexist with this open-source Mac version. Third-party code, models and assets require separate license checks; existing public MIT copies do not lose their granted rights when a later version changes distribution. / 本仓库 MIT 允许销售副本并保留声明；收费商店版可与 Mac 开源版并存。第三方代码、模型及素材须分别核查；以后发行方式改变不撤销既有 MIT 副本的授权。
+The current repository notice reserves all rights; public source visibility does not grant use or redistribution permission. The copyright holder may separately license an App Store build. Third-party code, models and assets require separate license checks. Earlier MIT releases keep their granted rights; the new notice cannot revoke them. / 当前仓库声明保留所有权利，公开源码不授予使用或再分发许可；著作权人可另行授权 App Store 构建。第三方代码、模型及素材须分别核查。早期 MIT 版本保留既有授权，新声明不能撤销。
 
 ## Performance and API boundary / 性能与 API 边界
 

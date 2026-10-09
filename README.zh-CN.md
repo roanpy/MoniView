@@ -10,7 +10,7 @@
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?logo=apple)
 ![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-f05138?logo=swift&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/license-MIT-16a34a.svg)](LICENSE)
+[![License: All Rights Reserved](https://img.shields.io/badge/license-All%20Rights%20Reserved-orange.svg)](LICENSE)
 
 </div>
 
@@ -129,7 +129,7 @@ MetalFX 空间放大器不需要多帧历史，无法创造采集信号里没有
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+保留所有权利。源码仅供查看，使用、修改和再分发须事先获得书面授权，见 [LICENSE](LICENSE)。早期 MIT 版本保留原授权。公开源码不等于开源许可；GitHub 平台规定的查看和 fork 权利仍适用。
 
 ### 原生验证
 
