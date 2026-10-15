@@ -33,6 +33,6 @@ First validate and stabilize the Mac PR batch. Then extract the smallest setting
 
 先完成本批 Mac 构建和真机回归；再最小化迁移设置与帧接口，不重写渲染器。随后做真实 iPad 纵向样例：连接受支持设备、显示最新帧并验证方向，再逐步接音频、录制、导出。不要为未来需求增加插件系统、服务定位器、多层抽象或空壳 target。
 
-No iPad target, iPad hardware test, universal binary or App Store readiness is delivered by this review. Existing licensing and distribution constraints remain unchanged.
+No iPad target, iPad hardware test, universal binary or App Store readiness is delivered by this review. Current licensing and distribution terms are described in [LICENSE](../LICENSE) and [APP_STORE.md](APP_STORE.md).
 
-本轮没有交付 iPad target、iPad 真机结果、通用二进制或 App Store 就绪认证；现有许可证与分发约束不变。
+本轮没有交付 iPad target、iPad 真机结果、通用二进制或 App Store 就绪认证；当前许可与分发条款见 [LICENSE](../LICENSE) 和 [APP_STORE.md](APP_STORE.md)。

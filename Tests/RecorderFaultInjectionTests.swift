@@ -462,6 +462,8 @@ do {
     check(samePTS(state.receivedAudioPTS, [audioPTS(0)]), "failed session records received audio PTS")
     check(samePTS(state.failedAudioPTS, [audioPTS(0)]), "unwritten queued audio is classified as failed")
     check(try Data(contentsOf: url) == original, "old destination bytes remain unchanged")
+    check(!state.stagingDirectories.isEmpty && state.stagingDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+          "failed recording cleans every Foundation staging directory")
     try expectNoTemporaryFiles(in: workRoot, "recording failure")
 }
 
@@ -482,6 +484,9 @@ do {
     check(try Data(contentsOf: url) != original, "destination now contains the new recording")
     check(!videoTrackPTS(url).isEmpty && !audioTrackPTS(url).isEmpty,
           "replacement asset contains video and audio")
+    let staging = recorder.testing.snapshot().stagingDirectories
+    check(!staging.isEmpty && staging.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+          "successful replacement cleans Foundation staging directories")
     try expectNoTemporaryFiles(in: workRoot, "successful replacement")
 }
 
@@ -501,6 +506,9 @@ do {
     checkSingleCompletion(box, "injected commit failure")
     check(box.firstError != nil, "commit failure reaches the completion handler")
     check(try Data(contentsOf: url) == original, "old destination bytes survive commit failure")
+    let staging = recorder.testing.snapshot().stagingDirectories
+    check(!staging.isEmpty && staging.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+          "commit failure cleans Foundation staging directories")
     try expectNoTemporaryFiles(in: workRoot, "commit failure")
 }
 

@@ -16,9 +16,9 @@ Sustained 120 FPS is not certified. A strict synthetic native-window run met its
 
 ## Before submission / 提交前
 
-- Build/archive/sign with the required Apple distribution toolchain and account; this project's local ad-hoc bundle is not a store submission. / 使用符合当期要求的 Apple 工具链和发行账号归档签名，本地临时签名包不是商店提交包。
+- Build/archive/sign with the required Apple distribution toolchain and account; this project's locally signed development bundle is not a store submission. An external build system is supported; distribution packaging/signing still needs Apple's tools and the appropriate account. / 使用符合当期要求的 Apple 工具链和发行账号归档签名，本地开发签名包不是商店提交包；允许使用外部构建系统，但分发签名与打包仍需 Apple 工具及相关账号。
 - Validate the sandbox configuration with actual USB video/audio, device reconnect, recording, selected-file access, PNG export and quit/error cleanup. Existing entitlements alone are not proof of acceptance. / 真机验收沙盒下 USB 音视频、重连、录制、用户选定文件、PNG 及退出/错误清理；已有 entitlement 不等于验收完成。
-- Supply accurate privacy declarations, support/privacy URLs, bilingual metadata and screenshots; give reviewers capture-device setup instructions. / 准备准确隐私声明、支持/隐私地址、中英文资料和截图，提供采集设备的审核操作说明。
+- Review the drafted privacy declarations, bilingual metadata and hardware-free review instructions in [APP_STORE.md](APP_STORE.md); publish approved support/privacy pages with real contact details and capture final screenshots before submission. / 本轮已准备隐私说明、双语文案与无卡审核步骤；提交前仍须发布批准的支持／隐私页、补真实联系方式并拍摄最终截图。
 - Describe actual capture, scaling and generated FPS separately. Do not promise native 4K capture, universal AI improvement, lower HDMI latency, sustained 120 FPS (not certified) or iPad support that was not tested. Experimental interpolation should not be the initial paid version's guaranteed selling point. / 分开描述真实采集、放大和生成帧率；不承诺未经验证的原生 4K、普遍 AI 收益、总延迟降低、尚未认证的持续 120 帧或未实测的 iPad 支持。实验性插帧暂不作为首版保证卖点。
 
 No App Store account changes, legal agreements, purchases or submission were performed by this work. / 本轮未修改商店账户、签署协议、付费或提交审核。
@@ -28,3 +28,7 @@ No App Store account changes, legal agreements, purchases or submission were per
 - [Apple pricing](https://developer.apple.com/help/app-store-connect/manage-app-pricing/set-a-price), [published price grid](https://www.apple.com/newsroom/pdfs/App-Store-Pricing-Update.pdf)
 - [Membership](https://developer.apple.com/programs/enroll/), [Small Business Program](https://developer.apple.com/app-store/small-business-program/)
 - [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/), [project license](../LICENSE)
+
+## Non-signing preparation — 2026-10-08 / 非签名准备
+
+Source changes and a separate preparation bundle are complete; no certificate, profile, signing, account, upload or installed-app change was performed. Sandboxed hardware acceptance and final screenshots are pending. See [preparation status](APP_STORE.md) and [review steps](STORE_REVIEW.md). / 已完成代码与独立准备包，未处理证书、profile、签名、账号、上传或替换已安装应用；沙盒真机验收和最终截图待完成。

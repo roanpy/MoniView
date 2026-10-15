@@ -26,6 +26,12 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
         case .flowBlend: return 1920
         }
     }
+
+    static func availableQuality(_ requested: FrameInterpolationMode,
+                                 supported: [FrameInterpolationMode]) -> FrameInterpolationMode {
+        if requested != .off && supported.contains(requested) { return requested }
+        return [.flowBlend, .balanced, .efficient, .quality].first(where: supported.contains) ?? .off
+    }
 }
 
 /// Pure admission and input sizing policy. The renderer owns displayLink, buffers and its
@@ -33,6 +39,82 @@ enum FrameInterpolationMode: String, CaseIterable, Identifiable, Codable {
 enum FrameInterpolationPolicy {
     static let defaultEnabled = false
     static let phase = 0.5
+    /// Temporal multipliers the engine can generate. Each step adds one midpoint between
+    /// the same pair of source frames, so 3x fills a 20 FPS source up to 60.
+    static let maxMultiplier = 3.0
+
+    /// Temporal multiplier that lifts contentFPS to the smoothness target without asking
+    /// the display for more than it refreshes. The smallest multiplier that reaches the
+    /// target wins, so 30 FPS content keeps its existing 2x path and only slower content
+    /// pays for a third slot.
+    /// Below this the third phase is worth its cost. Two ceilings meet here and the display
+    /// one binds first: three presentations of 25 FPS content need 75 Hz, so on a 60 Hz panel
+    /// the check above rejects 3x for everything at or above 20.17 FPS before this threshold
+    /// is ever consulted, and content at 25 to 29.97 FPS doubles to 50 to 59.94 instead. The
+    /// threshold therefore never changes a result below 74.5 Hz, the lowest refresh rate that
+    /// can hold three presentations of 25 FPS content. It is set here rather than at the
+    /// doubling boundary because the estimate is not reliable enough to justify a heavier
+    /// pipeline whose per-pair timing changes whenever the number moves; below it the shortfall
+    /// is large enough that only the third phase reaches the target.
+    static let lowRateThreshold = 25.0
+
+    static func multiplier(contentFPS: Double, targetFPS: Double, displayFPS: Double) -> Double {
+        guard contentFPS.isFinite, contentFPS > 0, displayFPS.isFinite, displayFPS > 0 else { return 1 }
+        let target = min(targetFPS.isFinite && targetFPS > 0 ? targetFPS : 60, displayFPS)
+        // Decide by whether doubling reaches the target, not by which exact rate was
+        // measured: the estimate moves between neighbouring values run to run, and a
+        // decision that flips with it changes the pipeline's timing every time.
+        let doublingReaches = contentFPS * 2 >= target - 0.5 && contentFPS * 2 <= displayFPS + 0.5
+        if doublingReaches { return 2 }
+        let tripleReaches = contentFPS * 3 >= target - 0.5 && contentFPS * 3 <= displayFPS + 0.5
+        if tripleReaches, contentFPS < lowRateThreshold { return 3 }
+        // Nothing reaches the target: take whatever fits so the picture still improves,
+        // but never the heavier path on an estimate this uncertain.
+        if contentFPS * 2 <= displayFPS + 0.5 { return 2 }
+        return 1
+    }
+
+    /// Phases of the generated midpoints for one pair, in presentation order. 2x yields
+    /// [0.5]; 3x yields [1/3, 2/3].
+    static func midpointPhases(multiplier: Double) -> [Float] {
+        guard multiplier.isFinite, multiplier >= 2, multiplier <= maxMultiplier else { return [] }
+        let steps = Int(multiplier.rounded())
+        guard steps >= 2, abs(multiplier - Double(steps)) < 0.001 else { return [] }
+        return (1..<steps).map { Float($0) / Float(steps) }
+    }
+
+    /// Presentations the display can hold inside one pair period, capped at the engine's own
+    /// stated multiplier. The step is chosen from a tolerant cadence estimate while the period
+    /// comes from measured PTS, so the two can disagree: the same 60 FPS pair holds two
+    /// presentations on a 120 Hz panel, one on a 60 Hz panel, and a cadence that reads it as
+    /// 20 FPS content asks for three on both. Asking for more than the display can hold pushes
+    /// the endpoint past its deadline, so the step is reduced to what this pair actually fits.
+    static func multiplierFittingPair(_ multiplier: Double, pairPeriod: Double, displayFPS: Double) -> Double {
+        guard multiplier.isFinite, multiplier >= 1, pairPeriod.isFinite, pairPeriod > 0,
+              displayFPS.isFinite, displayFPS > 0 else { return 1 }
+        let stated = max(1, Int(multiplier.rounded()))
+        guard stated >= 2 else { return 1 }
+        // Tolerance absorbs the float error in 60 * (1/60) and the sub-percent difference
+        // between a 59.94 pair and a 60 Hz slot grid; a genuinely missing slot is 0.5 or
+        // more away, so a 2% allowance cannot hide one.
+        let capacity = displayFPS * pairPeriod + 0.02
+        var allowed = 1
+        for step in 2...min(stated, 3) where Double(step) <= capacity { allowed = step }
+        return Double(allowed)
+    }
+
+    /// Follow normally pairs against the last rendered unique endpoint. Prefer the raw
+    /// adjacent capture pair only when fresh input-side evidence says the content cadence
+    /// is effectively the capture cadence and strict pixel equality confirms a change.
+    /// A missing/stale estimate never blocks the existing unique-pair path.
+    static func prefersAdjacentInputPair(inputFPS: Double?, signalFPS: Double,
+                                         evidenceFreshForCurrentEpoch: Bool,
+                                         adjacentFramesAreDifferent: Bool) -> Bool {
+        guard evidenceFreshForCurrentEpoch, adjacentFramesAreDifferent,
+              let inputFPS, inputFPS.isFinite, inputFPS > 0,
+              signalFPS.isFinite, signalFPS > 0 else { return false }
+        return abs(inputFPS - signalFPS) <= max(1.5, signalFPS * 0.05)
+    }
     static let budgetFraction = 0.9
     static let pairBudgetFraction = 0.9
     static let midpointBudgetFraction = 1.5
@@ -52,18 +134,93 @@ enum FrameInterpolationPolicy {
     /// presentation. Bound that lead AND the whole pair; the cheap endpoint still
     /// needs to fit its own slot. Deadline checks in the renderer remain mandatory.
     static func costsFit(midpoint: Double, source: Double, slot: Double) -> Bool {
-        guard midpoint.isFinite, source.isFinite, slot.isFinite,
-              midpoint >= 0, source >= 0, slot > 0 else { return false }
-        return midpoint <= slot * midpointBudgetFraction && source <= slot * budgetFraction &&
-            midpoint + source <= 2 * slot * pairBudgetFraction
+        costsFit(midpoints: [midpoint], source: source, slot: slot)
+    }
+
+    /// A 3x pair spends two midpoint commands plus the endpoint inside the same period, so
+    /// the whole period has to carry all of them rather than one midpoint and one endpoint.
+    static func costsFit(midpoints: [Double], source: Double, slot: Double) -> Bool {
+        guard !midpoints.isEmpty, source.isFinite, slot.isFinite, source >= 0, slot > 0,
+              midpoints.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return false }
+        guard midpoints.allSatisfy({ $0 <= slot * midpointBudgetFraction }),
+              source <= slot * budgetFraction else { return false }
+        let generated = midpoints.reduce(0, +)
+        return generated + source <= Double(midpoints.count + 1) * slot * pairBudgetFraction
+    }
+
+    /// Cost of one pair when its flow phases are encoded together before the first
+    /// presentation. That first command already includes every generated phase; only
+    /// later cached-phase presentations and the source endpoint add more commands.
+    static func pairCost(generationBatch: Double, subsequentPresentation: Double?,
+                        sourceEndpoint: Double, generatedPhaseCount: Int) -> Double? {
+        guard generatedPhaseCount >= 1, generationBatch.isFinite, generationBatch >= 0,
+              sourceEndpoint.isFinite, sourceEndpoint >= 0 else { return nil }
+        let subsequentCount = generatedPhaseCount - 1
+        if subsequentCount > 0 {
+            guard let subsequentPresentation, subsequentPresentation.isFinite,
+                  subsequentPresentation >= 0 else { return nil }
+            let total = generationBatch + subsequentPresentation * Double(subsequentCount) + sourceEndpoint
+            return total.isFinite ? total : nil
+        }
+        let total = generationBatch + sourceEndpoint
+        return total.isFinite ? total : nil
+    }
+
+    /// Check measured work against its actual phase intervals and the whole source-pair
+    /// period. `generationBatch` is counted once even when that command generated 2 phases.
+    static func costsFit(generationBatch: Double, subsequentPresentation: Double?,
+                        sourceEndpoint: Double, phases: [Double], pairPeriod: Double) -> Bool {
+        guard !phases.isEmpty, phases.allSatisfy({ $0.isFinite && $0 > 0 && $0 < 1 }),
+              zip(phases, phases.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }),
+              pairPeriod.isFinite, pairPeriod > 0,
+              let total = pairCost(generationBatch: generationBatch,
+                                   subsequentPresentation: subsequentPresentation,
+                                   sourceEndpoint: sourceEndpoint,
+                                   generatedPhaseCount: phases.count) else { return false }
+
+        let generationSlot = phases[0] * pairPeriod
+        guard generationBatch <= generationSlot * midpointBudgetFraction else { return false }
+        if phases.count > 1 {
+            guard let subsequentPresentation else { return false }
+            for (previous, next) in zip(phases, phases.dropFirst()) {
+                guard subsequentPresentation <= (next - previous) * pairPeriod * budgetFraction else { return false }
+            }
+        }
+        let endpointSlot = (1 - phases[phases.count - 1]) * pairPeriod
+        guard sourceEndpoint <= endpointSlot * budgetFraction else { return false }
+        return total <= pairPeriod * pairBudgetFraction
     }
 
     /// Force ignores measured budget only. A finite measurement and a feasible
     /// presentation deadline are still required; display/input eligibility is separate.
     static func allowsMeasuredPair(midpoint: Double, source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
-        guard deadlineFits, midpoint.isFinite, source.isFinite, slot.isFinite,
-              midpoint >= 0, source >= 0, slot > 0 else { return false }
-        return force || costsFit(midpoint: midpoint, source: source, slot: slot)
+        allowsMeasuredPair(midpoints: [midpoint], source: source, slot: slot, force: force, deadlineFits: deadlineFits)
+    }
+
+    /// Multi-phase variant: force still bypasses the budget, but a real GPU failure or a
+    /// missed deadline is never overridden, and every midpoint in the period is counted.
+    static func allowsMeasuredPair(midpoints: [Double], source: Double, slot: Double, force: Bool, deadlineFits: Bool) -> Bool {
+        guard deadlineFits, !midpoints.isEmpty, source.isFinite, slot.isFinite,
+              source >= 0, slot > 0,
+              midpoints.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return false }
+        return force || costsFit(midpoints: midpoints, source: source, slot: slot)
+    }
+
+    /// Batch-aware renderer admission. Force bypasses only the measured budget; phase
+    /// ordering, finite costs and the actual presentation deadline still apply.
+    static func allowsMeasuredPair(generationBatch: Double, subsequentPresentation: Double?,
+                                   sourceEndpoint: Double, phases: [Double], pairPeriod: Double,
+                                   force: Bool, deadlineFits: Bool) -> Bool {
+        guard deadlineFits, !phases.isEmpty,
+              phases.allSatisfy({ $0.isFinite && $0 > 0 && $0 < 1 }),
+              zip(phases, phases.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }),
+              generationBatch.isFinite, generationBatch >= 0,
+              sourceEndpoint.isFinite, sourceEndpoint >= 0,
+              pairPeriod.isFinite, pairPeriod > 0,
+              phases.count == 1 || (subsequentPresentation?.isFinite == true && (subsequentPresentation ?? -1) >= 0) else { return false }
+        return force || costsFit(generationBatch: generationBatch,
+            subsequentPresentation: subsequentPresentation, sourceEndpoint: sourceEndpoint,
+            phases: phases, pairPeriod: pairPeriod)
     }
 
     /// Force can retry a budget failure immediately, but cannot clear an active
@@ -85,9 +242,15 @@ enum FrameInterpolationPolicy {
         // Higher input cadence halves the useful inference budget. A smaller working
         // frame keeps Smooth inexpensive; runtime measurements still gate admission.
         if mode == .efficient, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 960) }
-        // Flow-blend analysis is far cheaper per pixel than the ML processor; above 40 FPS
-        // it still halves the slot, so hold the working frame at the measured 720p rung.
-        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40 { cap = min(cap, 1280) }
+        // Flow-blend analysis is far cheaper per pixel than the ML processor. Above 40 FPS
+        // the slot halves, so larger sources step down to the measured 720p rung; a source
+        // that already fits the tier ceiling is kept intact, because the Core Image rescale
+        // needed to shrink it costs more than the smaller search saves (measured on
+        // 1080p: native 0.29 ms vs 1280x720 0.48 ms GPU p95, and the native midpoint is
+        // sharper as well).
+        if mode == .flowBlend, let fps = inputFPS, fps.isFinite, fps > 40, max(width, height) > 1920 {
+            cap = min(cap, 1280)
+        }
         if let maximumLongEdge { guard maximumLongEdge >= 2 else { return nil }; cap = min(cap, maximumLongEdge) }
         let scale = min(1, Double(cap) / Double(max(width, height)))
         let targetWidth = Int((Double(width) * scale / 2).rounded(.down)) * 2
@@ -127,10 +290,12 @@ enum FrameInterpolationPolicy {
     /// discontinuity. The 0.5 Hz tolerance admits nominal clock differences only; actual
     /// missed presentation slots must still fall back, never count duplicated frames.
     static func eligibility(runtimeSupported: Bool, inputFPS: Double,
-                            displayFPS: Double, inputValid: Bool) -> Bool {
+                            displayFPS: Double, inputValid: Bool,
+                            multiplier: Double = 2) -> Bool {
         guard runtimeSupported, inputValid, let nominal = nominalInputFPS(inputFPS),
-              displayFPS.isFinite, displayFPS > 0 else { return false }
-        return 2 * nominal <= displayFPS + 0.5
+              displayFPS.isFinite, displayFPS > 0,
+              multiplier.isFinite, multiplier >= 1, multiplier <= maxMultiplier else { return false }
+        return multiplier * nominal <= displayFPS + 0.5
     }
 
 }

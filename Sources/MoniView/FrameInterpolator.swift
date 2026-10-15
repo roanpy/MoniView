@@ -13,6 +13,17 @@ enum FrameInterpolatorSupport {
         #endif
         return false
     }()
+
+    /// The flow-blend tier is this app's own Metal engine: it needs only a Metal
+    /// device, not Apple's VideoToolbox frame processor. Gating it on the VT probe
+    /// hid a working engine on machines where only the VT path is unavailable.
+    static func isSupported(_ mode: FrameInterpolationMode) -> Bool {
+        mode == .flowBlend ? MetalInterpolationSupport.isSupported : isSupported
+    }
+}
+
+enum MetalInterpolationSupport {
+    static let isSupported: Bool = MTLCreateSystemDefaultDevice() != nil
 }
 
 #if compiler(>=6.2) && !MONIVIEW_DISABLE_AI

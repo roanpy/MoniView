@@ -68,7 +68,9 @@ final class AIUpscaler {
         private let cleanupQueue: DispatchQueue
 
         init(key: Key, device: MTLDevice, convert: MTLComputePipelineState, cleanupQueue: DispatchQueue) throws {
-            guard key.width % 2 == 0, key.height % 2 == 0 else { throw SetupFailure.unavailable }
+            guard key.width > 0, key.height > 0, key.width % 2 == 0, key.height % 2 == 0,
+                  key.factor.isFinite, key.factor > 1,
+                  VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors(frameWidth: key.width, frameHeight: key.height).contains(key.factor) else { throw SetupFailure.unavailable }
             let config = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: key.width, frameHeight: key.height, scaleFactor: key.factor)
             guard config.supportedPixelFormats.contains(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) else { throw SetupFailure.unavailable }
             // Never override the pixel format: the hardware session dictates 420v bi-planar.
@@ -133,6 +135,14 @@ final class AIUpscaler {
         dispatchPrecondition(condition: .onQueue(.main))
         return session != nil && session?.key == requestedKey
     }
+    var isPreparing: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return preparing
+    }
+    var preparationFailed: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return failedKey == requestedKey && session == nil && requestedKey != nil
+    }
 
     init(device: MTLDevice) {
         self.device = device
@@ -142,12 +152,17 @@ final class AIUpscaler {
         convert = function.flatMap { try? device.makeComputePipelineState(function: $0) }
     }
 
+    /// Check input support independently of the caller's output-size budget.
+    static func hasSupportedScaleFactor(sourceWidth: Int, sourceHeight: Int) -> Bool {
+        scaleFactor(for: sourceWidth, sourceHeight: sourceHeight, requested: .greatestFiniteMagnitude) != nil
+    }
+
     /// Never exceed the caller's processing-size cap just to reach a supported AI factor.
     /// MetalFX/Lanczos remain available when no supported factor fits the requested budget.
     static func scaleFactor(for sourceWidth: Int, sourceHeight: Int, requested: Double) -> Float? {
-        guard AIUpscalerSupport.isSupported, sourceWidth > 0, sourceHeight > 0, sourceWidth % 2 == 0, sourceHeight % 2 == 0, requested.isFinite else { return nil }
+        guard AIUpscalerSupport.isSupported, sourceWidth > 0, sourceHeight > 0, sourceWidth % 2 == 0, sourceHeight % 2 == 0, requested.isFinite, requested > 1 else { return nil }
         return VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors(frameWidth: sourceWidth, frameHeight: sourceHeight)
-            .filter { $0.isFinite && $0 > 1 && Double($0) <= requested + 0.000001 }
+            .filter { $0.isFinite && $0 > 1 && Double($0) <= requested }
             .max()
     }
 
@@ -159,33 +174,49 @@ final class AIUpscaler {
             generation &+= 1
             session = nil // Never feed a new size into the previous session's pools.
             failedKey = nil
+            retryWakeup?.cancel()
+            retryWakeup = nil
         }
-        guard convert != nil, session == nil, !preparing else { return }
+        startPreparationIfNeeded()
+    }
+
+    private func startPreparationIfNeeded() {
+        guard let key = requestedKey, session == nil, !preparing else { return }
+        guard let convert else {
+            // A shader compilation failure is permanent for this scaler instance.
+            if failedKey != key { failedKey = key; onStateChange?() }
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         guard failedKey != key || now >= retryAfter else { return }
         preparing = true
         let expectedGeneration = generation
         let device = device
-        let convert = convert
         let queue = prepareQueue
         queue.async { [weak self] in
-            let prepared = convert.flatMap { try? Session(key: key, device: device, convert: $0, cleanupQueue: queue) }
+            let prepared = try? Session(key: key, device: device, convert: convert, cleanupQueue: queue)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.preparing = false
                 guard self.generation == expectedGeneration, self.requestedKey == key else {
-                    // A newer request may have been blocked behind this single warmup.
-                    if self.requestedKey != nil { self.onStateChange?() }
+                    // A newer prepare may be waiting behind this warmup. Start it
+                    // without requiring another capture frame or prepare call.
+                    // Release the obsolete session before queuing the next warmup.
+                    if self.requestedKey != nil {
+                        DispatchQueue.main.async { [weak self] in self?.startPreparationIfNeeded() }
+                    }
                     return
                 }
                 self.session = prepared
-                if prepared != nil { self.onStateChange?() }
                 if prepared == nil {
                     self.failedKey = key
                     // Only an actual failed attempt advances the deadline, not each arriving frame.
                     self.retryAfter = ProcessInfo.processInfo.systemUptime + 1.5
                     self.scheduleRetryWakeup()
+                } else {
+                    self.failedKey = nil
                 }
+                self.onStateChange?() // Publish both readiness and preparation failure.
             }
         }
     }
@@ -299,6 +330,9 @@ final class AIUpscaler {
     init(device: MTLDevice) {}
     var onStateChange: (() -> Void)?
     var isReady: Bool { false }
+    var isPreparing: Bool { false }
+    var preparationFailed: Bool { false }
+    static func hasSupportedScaleFactor(sourceWidth: Int, sourceHeight: Int) -> Bool { false }
     static func scaleFactor(for sourceWidth: Int, sourceHeight: Int, requested: Double) -> Float? { nil }
     func prepare(sourceWidth: Int, sourceHeight: Int, factor: Float, colorSpace: CGColorSpace) {}
     func stop() {}

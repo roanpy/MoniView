@@ -14,6 +14,7 @@ fi
 cp "$ROOT/Tests/FrameInterpolatorGPUTests.swift" "$WORK/main.swift"
 xcrun --sdk macosx swiftc -swift-version 5 -D MONIVIEW_FRAME_INTERPOLATOR_TESTING \
     "$ROOT/Sources/MoniView/AIUpscaler.swift" \
+    "$ROOT/Sources/MoniView/FrameInterpolationPolicy.swift" \
     "$ROOT/Sources/MoniView/FrameInterpolator.swift" \
     "$WORK/main.swift" \
     -o "$WORK/frame-interpolator-gpu-tests"

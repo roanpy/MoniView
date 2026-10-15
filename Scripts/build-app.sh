@@ -2,7 +2,16 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Preparation mode never touches the normal bundle or invokes signing/keychain tools.
+MONIVIEW_PREPARE_ONLY="${MONIVIEW_PREPARE_ONLY:-0}"
+case "$MONIVIEW_PREPARE_ONLY" in
+  0|1) ;;
+  *) echo "error: MONIVIEW_PREPARE_ONLY must be 0 or 1" >&2; exit 1 ;;
+esac
 APP_BUNDLE="$PROJECT_ROOT/build/MoniView.app"
+if [[ "$MONIVIEW_PREPARE_ONLY" == "1" ]]; then
+  APP_BUNDLE="$PROJECT_ROOT/build/store-preparation/MoniView.app"
+fi
 
 # Optional overrides. Defaults keep the local development build working as before.
 #   MONIVIEW_VERSION / MONIVIEW_BUILD  override the bundled version strings
@@ -12,6 +21,7 @@ APP_BUNDLE="$PROJECT_ROOT/build/MoniView.app"
 #   MONIVIEW_SIGN_KEYCHAIN             extra keychain holding a local stable signing identity
 #   MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE  password file used to unlock that keychain first
 #   MONIVIEW_DISABLE_AI=1              compile spatial fallback without SDK 26 ML symbols
+#   MONIVIEW_PREPARE_ONLY=1           stage resources separately without signing or installing
 MONIVIEW_VERSION="${MONIVIEW_VERSION:-}"
 MONIVIEW_BUILD="${MONIVIEW_BUILD:-}"
 MONIVIEW_ARCH="${MONIVIEW_ARCH:-}"
@@ -20,6 +30,10 @@ MONIVIEW_SIGN_IDENTITY="${MONIVIEW_SIGN_IDENTITY:--}"
 MONIVIEW_SIGN_KEYCHAIN="${MONIVIEW_SIGN_KEYCHAIN:-}"
 MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE="${MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE:-$HOME/.config/moniview/signing-keychain-password}"
 MONIVIEW_DISABLE_AI="${MONIVIEW_DISABLE_AI:-0}"
+if [[ "$MONIVIEW_PREPARE_ONLY" == "1" && "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
+  echo "error: preparation mode cannot apply or verify signed entitlements" >&2
+  exit 1
+fi
 
 BUILD_ARGS=(--package-path "$PROJECT_ROOT" -c release --product MoniView)
 if [[ -n "$MONIVIEW_ARCH" ]]; then BUILD_ARGS+=(--arch "$MONIVIEW_ARCH"); fi
@@ -39,6 +53,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/MoniView"
 cp "$PROJECT_ROOT/Resources/MoniView.icns" "$APP_BUNDLE/Contents/Resources/MoniView.icns"
 cp "$PROJECT_ROOT/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/PrivacyInfo.xcprivacy"
+cp "$PROJECT_ROOT/LICENSE" "$APP_BUNDLE/Contents/Resources/LICENSE"
 cp -R "$PROJECT_ROOT/Resources/en.lproj" "$PROJECT_ROOT/Resources/zh-Hans.lproj" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
@@ -51,29 +66,36 @@ if [[ -n "$MONIVIEW_BUILD" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $MONIVIEW_BUILD" "$APP_BUNDLE/Contents/Info.plist"
 fi
 
-SIGN_ARGS=(--force --sign "$MONIVIEW_SIGN_IDENTITY")
-if [[ -n "$MONIVIEW_SIGN_KEYCHAIN" ]]; then
-  if [[ -f "$MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE" ]]; then
-    security unlock-keychain -p "$(cat "$MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE")" "$MONIVIEW_SIGN_KEYCHAIN"
+if [[ "$MONIVIEW_PREPARE_ONLY" != "1" ]]; then
+  SIGN_ARGS=(--force --sign "$MONIVIEW_SIGN_IDENTITY")
+  if [[ -n "$MONIVIEW_SIGN_KEYCHAIN" ]]; then
+    if [[ -f "$MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE" ]]; then
+      security unlock-keychain -p "$(cat "$MONIVIEW_SIGN_KEYCHAIN_PASSWORD_FILE")" "$MONIVIEW_SIGN_KEYCHAIN"
+    fi
+    SIGN_ARGS+=(--keychain "$MONIVIEW_SIGN_KEYCHAIN")
   fi
-  SIGN_ARGS+=(--keychain "$MONIVIEW_SIGN_KEYCHAIN")
-fi
-if [[ "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
-  SIGN_ARGS+=(--entitlements "$PROJECT_ROOT/Resources/MoniView.entitlements" --options runtime)
-fi
-codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
+  if [[ "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
+    SIGN_ARGS+=(--entitlements "$PROJECT_ROOT/Resources/MoniView.entitlements" --options runtime)
+  fi
+  codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
 
-# Verify the artifact instead of assuming the signing step did what was asked.
-codesign --verify --strict "$APP_BUNDLE"
-if [[ "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
-  codesign -d --entitlements - "$APP_BUNDLE" 2>&1 | grep -q 'com.apple.security.app-sandbox' || {
-    echo "error: sandbox entitlement missing from signed bundle" >&2
-    exit 1
-  }
+  # Verify the artifact instead of assuming the signing step did what was asked.
+  codesign --verify --strict "$APP_BUNDLE"
+  if [[ "$MONIVIEW_ENTITLEMENTS" == "1" ]]; then
+    codesign -d --entitlements - "$APP_BUNDLE" 2>&1 | grep -q 'com.apple.security.app-sandbox' || {
+      echo "error: sandbox entitlement missing from signed bundle" >&2
+      exit 1
+    }
+  fi
 fi
-for resource in MoniView.icns PrivacyInfo.xcprivacy en.lproj/Localizable.strings zh-Hans.lproj/Localizable.strings; do
+for resource in MoniView.icns PrivacyInfo.xcprivacy LICENSE en.lproj/Localizable.strings zh-Hans.lproj/Localizable.strings en.lproj/InfoPlist.strings zh-Hans.lproj/InfoPlist.strings; do
   [[ -e "$APP_BUNDLE/Contents/Resources/$resource" ]] || { echo "error: missing $resource" >&2; exit 1; }
 done
+plutil -lint "$APP_BUNDLE/Contents/Info.plist" "$APP_BUNDLE/Contents/Resources/PrivacyInfo.xcprivacy" \
+  "$APP_BUNDLE/Contents/Resources/"{en,zh-Hans}.lproj/{Localizable,InfoPlist}.strings
+if [[ "$MONIVIEW_PREPARE_ONLY" == "1" ]]; then
+  echo "Preparation only: no bundle signing, sandbox verification, installation or upload performed."
+fi
 
 echo "Built: $APP_BUNDLE"
 echo "Architecture: $(lipo -archs "$APP_BUNDLE/Contents/MacOS/MoniView")"

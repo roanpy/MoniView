@@ -18,6 +18,8 @@ struct VideoFrameDuplicateDetectorTests {
         setbuf(stdout, nil)
         print("Running pixel equality cases")
         testIdenticalAndChangedPixels()
+        testCadenceTolerance()
+        testCadenceEarlyExitMatchesFullCount()
         print("Running padding cases")
         testPaddingIsIgnored()
         print("Running format/dimension cases")
@@ -103,6 +105,93 @@ struct VideoFrameDuplicateDetectorTests {
         return (0..<planes).contains { plane in
             let stride = isBGRA ? CVPixelBufferGetBytesPerRow(buffer) : CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
             return stride > activeRowBytes(buffer, plane: plane)
+        }
+    }
+
+    /// The cadence judge tolerates a few differing bytes because a capture device resends one
+    /// picture with its own encoding noise. These cases pin the boundary: noise reads as a
+    /// repeat, real movement does not.
+    private static func testCadenceTolerance() {
+        for format in formats {
+            let previous = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(previous, seed: 91, padding: 0x11)
+
+            // Exact copies are equivalent.
+            let copy = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(copy, seed: 91, padding: 0x11)
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, copy),
+                  "identical buffers are equivalent: \(format.name)")
+
+            // A handful of bytes is within tolerance and counts as a repeat.
+            let noisy = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(noisy, seed: 91, padding: 0x11)
+            for offset in stride(from: 4, to: 40, by: 4) {
+                writeByte(noisy, plane: 0, row: 5, offset: offset, value: 200)
+            }
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, noisy),
+                  "a few differing bytes stay equivalent: \(format.name)")
+
+            // The exact judge must still reject that same pair.
+            check(!VideoFrameDuplicateDetector.areIdentical(previous, noisy),
+                  "the exact judge rejects the noisy copy: \(format.name)")
+
+            // A genuinely different picture is far outside tolerance.
+            let different = makeBuffer(width: 64, height: 48, format: format.type)
+            fill(different, seed: 12, padding: 0x11)
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, different),
+                  "different content is not equivalent: \(format.name)")
+
+            // A format outside the allow-list is refused rather than measured: the byte
+            // counter assumes two-plane 420 or packed BGRA.
+            let planar = makeBuffer(width: 12, height: 8, format: kCVPixelFormatType_420YpCbCr8Planar)
+            fill(planar, seed: 91, padding: 0x11)
+            let planarCopy = makeBuffer(width: 12, height: 8, format: kCVPixelFormatType_420YpCbCr8Planar)
+            fill(planarCopy, seed: 91, padding: 0x11)
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(planar, planarCopy),
+                  "An unsupported planar format is refused by the tolerant path: \(format.name)")
+
+            // Zero tolerance degenerates to exactness.
+            check(!VideoFrameDuplicateDetector.areEquivalentForCadence(previous, noisy, allowedDifference: 0),
+                  "zero tolerance rejects any difference: \(format.name)")
+            check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, copy, allowedDifference: 0),
+                  "zero tolerance still accepts identical buffers: \(format.name)")
+        }
+    }
+
+    private static func testCadenceEarlyExitMatchesFullCount() {
+        for format in formats {
+            let previous = makeBuffer(width: 64, height: 32, format: format.type)
+            fill(previous, seed: 71)
+            for seed in [71, 72, 135] {
+                let current = makeBuffer(width: 64, height: 32, format: format.type)
+                fill(current, seed: seed)
+                if seed == 71 { writeByte(current, plane: 0, row: 31, offset: 0, value: 0) }
+                precondition(CVPixelBufferLockBaseAddress(previous, .readOnly) == kCVReturnSuccess)
+                precondition(CVPixelBufferLockBaseAddress(current, .readOnly) == kCVReturnSuccess)
+                let packed = format.type == kCVPixelFormatType_32BGRA
+                var differences = 0, total = 0
+                for plane in 0..<(packed ? 1 : CVPixelBufferGetPlaneCount(previous)) {
+                    let rows = packed ? CVPixelBufferGetHeight(previous) : CVPixelBufferGetHeightOfPlane(previous, plane)
+                    let strideA = packed ? CVPixelBufferGetBytesPerRow(previous) : CVPixelBufferGetBytesPerRowOfPlane(previous, plane)
+                    let strideB = packed ? CVPixelBufferGetBytesPerRow(current) : CVPixelBufferGetBytesPerRowOfPlane(current, plane)
+                    let a = (packed ? CVPixelBufferGetBaseAddress(previous) : CVPixelBufferGetBaseAddressOfPlane(previous, plane))!.assumingMemoryBound(to: UInt8.self)
+                    let b = (packed ? CVPixelBufferGetBaseAddress(current) : CVPixelBufferGetBaseAddressOfPlane(current, plane))!.assumingMemoryBound(to: UInt8.self)
+                    total += strideA * rows // Preserve the existing tolerance denominator.
+                    for row in 0..<rows {
+                        for byte in 0..<activeRowBytes(previous, plane: plane) where a[row * strideA + byte] != b[row * strideB + byte] {
+                            differences += 1
+                        }
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(current, .readOnly)
+                CVPixelBufferUnlockBaseAddress(previous, .readOnly)
+                let boundary = Double(differences) / Double(total)
+                for tolerance in [0, 0.002, 0.01, 1, -1, .nan, .infinity, boundary.nextDown, boundary, boundary.nextUp] {
+                    let expected = Double(differences) <= Double(total) * tolerance
+                    check(VideoFrameDuplicateDetector.areEquivalentForCadence(previous, current, allowedDifference: tolerance) == expected,
+                          "early exit matches full count: \(format.name), seed \(seed), tolerance \(tolerance)")
+                }
+            }
         }
     }
 

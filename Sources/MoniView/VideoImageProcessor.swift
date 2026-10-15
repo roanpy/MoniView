@@ -2,10 +2,14 @@ import CoreImage
 
 /// Shared color math keeps preview and recording consistent. Scaling remains preview-specific.
 enum VideoImageProcessor {
-    /// Enhancement sharpening shared by recording and native-size preview.
-    static let enhancementSharpening = 0.22
-    /// Lanczos resampling softens edges, so a scaled preview compensates slightly more.
-    static let scaledPreviewSharpening = 0.4
+    /// Enhancement sharpening shared by recording and native-size preview, and it is
+    /// applied inside the same command the midpoint uses, so its cost lands on the
+    /// interpolation budget. 0.22 was invisible at the default strength; pushing it to
+    /// 0.30 cost enough GPU that a 30 FPS source stopped reaching 60. This is the
+    /// visible-but-affordable point; raise it only if the budget has room to spare.
+    static let enhancementSharpening = 0.26
+    /// Resampling softens edges, so a scaled preview compensates a little more.
+    static let scaledPreviewSharpening = 0.36
 
     static func color(_ image: CIImage, settings: PictureSettings) -> CIImage {
         var result = image

@@ -5,20 +5,24 @@ import SwiftUI
 /// Never change panels, alerts or other windows found through NSApp.windows.
 struct WindowLevelObserver: NSViewRepresentable {
     var alwaysOnTop: Bool
+    var fittedPreview = false
 
     func makeNSView(context: Context) -> WindowLevelNSView {
         let view = WindowLevelNSView(frame: .zero)
         view.alwaysOnTop = alwaysOnTop
+        view.fittedPreview = fittedPreview
         return view
     }
 
     func updateNSView(_ view: WindowLevelNSView, context: Context) {
+        view.fittedPreview = fittedPreview
         view.alwaysOnTop = alwaysOnTop
     }
 }
 
 final class WindowLevelNSView: NSView {
     var alwaysOnTop = false { didSet { if oldValue != alwaysOnTop { applyLevel() } } }
+    var fittedPreview = false { didSet { if oldValue != fittedPreview { applyLevel() } } }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -31,7 +35,7 @@ final class WindowLevelNSView: NSView {
     }
 
     private func applyLevel() {
-        guard let window, !window.styleMask.contains(.fullScreen) else { return }
+        guard !fittedPreview, let window, !window.styleMask.contains(.fullScreen) else { return }
         let desired: NSWindow.Level = alwaysOnTop ? .floating : .normal
         if window.level != desired { window.level = desired }
     }

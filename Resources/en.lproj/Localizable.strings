@@ -181,6 +181,7 @@
 "清晰 · 1080p" = "Clear · 1080p";
 "清晰 · 最高1080p" = "Clear · up to 1080p";
 "插帧不可用" = "Frame interpolation unavailable";
+"插帧关闭" = "Interpolation off";
 "显示器刷新率不足，使用原始帧率" = "Display refresh is insufficient; using source frames";
 "等待稳定输入帧率" = "Waiting for a stable input frame rate";
 "处理超预算，暂用原始帧率" = "Processing over budget; temporarily using source frames";
@@ -211,10 +212,33 @@
 "中 · 最高720p" = "Medium · Up to 720p";
 "高 · 最高1080p" = "High · Up to 1080p";
 "光流 Beta · 最高1080p" = "Flow Beta · Up to 1080p";
+"画质增强已关闭" = "Image enhancement is off";
+"当前目标无需放大" = "No scaling needed for the current target";
+"当前尺寸无可用 AI 倍率；提高目标或关闭低延迟模式" = "No AI scale factor fits this size; raise the target or turn off Low Latency";
+"AI 超分加载失败，使用空间放大并重试" = "AI setup failed; using spatial scaling and retrying";
+"AI 超分准备中，暂用空间放大" = "Preparing AI; using spatial scaling";
+"AI 超分运行中" = "AI upscaling active";
+"系统 AI 超分不支持此输入尺寸，使用空间放大" = "System AI upscaling does not support this input size; using spatial scaling";
+"画面来源" = "Video source";
+"采集设备" = "Capture device";
+"Mac 窗口" = "Mac window";
+"捕获本机窗口，勾选系统录屏授权后生效。只显示窗口内容，不影响原程序。" = "Captures a window on this Mac after screen-recording permission is granted. It shows a copy of the window and does not change the original app.";
+"需要在系统设置中允许屏幕录制" = "Allow Screen Recording in System Settings";
+"没有可选择的窗口" = "No window available";
+"所选窗口已关闭" = "The selected window closed";
+"所选窗口没有画面" = "The selected window has no picture";
+"窗口捕获失败：%@" = "Window capture failed: %@";
+"正在连接窗口…" = "Connecting to window…";
+"插帧关闭：以下质量与高级选项不生效。" = "Interpolation is off; the quality and advanced options below have no effect.";
+"插帧已关闭；打开「插帧加倍」后可选择质量档位。" = "Interpolation is off. Turn on Interpolation to choose a quality tier.";
+"实际内容约 %d FPS · %@ 目标 %d" = "Content about %d FPS · %@ target %d";
+"选择要显示的窗口" = "Choose a window to show";
+"等待窗口画面" = "Waiting for window content";
+"在设置 › 采集设置 中选择一个窗口；首次使用需允许屏幕录制。" = "Pick a window in Settings › Capture. Screen Recording permission is required the first time.";
 "重复画面 · 跳过插帧" = "Duplicate input · interpolation skipped";
 "强制尝试插帧" = "Force interpolation attempts";
 "强制插帧运行中" = "Forced interpolation running";
-"忽略性能预算，保留所选质量；仍受屏幕刷新率、有效输入和呈现期限限制。可能增加延迟与卡顿。" = "Ignore the performance budget and keep the selected quality. Display refresh, valid input, and presentation deadlines still apply. May increase latency and stutter.";
+"持续尝试插帧，超预算时先减少放大处理；仍受屏幕刷新率、有效输入和呈现期限限制。" = "Keep trying interpolation; reduce spatial scaling first when over budget. Display refresh, valid input, and presentation deadlines still apply.";
 "自动按处理预算保护原始画面，超预算后重试。" = "Automatically protect original frames based on the processing budget and retry after overload.";
 "2×目标 %.0f FPS · 屏幕上限 %.0f Hz" = "2× target %.0f FPS · Display limit %.0f Hz";
 "低档自适应降低中间帧分辨率；中、高档保持各自上限。输出帧率按实际呈现统计，2×是目标；当前不支持3×。" = "Low adaptively reduces midpoint resolution; Medium and High retain their respective limits. Output FPS reflects actual presentation; 2× is a target. 3× is not currently supported.";
@@ -246,3 +270,90 @@
 "开启后采集帧率跟随实测内容帧率（取不低于内容的最近档位）；内容变快时无法自动察觉，请手动调回。手动选档会退出跟随。" = "When on, the capture rate follows the measured content rate (nearest supported rate at or above it). A later content speedup is undetectable; raise it manually. Picking a rate exits follow mode.";
 "内容已达采集上限 · 无重复帧" = "Content fills the capture rate · no duplicates";
 "跟随已开启，暂未检测到可跟随节奏" = "Follow is on; no content cadence is currently measurable.";
+"目标取决于内容帧率 · 屏幕 %.0f Hz" = "Target follows the content rate · Display %.0f Hz";
+
+"实际约 %d 帧" = "Content ≈ %d fps";
+"实际待测" = "Measuring";
+
+"平滑插帧" = "Smooth motion";
+
+"按内容插帧" = "Interpolate unique content";
+
+"跟随内容帧率" = "Follow content cadence";
+
+"内容配对 %d FPS · %@ 目标 %d" = "Content pairs %d fps · %@ target %d";
+
+"采集 %d FPS · %@ 目标 %d" = "Capture %d fps · %@ target %d";
+
+"按内容节奏生成中间帧，自动选择 2× 或支持的 3×；实际输出受屏幕刷新率与处理耗时限制。" = "Generate intermediate frames from the selected cadence, using 2× or supported 3× automatically. Output depends on display refresh rate and processing time.";
+
+"采集档位决定采样上限。识别变化的内容帧率，建议保留 60 帧采集；插帧的跟随开关不会改变采集档位。" = "Capture rate limits detection. Keep 60 fps capture to observe changing content cadence; interpolation follow does not change capture rate.";
+
+"采集 %d FPS" = "Capture %d fps";
+
+"插帧 %d→%d · 输出 %d FPS（生成 %d）" = "Interpolation %d→%d · output %d fps (%d generated)";
+
+"插帧待运行 · 输出 %d FPS（生成 %d）" = "Interpolation pending · output %d fps (%d generated)";
+
+"开启按不同内容画面的时间插帧，关闭按采集节奏插帧；不改变采集档位。" = "Interpolate between distinct content timestamps when on, capture cadence when off. Capture rate stays unchanged.";
+
+"原生增强" = "Native enhancement";
+"流畅优先" = "Smoothness";
+"画质优先" = "Quality";
+"刷新来源" = "Refresh sources";
+
+"原生帧率 · 匹配屏幕 · 增强 1.00；开启插帧可继续微调。" = "Source frame rate · match display · strength 1.00. Enable interpolation to customize.";
+
+"低档自适应降低中间帧分辨率；中、高档保持各自上限；光流 Beta 为自研引擎。" = "Low adapts intermediate resolution; Medium and High keep their size limits. Flow Beta uses our Metal engine.";
+
+"完整帧率" = "All frame rates";
+
+"已自定义：下列选项可继续调整。" = "Custom settings: adjust the options below.";
+
+"录制与状态" = "Recording and status";
+
+"插帧已关闭；打开「平滑插帧」后可选择质量档位。" = "Interpolation is off. Enable Smooth motion to choose a quality tier.";
+
+"选预设即可，下面可继续微调。" = "Choose a preset, then fine-tune below.";
+
+"匹配屏幕 · 光流插帧 · 采集节奏 · 增强 0.60" = "Match Display · Flow · Capture cadence · Strength 0.60";
+
+"匹配屏幕 · 高档插帧 · 跟随内容 · 增强 0.80" = "Match display · High interpolation · Content cadence · Strength 0.80";
+
+"显示最近有效插帧配对；实际呈现见输出帧率。" = "Shows the most recent valid interpolation pair; see output FPS for actual presentation.";
+
+"匹配屏幕 · 高档插帧 · 采集节奏 · 增强 0.60" = "Match Display · High interpolation · Capture cadence · Strength 0.60";
+
+"匹配屏幕 · 可用插帧 · 采集节奏 · 增强 0.60" = "Match Display · interpolation · Capture cadence · Strength 0.60";
+
+"匹配屏幕 · 插帧不可用，已关闭 · 增强 0.60" = "Match Display · interpolation unavailable, off · Strength 0.60";
+
+"匹配屏幕 · 光流插帧（回退）· 跟随内容 · 增强 0.80" = "Match display · Flow fallback · Content cadence · Strength 0.80";
+
+"匹配屏幕 · 可用插帧 · 跟随内容 · 增强 0.80" = "Match display · interpolation · Content cadence · Strength 0.80";
+
+"匹配屏幕 · 插帧不可用，已关闭 · 增强 0.80" = "Match display · interpolation unavailable, off · Strength 0.80";
+
+/* Local help and support. */
+"使用指南" = "Getting Started";
+"支持与反馈" = "Support and Feedback";
+"好" = "OK";
+"连接 USB 采集卡后，在采集设置中选择视频设备。没有 USB 视频输入时不会自动打开内置或无线摄像头；这些摄像头只能手动选择。\n\n无需采集卡：打开一个有内容的其他应用窗口，将画面来源改为 Mac 窗口，授权屏幕录制后选择该窗口。源窗口需要保持打开并持续更新。\n\n音频可单独选择或关闭。录制与截图通过系统保存面板选择位置；画质增强仅处理实时预览，默认录制也应用色彩与源分辨率锐化，可在设置中关闭。\n\n拒绝权限后，可在系统设置的隐私与安全性中重新允许，再刷新设备或窗口；系统可能要求重启应用。" = "Connect a USB capture card and choose its video device in Capture settings. Without a USB video input, MoniView does not open a built-in or wireless camera automatically; these cameras must be selected manually.\n\nWithout a capture card: open another application window with visible content, set Source to Mac window, grant Screen Recording access, and select that window. The source window must stay open and keep updating.\n\nSelect audio independently or turn it off. Recording and snapshots use the system save panel. Enhancement affects the live preview; recordings include color adjustments and source-resolution sharpening by default, which can be disabled in settings.\n\nAfter denying permission, allow access in System Settings under Privacy & Security, then refresh devices or windows. macOS may require restarting the app.";
+
+/* Fitted local window preview. */
+"返回 MoniView" = "Return to MoniView";
+"贴合原窗口（实验）" = "Fit over source window (experimental)";
+"仅支持同屏普通窗口。鼠标操作原应用，点击菜单栏图标或 Dock 返回 MoniView。" = "Ordinary windows on the same display only. Mouse input reaches the original app. Use the menu bar icon or Dock to return to MoniView.";
+"请先选择正在预览的普通 Mac 窗口，并停止录制或退出全屏。" = "Select a running ordinary Mac window preview first, and stop recording or leave full screen.";
+"贴合预览仅支持与 MoniView 同屏、完整可见的普通窗口。" = "Fitted preview requires an ordinary window fully inside the same display as MoniView.";
+"显示器已改变，已返回独立预览。" = "The display configuration changed. Returned to separate preview.";
+"工作区或窗口状态改变，已返回独立预览。" = "The workspace or window state changed. Returned to separate preview.";
+"已切换应用，已返回独立预览。" = "You switched applications. Returned to separate preview.";
+"来源状态改变，已返回独立预览。" = "The source state changed. Returned to separate preview.";
+"窗口已隐藏、关闭或移出当前屏幕，已返回独立预览。" = "The window was hidden, closed or moved outside the current display. Returned to separate preview.";
+"请将所选来源窗口置于前台后再开启贴合预览。" = "Bring the selected source window to the foreground before starting fitted preview.";
+"来源前方出现其他窗口，已返回独立预览。" = "Another window appeared in front of the source. Returned to separate preview.";
+"窗口尺寸更新失败，已返回独立预览。" = "The window size could not be updated. Returned to separate preview.";
+"等待窗口新画面超时，已返回独立预览。" = "Timed out waiting for the resized window picture. Returned to separate preview.";
+"选择本机窗口并设置预览" = "Select a Mac window and configure preview";
+"原应用需要保持打开；窗口预览不会提高原应用帧率。" = "The source app must stay open. Window preview does not increase its own frame rate.";
