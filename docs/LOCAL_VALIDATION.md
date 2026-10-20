@@ -6,6 +6,8 @@ FlowBlend multi-phase pairs now share one input conversion, luma pyramid and pai
 
 `test-flow-blend.sh --gpu` passed 293/293 image checks, including a new multi-phase lifetime probe: after another differently colored pair reuses the pool, the queued 0.75 phase still reads B191/G0/R64. The 20→60 display fixture passed 7/7 with 20 source + 40 generated = 60 output and 139 complete pairs. Sol's strict 60→120 rerun passed 29/30 at 119.07 FPS, mean 8.3987 ms, P95 8.333 ms; two local runs had failed under a system load of roughly 5–8 with `omlx-server` at 123% CPU, so the environment-sensitive result is reported rather than hidden. The completion-handoff experiment (deferred UI publication) was implemented, measured as neutral, and rolled back after review found a stale-publication risk. / Flow GPU 图像检查 293/293，通过新增的多相位生命周期探针：另一对不同颜色帧对复用池后，排队的 0.75 相位仍为 B191/G0/R64。20→60 显示测试 7/7，源 20 + 生成 40 = 输出 60，139 个完整帧对。Sol 的严格 60→120 复跑 29/30、119.07 FPS、均值 8.3987ms、P95 8.333ms；本地两次在 `omlx-server` 123% CPU、load 5–8 的高负载下失败，最终如实记录环境敏感结果。完成回调交接实验已实现、测得无提升，并因过期发布风险回滚。
 
+**Installed / 已安装.** Build 0.2.0 (132) was installed to `/Applications/MoniView.app`; strict ad-hoc signature verification passed and the built/installed SHA256 agree: `bd0b852c389675123ecb4e4f2ca0c6498c695b90d99181bb1727b18d77ab6bfd`. Camera and microphone access were granted after the re-signing prompt; the previous build (131) was moved to the Trash. / 0.2.0（132）已安装，严格临时签名校验通过，构建与安装二进制哈希一致；重新签名后已允许摄像头与麦克风权限；上一版 131 已移入废纸篓。
+
 ## Recording and scheduling safety — 2026-10-20 / 录制与调度安全修复
 
 Base `266fc74`, macOS 27.0.1, M5 Max, Jemdo Video not connected during the CPU runs. / 基线 `266fc74`，macOS 27.0.1，M5 Max；CPU 测试期间未连接 Jemdo 采集卡。
