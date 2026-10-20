@@ -10,6 +10,11 @@ private struct RetainedSample: @unchecked Sendable {
     let buffer: CMSampleBuffer
 }
 
+private struct RetainedPixelBuffer: @unchecked Sendable {
+    // The buffer belongs to the capture pool and is read-only while primed.
+    let buffer: CVPixelBuffer
+}
+
 #if MONIVIEW_RECORDER_TESTING
 /// Synchronized controls and observations for the standalone fault-injection build.
 /// Ordinary app builds omit this type and every call to it.
@@ -132,6 +137,16 @@ final class CaptureRecorder {
     private var startTime: CMTime?
     private var completion: ((Error?) -> Void)?
     private var videoCount = 0
+    // Video timestamps must be strictly increasing for AVAssetWriter. UVC cards and window
+    // streams can repeat or slightly rewind a PTS after a reconfiguration; one such sample must
+    // not abort an otherwise healthy recording.
+    private var lastVideoTime: CMTime?
+    private var lastVideoBuffer: CVPixelBuffer?
+    /// Set when a window recording began from a cached frame, so a still-idle tail can be
+    /// represented instead of producing a one-frame video beside minutes of audio.
+    private var idlePrimed = false
+    private var videoWidth = 0
+    private var videoHeight = 0
     private var finishing = false
     private var finishWritingStarted = false
     private var audioDrainDeadline: TimeInterval?
@@ -177,10 +192,6 @@ final class CaptureRecorder {
             let accessed = destination.startAccessingSecurityScopedResource()
             var replacementDirectory: URL?
             do {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: destination.deletingLastPathComponent().path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                    throw CaptureFailure.message("录制目标文件夹不存在。")
-                }
                 // A save-panel grant covers the selected file, not an arbitrary sibling.
                 // Ask Foundation for staging space on the destination's volume so the
                 // completed recording can replace it safely under App Sandbox as well.
@@ -244,6 +255,9 @@ final class CaptureRecorder {
                 self.hasDestinationAccess = accessed
                 self.writer = writer; self.videoInput = video; self.audioInput = audioInput
                 self.startTime = nil; self.videoCount = 0; self.completion = completion
+                self.lastVideoTime = nil
+                self.lastVideoBuffer = nil; self.idlePrimed = false
+                self.videoWidth = width; self.videoHeight = height
                 self.writerGeneration = self.beginAccepting()
 #if MONIVIEW_RECORDER_TESTING
                 self.testing.markWriterStarted()
@@ -254,6 +268,53 @@ final class CaptureRecorder {
                 if let replacementDirectory { try? FileManager.default.removeItem(at: replacementDirectory) }
                 if accessed { destination.stopAccessingSecurityScopedResource() }
                 completion(error)
+            }
+        }
+    }
+
+    /// Starts the writer from the newest cached frame while a window source is idle.
+    /// ScreenCaptureKit emits `.idle` instead of a new frame when the content is unchanged;
+    /// without this anchor the audio FIFO fills for two seconds before the first video sample.
+    func prime(buffer: CVPixelBuffer) {
+        let retained = RetainedPixelBuffer(buffer: buffer)
+        queue.async {
+            let buffer = retained.buffer
+            guard let writer = self.writer, writer.status == .writing,
+                  self.startTime == nil, self.videoCount == 0 else { return }
+            // The cached frame supplies the picture only. Its PTS may predate the recording by
+            // minutes while a window is static; using it would leave a long blank lead-in.
+            // ScreenCaptureKit timestamps use the host clock, so the start point comes from it.
+            let time = CMClockGetTime(CMClockGetHostTimeClock())
+            writer.startSession(atSourceTime: time)
+            self.startTime = time
+            switch self.mode {
+            case .processed(let settings):
+                guard let adaptor = self.adaptor, let pool = adaptor.pixelBufferPool else { return }
+                var destination: CVPixelBuffer?
+                guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
+                      let destination else { return }
+                let image = VideoImageProcessor.recordedImage(buffer, settings: settings)
+                self.context.render(image, to: destination, bounds: image.extent, colorSpace: self.colorSpace)
+                if adaptor.append(destination, withPresentationTime: time) {
+                    self.videoCount += 1; self.lastVideoTime = time; self.lastVideoBuffer = buffer
+                    self.idlePrimed = true
+                }
+            case .source:
+                var format: CMFormatDescription?
+                guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                                  imageBuffer: buffer,
+                                                                  formatDescriptionOut: &format) == noErr,
+                      let format else { return }
+                var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: time, decodeTimeStamp: .invalid)
+                var sample: CMSampleBuffer?
+                guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault,
+                                                              imageBuffer: buffer,
+                                                              formatDescription: format,
+                                                              sampleTiming: &timing,
+                                                              sampleBufferOut: &sample) == noErr,
+                      let sample, self.videoInput?.append(sample) == true else { return }
+                self.videoCount += 1; self.lastVideoTime = time; self.lastVideoBuffer = buffer
+                self.idlePrimed = true
             }
         }
     }
@@ -283,12 +344,28 @@ final class CaptureRecorder {
             }
             defer { self.drainAudio(writer: writer, generation: sampleGeneration) }
             let time = CMSampleBufferGetPresentationTimeStamp(sample)
-            guard time.isValid, time.seconds.isFinite else { self.recordDroppedSample(video: true); return }
+            guard time.isValid, time.isNumeric, time.seconds.isFinite, time >= .zero else {
+                self.recordDroppedSample(video: true); return
+            }
+            // Repeated or rewound PTS makes AVAssetWriterInput append fail and would abort the
+            // whole file. Drop that sample and keep the recording alive instead.
+            if let last = self.lastVideoTime, time <= last {
+                self.recordDroppedSample(video: true); return
+            }
             if self.startTime == nil {
                 writer.startSession(atSourceTime: time)
                 self.startTime = time
             }
-            guard let start = self.startTime, time >= start else { return }
+            guard let start = self.startTime, time >= start else {
+                self.recordDroppedSample(video: true); return
+            }
+            guard let imageBuffer = CMSampleBufferGetImageBuffer(sample),
+                  CVPixelBufferGetWidth(imageBuffer) == self.videoWidth,
+                  CVPixelBufferGetHeight(imageBuffer) == self.videoHeight else {
+                // A frame from the previous format would be rendered into the new pool with
+                // stale dimensions; drop it instead of writing a misaligned picture.
+                self.recordDroppedSample(video: true); return
+            }
             guard let input = self.videoInput, input.isReadyForMoreMediaData else {
                 self.recordDroppedSample(video: true)
                 return
@@ -317,7 +394,7 @@ final class CaptureRecorder {
                 appended = input.append(sample)
             }
             if !appended { self.fail(writer.error ?? CaptureFailure.message("录制写入失败。"), writer: writer, generation: sampleGeneration) }
-            else { self.videoCount += 1 }
+            else { self.videoCount += 1; self.lastVideoTime = time; self.lastVideoBuffer = imageBuffer }
         }
         lock.unlock()
     }
@@ -525,10 +602,50 @@ final class CaptureRecorder {
                 self.fail(CaptureFailure.message("没有收到视频帧。"), writer: writer, generation: generation)
                 return
             }
+            self.extendLastFrameIfIdle(writer: writer, generation: generation)
             self.videoInput?.markAsFinished()
             // This wall-clock deadline bounds tail draining, independently of the media budget.
             self.audioDrainDeadline = ProcessInfo.processInfo.systemUptime + 2
             self.drainAudio(writer: writer, generation: generation)
+        }
+    }
+
+    /// A window that stays unchanged after recording starts delivers no further frames. Repeat
+    /// the last picture at the stop instant so the video track covers the recorded interval
+    /// instead of ending at the priming frame while audio keeps running.
+    private func extendLastFrameIfIdle(writer: AVAssetWriter, generation: UInt64) {
+        guard idlePrimed, isCurrentWriter(writer, generation: generation),
+              let buffer = lastVideoBuffer, let last = lastVideoTime else { return }
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        let gap = CMTimeSubtract(now, last)
+        guard gap.isNumeric, gap.seconds.isFinite, gap.seconds > 0.25 else { return }
+        guard let input = videoInput, input.isReadyForMoreMediaData else { return }
+        switch mode {
+        case .processed(let settings):
+            guard let adaptor, let pool = adaptor.pixelBufferPool else { return }
+            var destination: CVPixelBuffer?
+            guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
+                  let destination else { return }
+            let image = VideoImageProcessor.recordedImage(buffer, settings: settings)
+            context.render(image, to: destination, bounds: image.extent, colorSpace: colorSpace)
+            if adaptor.append(destination, withPresentationTime: now) {
+                videoCount += 1; lastVideoTime = now
+            }
+        case .source:
+            var format: CMFormatDescription?
+            guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                              imageBuffer: buffer,
+                                                              formatDescriptionOut: &format) == noErr,
+                  let format else { return }
+            var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: now, decodeTimeStamp: .invalid)
+            var sample: CMSampleBuffer?
+            guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault,
+                                                          imageBuffer: buffer,
+                                                          formatDescription: format,
+                                                          sampleTiming: &timing,
+                                                          sampleBufferOut: &sample) == noErr,
+                  let sample, input.append(sample) else { return }
+            videoCount += 1; lastVideoTime = now
         }
     }
 

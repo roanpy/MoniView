@@ -48,6 +48,19 @@ final class PreviewIngestGate: @unchecked Sendable {
         return body()
     }
 
+    /// Unlike `switchOwner`, this refuses when another source has already taken the preview.
+    /// A device configuration task that finishes late must not steal a window source's mailbox.
+    @discardableResult
+    func switchOwnerIfCurrent(to newOwner: CaptureSourceKind, if expected: CaptureSourceKind,
+                              _ body: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard owner == expected else { return false }
+        owner = newOwner
+        body()
+        return true
+    }
+
     /// The owner, read atomically. For queries and reporting only; frame ingest uses run(forOwner:).
     var currentOwner: CaptureSourceKind {
         lock.lock(); defer { lock.unlock() }
@@ -839,6 +852,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// their own queues, so a frame the previous source already pushed must be refused rather than
     /// written after the switch cleared the mailbox. See PreviewIngestGate.
     private let ingestGate = PreviewIngestGate()
+    /// Token of the device input currently allowed to publish frames. Written and read under
+    /// `ingestGate`'s lock so a switch cannot expose a stale token to the capture queue.
+    private var deviceIngestToken: UInt64 = 0
     /// Main-queue mirror of ScreenCaptureKit state; starting alone is not recordable.
     private var macWindowCaptureIsRunning = false
     private var configuredMacWindowSize = CGSize.zero
@@ -972,7 +988,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     /// frame carries no producer identity to compare against.
     @discardableResult
     private func beginPreviewInput(owner: CaptureSourceKind, blankPreview: Bool = true) -> UInt64 {
-        ingestGate.switchOwner(to: owner) { frames.beginInput(blankPreview: blankPreview) }
+        ingestGate.switchOwner(to: owner) {
+            let token = frames.beginInput(blankPreview: blankPreview)
+            if owner == .device { deviceIngestToken = token }
+            return token
+        }
     }
 
     func refreshMacWindows() {
@@ -1153,6 +1173,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 let finished = self.recordingFinished; self.recordingFinished = nil; finished?()
             }
         }
+        // ScreenCaptureKit reports `.idle` for an unchanged window, so no video frame may
+        // arrive for minutes. Anchor the writer with the newest cached frame immediately.
+        if let snapshot = frames.latestSnapshot() {
+            recorder.prime(buffer: snapshot.buffer)
+        }
     }
 
     func refreshDevices(force: Bool = true) {
@@ -1191,7 +1216,11 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             return
         }
         if let id = selectedVideoID, videos.contains(where: { $0.uniqueID == id }) {
-            if force { selectVideoDevice(id: id) }
+            // Returning from System Settings after granting camera access must retry the
+            // selected device; otherwise the denied state survives until a manual reselect.
+            if force || permissionDenied || (!isRunning && !isSwitchingVideoDevice) {
+                selectVideoDevice(id: id)
+            }
             return
         }
         // No capture input means no automatic camera fallback, including after unplug.
@@ -1274,9 +1303,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                         // survive the switch; the blank stays requested until a frame from the
                         // new device arrives.
                         self.videoQueue.sync {}
-                        DispatchQueue.main.async { [weak self] in
-                            guard let self, self.videoConfiguration.isCurrent(generation), self.sourceKind == .device else { return }
-                            self.ingestGate.switchOwner(to: .device) { self.frames.clear(blankPreview: true) }
+                        // Publish the new input and clear the mailbox synchronously on this queue.
+                        // A deferred main-queue clear could otherwise erase the first frame the
+                        // new session already delivered, leaving the preview blank.
+                        self.ingestGate.switchOwnerIfCurrent(to: .device, if: .device) {
+                            guard self.videoConfiguration.isCurrent(generation) else { return }
+                            self.deviceIngestToken = self.frames.beginInput(blankPreview: true)
                         }
                     }
                     // The session negotiates its own preset format at commit/start, and a format
@@ -1871,7 +1903,10 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func startRecording(to url: URL) {
-        guard !isRecording, !isFittedWindowPreviewActive, !isMacWindowPreviewResizing else { return }
+        // A format switch can still have frames from the previous size in flight; recording
+        // those into a writer sized for the new format produces a corrupt picture.
+        guard !isRecording, !isFittedWindowPreviewActive, !isMacWindowPreviewResizing,
+              pendingVideoConfiguration == nil, !isSwitchingVideoDevice else { return }
         let windowSize = configuredMacWindowSize
         if sourceKind == .macWindow {
             guard CaptureSessionPolicy.canRecordWindowCapture(
@@ -1958,8 +1993,9 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @discardableResult
     func ingestDeviceFrame(_ sampleBuffer: CMSampleBuffer, buffer: CVPixelBuffer) -> Bool {
         ingestGate.run(forOwner: .device) {
-            _ = frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                           formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer))
+            guard frames.put(buffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                             formatDescription: CMSampleBufferGetFormatDescription(sampleBuffer),
+                             token: deviceIngestToken) != nil else { return false }
             recorder.append(sampleBuffer, video: true)
             return true
         } ?? false
@@ -2169,8 +2205,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         guard let self else { return }
         var payload = snapshot
         if let device = self.selectedDevice {
-            payload["configuredDeviceFPS"] = 1 / device.activeVideoMinFrameDuration.seconds
-            payload["deviceMaxDuration"] = device.activeVideoMaxFrameDuration.seconds
+            // A just-connected card can report zero/invalid durations briefly. JSONSerialization
+            // raises an Objective-C exception for NaN/Inf that `try?` cannot catch.
+            let minSeconds = device.activeVideoMinFrameDuration.seconds
+            payload["configuredDeviceFPS"] = minSeconds.isFinite && minSeconds > 0 ? 1 / minSeconds : 0
+            let maxSeconds = device.activeVideoMaxFrameDuration.seconds
+            payload["deviceMaxDuration"] = maxSeconds.isFinite ? maxSeconds : 0
         }
         if let connection = self.videoOutput.connection(with: .video) {
             payload["connectionMinDuration"] = connection.videoMinFrameDuration.seconds.isFinite ? connection.videoMinFrameDuration.seconds : 0

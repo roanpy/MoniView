@@ -138,7 +138,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var sourceStreamEpoch: UInt64?
     private var nextPresentationToken: UInt64 = 0
     private struct Presentation {
-        let deadline: Double
+        var deadline: Double
         var gpuCompleted = false
     }
     private var outstandingPresentations: [UInt64: Presentation] = [:]
@@ -173,7 +173,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// A blank draw that was submitted and is waiting for its presentation callback. A callback
     /// that never arrives re-arms the request, and a second loss retires the layer through the
     /// same path as a lost frame presentation.
-    private var blankPresentationInFlight: (epoch: UInt64, deadline: Double)?
+    private var blankPresentationInFlight: (epoch: UInt64, deadline: Double, token: UInt64)?
     private var blankPresentationAttempts = 0
     private var blankRetryScheduled = false
     /// How long a submitted blank may wait for its presentation callback before it is retried.
@@ -599,6 +599,19 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
 
     /// Redraw when the window becomes visible again, even if no new frame has arrived.
     @objc private func windowBecameVisible() {
+        // Presentation callbacks are deferred while the window is hidden. Give the submissions
+        // from before the pause a fresh grace period so returning from occlusion does not look
+        // like a lost callback and destroy a healthy layer.
+        let now = CACurrentMediaTime()
+        for token in Array(outstandingPresentations.keys) {
+            guard var presentation = outstandingPresentations[token] else { continue }
+            presentation.deadline = max(presentation.deadline, now + 0.5)
+            outstandingPresentations[token] = presentation
+            if presentation.gpuCompleted {
+                // The extended deadline moved the shared recovery point; re-arm it.
+                schedulePresentationRecoveryCheck(token: token)
+            }
+        }
         resetInterpolationForDisplay()
         forceDraw = true
         requestRender()
@@ -758,28 +771,49 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             // the new source's first frame.
             let blankEpoch = frames.streamGeneration()
             if blankEpoch != sourceStreamEpoch { adoptSourceStreamEpoch(blankEpoch) }
+            // The clear consumes a drawable and a GPU command exactly like a frame. Putting it
+            // behind the same presentation and in-flight limits avoids a synchronous
+            // `nextDrawable` stall when three frames are already outstanding.
+            guard outstandingPresentations.count < 3 else {
+                frames.setPreviewState("presentation-bound")
+                forceDraw = true
+                scheduleBlankRetry()
+                return
+            }
+            guard inFlight.wait(timeout: .now()) == .success else {
+                frames.setPreviewState("gpu-busy")
+                forceDraw = true
+                scheduleBlankRetry()
+                return
+            }
+            guard let requestedEpoch = frames.consumeBlankRequest() else {
+                // A frame for the current stream arrived first and supersedes the blank.
+                inFlight.signal()
+                forceDraw = true
+                requestRender()
+                return
+            }
             guard let drawable = currentDrawable, let command = commands.makeCommandBuffer() else {
-                // No drawable right now: keep the request and retry on the next render.
+                // No drawable right now: release the slot, keep the request and retry.
+                inFlight.signal()
+                _ = frames.rearmBlankRequest(epoch: requestedEpoch)
                 forceDraw = true
                 scheduleBlankRetry()
                 return
             }
             // The encoder is what can fail here. The request is taken only once the command can
             // really carry the clear, so a failed encoder does not consume it as if the drawable
-            // had been cleared.
+            // had been cleared. The request is re-armed below by the retry path.
             guard let encoder = command.makeRenderCommandEncoder(
                 descriptor: Self.blankRenderPass(for: drawable, clearColor: clearColor)) else {
+                inFlight.signal()
+                _ = frames.rearmBlankRequest(epoch: requestedEpoch)
                 forceDraw = true
                 scheduleBlankRetry()
                 return
             }
-            if let requestedEpoch = frames.consumeBlankRequest() {
-                presentBlankFrame(drawable, command: command, encoder: encoder, epoch: requestedEpoch)
-                return
-            }
-            // A frame for the current stream arrived first and supersedes the blank. The empty
-            // command is dropped and that frame is drawn by the path below.
-            encoder.endEncoding()
+            presentBlankFrame(drawable, command: command, encoder: encoder, epoch: requestedEpoch)
+            return
         }
         guard let initial = frames.latestSnapshot() else { frames.setPreviewState("no-input"); return }
         var (buffer, sequence, receivedAt) = (initial.buffer, initial.sequence, initial.receivedAt)
@@ -994,6 +1028,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             if CACurrentMediaTime() - lastGeneratedPresentationTime > 0.25 {
                 frames.setInterpolationState("重复画面 · 跳过插帧")
             }
+            // An exact duplicate intentionally presents nothing. The next real frame must not
+            // be measured against a gap created by deduplication, or a static scene reads as a
+            // missed presentation and demotes the midpoint quality path.
+            lastAcceptedPresentationAt = 0
             inFlight.signal()
             return
         }
@@ -1205,10 +1243,18 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         let originalExtent = image.extent
         image = VideoImageProcessor.color(image, settings: settings)
         let source = image.extent
-        let screenScale = aspectMode == .fit ? min(size.width / source.width, size.height / source.height) : max(size.width / source.width, size.height / source.height)
+        // The capture's own dimensions, not a shrunken interpolation working image, define the
+        // fit and the long-edge target. Midpoints are produced at a reduced working size; using
+        // that size made `.native` resolve to scale 1 and skipped MetalFX for every midpoint.
+        let captureWidth = Double(CVPixelBufferGetWidth(buffer))
+        let captureHeight = Double(CVPixelBufferGetHeight(buffer))
+        let referenceWidth = captureWidth > 0 ? captureWidth : source.width
+        let referenceHeight = captureHeight > 0 ? captureHeight : source.height
+        let screenScale = aspectMode == .fit ? min(size.width / referenceWidth, size.height / referenceHeight) : max(size.width / referenceWidth, size.height / referenceHeight)
         // Long-edge targets follow the source's own long edge, so portrait signals are not over-scaled.
         let displayScale = max(1, screenScale)
-        let sourceLongEdge = max(source.width, source.height)
+        let sourceLongEdge = max(referenceWidth, referenceHeight)
+        let workingLongEdge = max(source.width, source.height)
         let visibleLongEdge = sourceLongEdge * displayScale
         // This is backing-store size; scaled display modes can differ from native panel pixels.
         let screenPixels: Double? = (window.screen ?? NSScreen.main).map { Double(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
@@ -1225,7 +1271,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         // sustained comfortable pairs allow the full pass again.
         let smoothMidpoint = generatedMidpoint
             && (settings.frameInterpolation == .efficient || midpointSpatialDemoted)
-        let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / sourceLongEdge) : 1
+        let workingScale = settings.enhancementEnabled && !smoothMidpoint ? max(1, targetLongEdge / workingLongEdge) : 1
         let workingWidth = Int((source.width * workingScale).rounded())
         let workingHeight = Int((source.height * workingScale).rounded())
         var usedMetalFX = false
@@ -1683,28 +1729,50 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         encoder.endEncoding()
         // A failed command leaves whatever was on screen untouched, so the clear still has to
         // happen: re-arm the request and draw again.
+        let semaphore = inFlight
+        blankPresentationAttempts += 1
+        let deadline = CACurrentMediaTime() + Self.blankPresentationDeadline
+        // The clear uses one of the drawables the compositor can still hold; it owns a
+        // presentation token until its own callback or GPU failure releases it. A stream switch
+        // drops only the logical request, never this token.
+        nextPresentationToken &+= 1
+        let token = nextPresentationToken
+        outstandingPresentations[token] = Presentation(deadline: deadline)
+        blankPresentationInFlight = (epoch, deadline, token)
         command.addCompletedHandler { [weak self] completed in
-            guard completed.status != .completed else { return }
+            // The clear occupies the shared GPU slot; release it as soon as the command finishes.
+            semaphore.signal()
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.failBlankPresentation(epoch: epoch)
+                if completed.status == .completed {
+                    // The drawable may still be waiting for its presentation callback; keep the
+                    // slot counted but mark the GPU pass complete for shared recovery checks.
+                    if var presentation = self.outstandingPresentations[token] {
+                        presentation.gpuCompleted = true
+                        self.outstandingPresentations[token] = presentation
+                        self.schedulePresentationRecoveryCheck(token: token)
+                    }
+                } else {
+                    self.failBlankPresentation(epoch: epoch, token: token)
+                }
+                // The semaphore may have blocked a newer frame while the blank was current and
+                // then superseded. Wake the latest state even when this token is no longer the
+                // active blank request.
+                self.requestRenderIfStateChanged()
             }
         }
         command.present(drawable)
         // A lost presentation callback is a failure like any other: it is retried, and after a
-        // second loss the layer is retired so SwiftUI builds a fresh one. An older generation's
-        // callback cannot confirm or clear the new blank because the epoch must match.
+        // second loss the layer is retired so SwiftUI builds a fresh one. Every callback releases
+        // only its own token, so a late callback cannot clear a newer attempt's slot.
         drawable.addPresentedHandler { [weak self] presented in
             #if MONIVIEW_PREVIEW_TESTING
             guard !(self?.suppressBlankPresentedCallbacks ?? false) else { return }
             #endif
             guard presented.presentedTime > 0 else { return }
-            DispatchQueue.main.async { self?.confirmBlankPresentation(epoch: epoch) }
+            DispatchQueue.main.async { self?.confirmBlankPresentation(epoch: epoch, token: token) }
         }
-        blankPresentationAttempts += 1
-        let deadline = CACurrentMediaTime() + Self.blankPresentationDeadline
-        blankPresentationInFlight = (epoch, deadline)
-        scheduleBlankDeadline(epoch: epoch, deadline: deadline)
+        scheduleBlankDeadline(epoch: epoch, deadline: deadline, token: token)
         command.commit()
         forceDraw = false
         frames.setPreviewState("no-input")
@@ -1713,28 +1781,63 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// Wakes the renderer for the blank's own deadline. The display link only runs while
     /// interpolation is on, so a lost presentation callback must be able to trigger its retry
     /// without any input frame arriving.
-    private func scheduleBlankDeadline(epoch: UInt64, deadline: Double) {
+    private func scheduleBlankDeadline(epoch: UInt64, deadline: Double, token: UInt64) {
         let delay = max(0, deadline - CACurrentMediaTime())
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, let inFlight = self.blankPresentationInFlight,
-                  inFlight.epoch == epoch, CACurrentMediaTime() >= inFlight.deadline else { return }
-            if self.retryLostBlankIfNeeded() { return }
+            guard let self, CACurrentMediaTime() >= deadline,
+                  self.outstandingPresentations[token] != nil else { return }
+            // This watchdog belongs to the submitted drawable, not to the logical request: a
+            // newer stream may have cleared the request while the old drawable is still counted.
+            if let inFlight = self.blankPresentationInFlight,
+               inFlight.epoch == epoch, inFlight.token == token {
+                if self.retryLostBlankIfNeeded() { return }
+            }
+            // The first watchdog fires at the request deadline; shared recovery needs the
+            // presentation deadline plus a grace period. Keep a token-scoped check alive even
+            // when this blank was superseded by a newer stream.
+            self.schedulePresentationRecoveryCheck(token: token)
             self.forceDraw = true
             self.requestRender()
         }
     }
 
-    /// Clears the blank record once its own presentation callback arrives. Only the epoch that
-    /// was submitted may do that, so a late callback from a superseded source cannot report a
-    /// blank it did not present.
-    private func confirmBlankPresentation(epoch: UInt64) {
-        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return }
-        clearBlankTracking()
+    /// Ensures a submitted token gets a shared recovery check at its own `deadline + 0.25 s`,
+    /// independent of the logical blank request that may have been superseded. A GPU that is
+    /// still running re-arms this from its completion callback.
+    private func schedulePresentationRecoveryCheck(token: UInt64) {
+        guard let presentation = outstandingPresentations[token], presentation.gpuCompleted else { return }
+        let due = presentation.deadline + 0.25 + 0.02
+        let delay = max(0, due - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let current = self.outstandingPresentations[token], current.gpuCompleted else { return }
+            if CACurrentMediaTime() < current.deadline + 0.25 {
+                // A visibility grace period moved the deadline after this check was scheduled.
+                self.schedulePresentationRecoveryCheck(token: token)
+                return
+            }
+            self.forceDraw = true
+            self.requestRender()
+        }
+    }
+
+    /// Releases only the token that its own drawable reported. The logical request is cleared
+    /// only when it still belongs to this attempt.
+    private func confirmBlankPresentation(epoch: UInt64, token: UInt64) {
+        outstandingPresentations.removeValue(forKey: token)
+        if let inFlight = blankPresentationInFlight, inFlight.epoch == epoch, inFlight.token == token {
+            blankPresentationInFlight = nil
+            blankPresentationAttempts = 0
+        }
+        // The drawable that blocked the shared GPU slot has completed; a frame that lost its
+        // draw while this blank was active must get another chance even if the request itself was
+        // superseded by a newer stream.
+        requestRenderIfStateChanged()
     }
 
     /// Forgets the blank registration and its attempt count. Called when the registration belongs
-    /// to an input that a newer stream replaced, so a stale confirm, failure or timeout cannot
-    /// retire the layer the new stream is presenting into.
+    /// to an input that a newer stream replaced, so a stale confirm or failure cannot retire the
+    /// layer the new stream is presenting into. A submitted drawable keeps its presentation token
+    /// until its own callback or the shared deadline check releases it.
     private func clearBlankTracking() {
         blankPresentationInFlight = nil
         blankPresentationAttempts = 0
@@ -1743,17 +1846,21 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// A clearing command that did not complete leaves the previous picture on screen. Only the
     /// generation that submitted it may reclaim the request, so an older switch's failure cannot
     /// touch the blank a newer one installed.
-    private func failBlankPresentation(epoch: UInt64) {
+    private func failBlankPresentation(epoch: UInt64, token: UInt64) {
         // A repeated GPU failure takes the same bounded path as a lost callback: retry, and after
         // the attempt limit retire the layer instead of resubmitting the same failing command.
-        abandonBlankPresentation(epoch: epoch)
+        abandonBlankPresentation(epoch: epoch, token: token)
     }
 
     /// Ends the registration of a blank that could not be presented and schedules its retry.
     /// Returns true when the layer was retired instead, so the caller stops drawing into it.
     @discardableResult
-    private func abandonBlankPresentation(epoch: UInt64) -> Bool {
-        guard let inFlight = blankPresentationInFlight, inFlight.epoch == epoch else { return false }
+    private func abandonBlankPresentation(epoch: UInt64, token: UInt64) -> Bool {
+        // A failed command never presents, so this drawable can be released. A timeout (see
+        // `retryLostBlankIfNeeded`) must not enter here: the drawable may still present later.
+        outstandingPresentations.removeValue(forKey: token)
+        guard let inFlight = blankPresentationInFlight,
+              inFlight.epoch == epoch, inFlight.token == token else { return false }
         blankPresentationInFlight = nil
         // Only a blank that is still the current one may be retried: a newer stream, or a picture
         // that took the mailbox over, makes this registration obsolete and retrying it would
@@ -1797,7 +1904,26 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     /// when the layer was retired, so the caller stops drawing into it.
     private func retryLostBlankIfNeeded() -> Bool {
         guard let blank = blankPresentationInFlight, CACurrentMediaTime() > blank.deadline else { return false }
-        return abandonBlankPresentation(epoch: blank.epoch)
+        // The drawable's presentation callback may still arrive; keep its token counted. Only the
+        // logical request is dropped and re-armed. Repeated timeouts retire the layer, which also
+        // discards the stale counts.
+        blankPresentationInFlight = nil
+        guard frames.isBlankStillNeeded(forEpoch: blank.epoch) else {
+            blankPresentationAttempts = 0
+            return false
+        }
+        frames.rearmBlankRequest(epoch: blank.epoch)
+        forceDraw = true
+        requestRender()
+        guard blankPresentationAttempts >= Self.maximumBlankPresentationAttempts else { return false }
+        blankPresentationAttempts = 0
+        retiringForPresentationFailure = true
+        comfortableMidpoints = 0
+        interpolationLink?.invalidate(); queuedFrames.removeAll()
+        frames.setActiveMultiplier(nil)
+        frames.setInterpolationState("呈现中断，重建预览")
+        onPresentationRecovery?()
+        return true
     }
 }
 

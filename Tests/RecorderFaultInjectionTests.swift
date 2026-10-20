@@ -532,6 +532,64 @@ do {
           "rejected start created no destination")
 }
 
+// 12. Non-increasing or mismatched video samples must be dropped, not abort the recording.
+print("Scenario 12: video PTS and size guards")
+do {
+    let recorder = CaptureRecorder()
+    let box = CompletionBox()
+    let url = workRoot.appendingPathComponent("video-guards.mov")
+    startRecording(recorder, url: url, box: box, audio: false)
+    feedVideo(recorder, 0)
+    feedVideo(recorder, 1)
+    feedVideo(recorder, 2)
+    // Same timestamp as the previous accepted sample.
+    recorder.append(makeVideoSample(index: 2), video: true)
+    // Rewound timestamp.
+    recorder.append(makeVideoSample(index: 1), video: true)
+    // New timestamp but the wrong frame size for this writer.
+    recorder.append(makeVideoSample(index: 3, width: 640, height: 360), video: true)
+    // The valid continuation must still be accepted.
+    feedVideo(recorder, 3)
+    feedVideo(recorder, 4)
+    recorder.stop()
+    checkSingleCompletion(box, "PTS and size guards")
+    check(box.firstError == nil, "bad video samples do not abort the recording")
+    check(recorder.droppedSamples().video >= 3, "duplicate, rewound and wrong-size samples are counted as drops")
+    let output = videoTrackPTS(url)
+    check(!output.isEmpty && strictlyIncreasing(output), "accepted video PTS stays strictly increasing")
+}
+
+// 13. A window stream may stay idle; priming with the cached frame anchors the writer.
+print("Scenario 13: primed idle window recording")
+do {
+    let recorder = CaptureRecorder()
+    let box = CompletionBox()
+    let url = workRoot.appendingPathComponent("primed.mov")
+    startRecording(recorder, url: url, box: box, audio: false)
+    var buffer: CVPixelBuffer?
+    precondition(CVPixelBufferCreate(kCFAllocatorDefault, 320, 180, kCVPixelFormatType_32BGRA,
+                                    nil, &buffer) == kCVReturnSuccess && buffer != nil,
+                 "prime buffer")
+    CVPixelBufferLockBaseAddress(buffer!, [])
+    if let base = CVPixelBufferGetBaseAddress(buffer!) {
+        memset(base, 72, CVPixelBufferGetBytesPerRow(buffer!) * 180)
+    }
+    CVPixelBufferUnlockBaseAddress(buffer!, [])
+    recorder.prime(buffer: buffer!)
+    // Stay idle past the 0.25 s tail threshold so the stop path has to extend the picture.
+    Thread.sleep(forTimeInterval: 0.6)
+    recorder.stop()
+    checkSingleCompletion(box, "primed recording")
+    check(box.firstError == nil, "a primed idle window recording succeeds without a new frame")
+    let primedPTS = videoTrackPTS(url)
+    check(!primedPTS.isEmpty, "primed recording contains a video sample")
+    check(primedPTS.count >= 2, "an idle tail is closed with a final frame")
+    if primedPTS.count >= 2 {
+        check(CMTimeSubtract(primedPTS[primedPTS.count - 1], primedPTS[0]).seconds >= 0.25,
+              "the final frame covers the idle interval")
+    }
+}
+
 if keepOutputs {
     print("kept synthetic outputs at \(workRoot.path)")
 } else {

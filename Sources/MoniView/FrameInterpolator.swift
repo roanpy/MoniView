@@ -325,8 +325,14 @@ final class FrameInterpolator {
               let parameters = VTLowLatencyFrameInterpolationParameters(sourceFrame: source, previousFrame: prior, interpolationPhase: [0.5], destinationFrames: [output]) else { return nil }
         var textures: [CVMetalTexture] = []
         var tasks: [CIRenderTask] = []
+        // The Core Image fallback converts the source images asynchronously. Keep the source
+        // pixel buffers and images alive through GPU completion even when `used420v` is false;
+        // the capture pool may recycle them as soon as this call returns.
+        var retainedInputs: [Any] = [previous, current]
+        if let previousBuffer { retainedInputs.append(previousBuffer) }
+        if let currentBuffer { retainedInputs.append(currentBuffer) }
         // Freeze complete lifetime ownership on every return, including partial encoding.
-        defer { retain(session, parameters, buffers, textures, tasks, command: command) }
+        defer { retain(session, parameters, buffers, textures, tasks, extra: retainedInputs, command: command) }
         var used420v = originalInputs
         if !originalInputs, let previousBuffer, let currentBuffer, let resize420v,
            CVPixelBufferGetWidth(previousBuffer) == CVPixelBufferGetWidth(currentBuffer),
@@ -381,9 +387,9 @@ final class FrameInterpolator {
         session.processor.process(with: command, parameters: parameters)
         return CIImage(cvPixelBuffer: buffers[2], options: [.colorSpace: videoSpace])
     }
-    private func retain(_ owner: Session, _ parameters: VTLowLatencyFrameInterpolationParameters, _ buffers: [CVPixelBuffer], _ textures: [CVMetalTexture], _ tasks: [CIRenderTask], command: MTLCommandBuffer) {
+    private func retain(_ owner: Session, _ parameters: VTLowLatencyFrameInterpolationParameters, _ buffers: [CVPixelBuffer], _ textures: [CVMetalTexture], _ tasks: [CIRenderTask], extra: [Any] = [], command: MTLCommandBuffer) {
         command.addCompletedHandler { [weak self] completed in
-            withExtendedLifetime((owner, parameters, buffers, textures, tasks)) {}
+            withExtendedLifetime((owner, parameters, buffers, textures, tasks, extra)) {}
             guard completed.status != .completed else { return }
             DispatchQueue.main.async {
                 guard let self, self.session === owner else { return }
