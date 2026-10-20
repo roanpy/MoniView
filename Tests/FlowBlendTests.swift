@@ -74,6 +74,7 @@ private final class FlowBlendSuite {
         checkMotion(name: "BGRA 1080p/720p horizontal +48", matrix: nil, dx: 48, dy: 0, sourceWidth: 1920, sourceHeight: 1080)
         checkMotion(name: "420v 1080p/720p diagonal -48,+48", matrix: .rec709, dx: -48, dy: 48, sourceWidth: 1920, sourceHeight: 1080)
         checkInFlightImages()
+        checkMultiPhaseLifetime()
         for matrix in [nil, VideoMatrix.rec709] {
             benchmark(sourceWidth: 1280, sourceHeight: 720, width: 1280, height: 720, matrix: matrix, present: false)
             benchmark(sourceWidth: 1280, sourceHeight: 720, width: 1280, height: 720, matrix: matrix, present: true)
@@ -342,6 +343,69 @@ private final class FlowBlendSuite {
             check(error.mean <= 0.5 && error.maximum <= 2, "in-flight static midpoint \(index)",
                   String(format: "RGB MAE %.3f codes, max %d", error.mean, error.maximum))
         }
+    }
+
+    /// A 3× pair runs one analysis and renders two phases. The first phase is presented by the
+    /// producing command; the second is queued for the next one. Reusing the pooled resources
+    /// for another pair must not overwrite that queued output.
+    private func checkMultiPhaseLifetime() {
+        let width = 256, height = 192
+        interpolator.prepare(width: width, height: height)
+        func solid(_ b: UInt8, _ g: UInt8, _ r: UInt8) -> [UInt8] {
+            var bytes = [UInt8](repeating: 255, count: width * height * 4)
+            for index in stride(from: 0, to: bytes.count, by: 4) {
+                bytes[index] = b; bytes[index + 1] = g; bytes[index + 2] = r; bytes[index + 3] = 255
+            }
+            return bytes
+        }
+        let previousBuffer = Self.makeBGRA(width: width, height: height, bytes: solid(0, 0, 255), colorSpace: colorSpace)
+        let currentBuffer = Self.makeBGRA(width: width, height: height, bytes: solid(255, 0, 0), colorSpace: colorSpace)
+        let previous = CIImage(cvPixelBuffer: previousBuffer)
+        let current = CIImage(cvPixelBuffer: currentBuffer)
+        let producing = makeCommand()
+        let pair = interpolator.interpolatePair(previous: previous, current: current,
+            previousTime: CMTime(value: 0, timescale: 60), currentTime: CMTime(value: 1, timescale: 60),
+            context: context, command: producing,
+            previousBuffer: previousBuffer, currentBuffer: currentBuffer,
+            blendFactors: [0.25, 0.75])
+        check(pair.count == 2, "multi-phase pair returns two images", "actual \(pair.count)")
+        guard pair.count == 2 else { return }
+        let phase0 = makeReadback(width: width, height: height)
+        let phase1 = makeReadback(width: width, height: height)
+        context.render(pair[0], to: phase0, commandBuffer: producing,
+                       bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: colorSpace)
+        producing.commit(); complete(producing)
+
+        // Reuse the pool with a pair whose colors would be obvious if they leaked into phase 1.
+        let otherPrevious = Self.makeBGRA(width: width, height: height, bytes: solid(0, 255, 0), colorSpace: colorSpace)
+        let otherCurrent = Self.makeBGRA(width: width, height: height, bytes: solid(0, 255, 255), colorSpace: colorSpace)
+        let reuse = makeCommand()
+        guard let _ = interpolator.interpolate(previous: CIImage(cvPixelBuffer: otherPrevious),
+            current: CIImage(cvPixelBuffer: otherCurrent),
+            previousTime: CMTime(value: 0, timescale: 60), currentTime: CMTime(value: 1, timescale: 60),
+            context: context, command: reuse,
+            previousBuffer: otherPrevious, currentBuffer: otherCurrent, blendFactor: 0.5) else {
+            fail("multi-phase reuse interpolation returned nil")
+        }
+        reuse.commit(); complete(reuse)
+
+        // The queued phase is consumed only now and must still carry the original red/blue blend.
+        let consuming = makeCommand()
+        context.render(pair[1], to: phase1, commandBuffer: consuming,
+                       bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: colorSpace)
+        consuming.commit(); complete(consuming)
+        func center(_ texture: MTLTexture) -> (b: Int, g: Int, r: Int) {
+            let bytes = read(texture)
+            let offset = ((height / 2) * width + width / 2) * 4
+            return (Int(bytes[offset]), Int(bytes[offset + 1]), Int(bytes[offset + 2]))
+        }
+        let first = center(phase0), queued = center(phase1)
+        check(first.r > first.b + 40, "multi-phase 0.25 output is previous-heavy",
+              "center B\(first.b) G\(first.g) R\(first.r)")
+        check(queued.b > queued.r + 40, "multi-phase 0.75 output is current-heavy",
+              "center B\(queued.b) G\(queued.g) R\(queued.r)")
+        check(queued.g < 40, "queued phase survives pooled resource reuse",
+              "center B\(queued.b) G\(queued.g) R\(queued.r)")
     }
 
     private func benchmark(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, matrix: VideoMatrix?, present: Bool) {

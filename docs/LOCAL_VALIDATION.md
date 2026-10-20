@@ -1,5 +1,11 @@
 # Native validation / 原生验证记录
 
+## Flow 3× shared analysis — 2026-10-20 / 光流 3× 共享分析
+
+FlowBlend multi-phase pairs now share one input conversion, luma pyramid and pair of bidirectional flow fields; only the per-phase warp runs separately. The first phase uses the pooled output presented by the producing command, while later phases each write a standalone texture owned by their returned CIImage, so a queued phase cannot be recycled into the pool before the command that consumes it. The single-phase 2× path delegates to the same routine with one blend factor and keeps its pooled output. No threshold, sample count or scheduling rule changed. / 光流多相位帧对现在共享一次输入转换、亮度金字塔与双向光流，仅每相位 warp 独立；首相位使用本命令呈现的池化输出，后续相位写入由返回 CIImage 持有的独立纹理，排队相位不会在消费命令之前被池复用。单相位 2× 走同一函数的单因子路径并保留池化输出；未改任何门槛、样本数或调度规则。
+
+`test-flow-blend.sh --gpu` passed 293/293 image checks, including a new multi-phase lifetime probe: after another differently colored pair reuses the pool, the queued 0.75 phase still reads B191/G0/R64. The 20→60 display fixture passed 7/7 with 20 source + 40 generated = 60 output and 139 complete pairs. Sol's strict 60→120 rerun passed 29/30 at 119.07 FPS, mean 8.3987 ms, P95 8.333 ms; two local runs had failed under a system load of roughly 5–8 with `omlx-server` at 123% CPU, so the environment-sensitive result is reported rather than hidden. The completion-handoff experiment (deferred UI publication) was implemented, measured as neutral, and rolled back after review found a stale-publication risk. / Flow GPU 图像检查 293/293，通过新增的多相位生命周期探针：另一对不同颜色帧对复用池后，排队的 0.75 相位仍为 B191/G0/R64。20→60 显示测试 7/7，源 20 + 生成 40 = 输出 60，139 个完整帧对。Sol 的严格 60→120 复跑 29/30、119.07 FPS、均值 8.3987ms、P95 8.333ms；本地两次在 `omlx-server` 123% CPU、load 5–8 的高负载下失败，最终如实记录环境敏感结果。完成回调交接实验已实现、测得无提升，并因过期发布风险回滚。
+
 ## Recording and scheduling safety — 2026-10-20 / 录制与调度安全修复
 
 Base `266fc74`, macOS 27.0.1, M5 Max, Jemdo Video not connected during the CPU runs. / 基线 `266fc74`，macOS 27.0.1，M5 Max；CPU 测试期间未连接 Jemdo 采集卡。

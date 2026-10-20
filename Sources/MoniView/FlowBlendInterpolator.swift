@@ -348,12 +348,30 @@ final class FlowBlendInterpolator {
                      context: CIContext, command: MTLCommandBuffer,
                      previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
                      fastInputResampling: Bool = false, blendFactor: Float = 0.5) -> CIImage? {
+        interpolatePair(previous: previous, current: current, previousTime: previousTime,
+                        currentTime: currentTime, context: context, command: command,
+                        previousBuffer: previousBuffer, currentBuffer: currentBuffer,
+                        fastInputResampling: fastInputResampling,
+                        blendFactors: [blendFactor]).first
+    }
+
+    /// Encodes every phase of one source pair on the same command. Input conversion, luma
+    /// pyramids and both flow fields are shared; each phase only runs its own warp. The first
+    /// image uses the pooled output presented by this command. Additional phases render into
+    /// standalone textures owned by the returned CIImage, so a queued phase cannot be handed
+    /// back to the resource pool before the command that later consumes it.
+    func interpolatePair(previous: CIImage, current: CIImage, previousTime: CMTime, currentTime: CMTime,
+                         context: CIContext, command: MTLCommandBuffer,
+                         previousBuffer: CVPixelBuffer? = nil, currentBuffer: CVPixelBuffer? = nil,
+                         fastInputResampling: Bool = false,
+                         blendFactors: [Float]) -> [CIImage] {
         guard previousTime.isNumeric, currentTime.isNumeric, currentTime > previousTime,
-              blendFactor.isFinite, (0.0...1.0).contains(blendFactor) else { return nil }
+              !blendFactors.isEmpty,
+              blendFactors.allSatisfy({ $0.isFinite && (0.0...1.0).contains($0) }) else { return [] }
         if let previousBuffer, let currentBuffer,
            CVPixelBufferGetWidth(previousBuffer) != CVPixelBufferGetWidth(currentBuffer) ||
            CVPixelBufferGetHeight(previousBuffer) != CVPixelBufferGetHeight(currentBuffer) {
-            return nil
+            return []
         }
 
         // CIImage is authoritative: a buffer may back a cropped, oriented or color-
@@ -366,16 +384,16 @@ final class FlowBlendInterpolator {
               previousExtent.width > 0, previousExtent.height > 0,
               currentExtent.width > 0, currentExtent.height > 0,
               abs(previousExtent.width - currentExtent.width) < 0.001,
-              abs(previousExtent.height - currentExtent.height) < 0.001 else { return nil }
+              abs(previousExtent.height - currentExtent.height) < 0.001 else { return [] }
         poolLock.lock()
         let requested = requestedSize
         poolLock.unlock()
-        guard requested != nil || (currentExtent.width <= 8192 && currentExtent.height <= 8192) else { return nil }
+        guard requested != nil || (currentExtent.width <= 8192 && currentExtent.height <= 8192) else { return [] }
         let width = requested?.width ?? Int(currentExtent.width.rounded())
         let height = requested?.height ?? Int(currentExtent.height.rounded())
-        guard width > 0, height > 0, width <= 8192, height <= 8192 else { return nil }
+        guard width > 0, height > 0, width <= 8192, height <= 8192 else { return [] }
         let size = Size(width: width, height: height)
-        guard let resources = takeResources(for: size) else { return nil }
+        guard let resources = takeResources(for: size) else { return [] }
 
         var renderTasks: [CIRenderTask] = []
         defer {
@@ -386,10 +404,10 @@ final class FlowBlendInterpolator {
             }
         }
         guard let previousTask = render(previous, into: resources.frame0, size: size, context: context,
-                                        command: command, fast: fastInputResampling) else { return nil }
+                                        command: command, fast: fastInputResampling) else { return [] }
         renderTasks.append(previousTask)
         guard let currentTask = render(current, into: resources.frame1, size: size, context: context,
-                                       command: command, fast: fastInputResampling) else { return nil }
+                                       command: command, fast: fastInputResampling) else { return [] }
         renderTasks.append(currentTask)
         let previousTexture = resources.frame0
         let currentTexture = resources.frame1
@@ -406,11 +424,38 @@ final class FlowBlendInterpolator {
               encodeFlow(source0: resources.currentLuma0, target0: resources.previousLuma0,
                          source1: resources.currentLuma1, target1: resources.previousLuma1,
                          source2: resources.currentLuma2, target2: resources.previousLuma2,
-                         destination: resources.backwardFlow, command: command),
-              encodeWarp(previous: previousTexture, current: currentTexture, resources: resources,
-                         blend: blendFactor, command: command) else { return nil }
+                         destination: resources.backwardFlow, command: command) else { return [] }
 
-        return CIImage(mtlTexture: resources.output, options: [.colorSpace: workingColorSpace])
+        var images: [CIImage] = []
+        for (index, blendFactor) in blendFactors.enumerated() {
+            let destination = index == 0
+                ? resources.output
+                : makeOutputTexture(size: size, label: "phase-\(index)")
+            guard let destination,
+                  encodeWarp(previous: previousTexture, current: currentTexture, resources: resources,
+                             destination: destination, blend: blendFactor, command: command) else {
+                return images
+            }
+            guard let image = CIImage(mtlTexture: destination, options: [.colorSpace: workingColorSpace]) else {
+                return images
+            }
+            images.append(image)
+        }
+        return images
+    }
+
+    /// A queued phase keeps its own output texture because the next presentation command may
+    /// run after the pooled analysis resources have been recycled.
+    private func makeOutputTexture(size: Size, label: String) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                   width: size.width,
+                                                                   height: size.height,
+                                                                   mipmapped: false)
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        let texture = device.makeTexture(descriptor: descriptor)
+        texture?.label = "FlowBlend \(label) \(size.width)x\(size.height)"
+        return texture
     }
 
     private func render(_ image: CIImage, into texture: MTLTexture, size: Size,
@@ -486,18 +531,20 @@ final class FlowBlendInterpolator {
     }
 
     private func encodeWarp(previous: MTLTexture, current: MTLTexture,
-                            resources: FrameResources, blend: Float,
+                            resources: FrameResources, destination: MTLTexture? = nil,
+                            blend: Float,
                             command: MTLCommandBuffer) -> Bool {
         guard let encoder = command.makeComputeCommandEncoder() else { return false }
+        let output = destination ?? resources.output
         encoder.setComputePipelineState(warpPipeline)
         encoder.setTexture(previous, index: 0)
         encoder.setTexture(current, index: 1)
         encoder.setTexture(resources.forwardFlow, index: 2)
         encoder.setTexture(resources.backwardFlow, index: 3)
-        encoder.setTexture(resources.output, index: 4)
+        encoder.setTexture(output, index: 4)
         var blendCopy = blend
         encoder.setBytes(&blendCopy, length: MemoryLayout<Float>.size, index: 0)
-        dispatch(encoder, width: resources.size.width, height: resources.size.height, pipeline: warpPipeline)
+        dispatch(encoder, width: output.width, height: output.height, pipeline: warpPipeline)
         encoder.endEncoding()
         return true
     }

@@ -1164,14 +1164,34 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                         // presented by this command; the remaining ones and the endpoint wait
                         // in the bounded queue so a 3x pair fills its period in sequence.
                         var producedImages: [CIImage] = []
-                        for phase in phases {
-                            guard queuedFrames.count + producedImages.count + 1 < Self.maximumQueuedFrames else { break }
-                            guard let midpoint = interpolator.interpolate(previous: CIImage(cvPixelBuffer: pair.previousBuffer), current: sourceImage,
-                                previousTime: pair.previousPTS, currentTime: pair.currentPTS, context: ciContext, command: command,
-                                previousBuffer: pair.previousBuffer, currentBuffer: buffer,
-                                fastInputResampling: settings.frameInterpolation == .efficient,
-                                blendFactor: phase) else { break }
-                            producedImages.append(midpoint)
+                        if phases.count > 1, let flow = interpolator as? FlowBlendInterpolator {
+                            // A multi-phase flow pair shares one input conversion, pyramid and
+                            // bidirectional flow pass. Keep the same bounded-queue capacity the
+                            // per-phase loop used, then encode every phase it can present.
+                            let capacity = (0..<phases.count).prefix {
+                                queuedFrames.count + $0 + 1 < Self.maximumQueuedFrames
+                            }.count
+                            let requestedPhases = Array(phases.prefix(capacity))
+                            if !requestedPhases.isEmpty {
+                                producedImages = flow.interpolatePair(
+                                    previous: CIImage(cvPixelBuffer: pair.previousBuffer),
+                                    current: sourceImage,
+                                    previousTime: pair.previousPTS, currentTime: pair.currentPTS,
+                                    context: ciContext, command: command,
+                                    previousBuffer: pair.previousBuffer, currentBuffer: buffer,
+                                    fastInputResampling: settings.frameInterpolation == .efficient,
+                                    blendFactors: requestedPhases)
+                            }
+                        } else {
+                            for phase in phases {
+                                guard queuedFrames.count + producedImages.count + 1 < Self.maximumQueuedFrames else { break }
+                                guard let midpoint = interpolator.interpolate(previous: CIImage(cvPixelBuffer: pair.previousBuffer), current: sourceImage,
+                                    previousTime: pair.previousPTS, currentTime: pair.currentPTS, context: ciContext, command: command,
+                                    previousBuffer: pair.previousBuffer, currentBuffer: buffer,
+                                    fastInputResampling: settings.frameInterpolation == .efficient,
+                                    blendFactor: phase) else { break }
+                                producedImages.append(midpoint)
+                            }
                         }
                         if let first = producedImages.first {
                             generatedBatch = true
