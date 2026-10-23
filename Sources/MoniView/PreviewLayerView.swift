@@ -149,6 +149,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     #if MONIVIEW_PREVIEW_TESTING
     var onPresentation: ((UInt64, Bool, Double) -> Void)?
     private(set) var peakOutstandingPresentations = 0
+    private(set) var testZeroPresentedTimeCount = 0
+    private(set) var testZeroPresentedTimePairCount = 0
     private(set) var drawableWaitMS: [Double] = []
     private(set) var displayTickTimes: [Double] = []
     var suppressPresentedCallbacks = false // failure injection, absent from production builds
@@ -248,6 +250,10 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     private var queuedFrames: [QueuedFrame] = []
     private static let maximumQueuedFrames = 3
     private var lastUniqueSource: UniqueSource?
+    /// Bounded source-pair periods used to keep 2×/3× selection stable across display-boundary
+    /// jitter. A one-second rate estimate can briefly jump after a skipped callback.
+    private var recentPairPeriods: [Double] = []
+    private var recentContentRates: [Double] = []
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let inFlight = DispatchSemaphore(value: 1)
     private let drawLock = NSLock()
@@ -347,7 +353,7 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             midpointSpatialDemoted = false; lastMidpointRestoreAt = 0; lastAcceptedPresentationAt = 0; lastPairSlot = 0; intervalRatios.removeAll()
             presentationEpoch &+= 1; presentedMidpoint = nil
             lastUniqueSource = nil; lastGeneratedPresentationTime = 0
-            queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
+            queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll(); recentPairPeriods.removeAll(); recentContentRates.removeAll()
             cooldownUntil = failureCooldown; cooldownReason = failureReason; lastSourceSequence = nil
             scheduledSourceUntil = 0; awaitingSourcePresentation = nil
             comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
@@ -473,6 +479,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         clearBlankTracking()
         queuedFrames.removeAll(); presentedMidpoint = nil; lastSourceSequence = nil
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
+        recentPairPeriods.removeAll()
+        recentContentRates.removeAll()
         frames.setActiveMultiplier(nil)
         // Evidence belongs to the stream it was recorded under. The new stream has presented
         // nothing yet, so a late callback from the old one cannot claim it is running.
@@ -574,6 +582,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         frames.setActiveMultiplier(nil)
         frames.clearGeneratedPresentationEvidence()
         lastUniqueSource = nil; lastGeneratedPresentationTime = 0
+        recentPairPeriods.removeAll()
+        recentContentRates.removeAll()
         scheduledSourceUntil = 0; awaitingSourcePresentation = nil
         queuedFrames.removeAll(); generationBatchCosts.removeAll(); generatedPresentationCosts.removeAll(); generationBatchGPUCosts.removeAll(); calibrationWarmupsRemaining = 2; nativeCosts.removeAll()
         comfortableMidpoints = 0; lastRaisedToLongEdge = nil; blockedRaiseTarget = nil
@@ -694,42 +704,72 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
     }
 
     private func interpolationPair(current: CVPixelBuffer, currentPTS: CMTime,
-                                   sequence: UInt64, streamEpoch: UInt64, signalFPS: Double,
+                                   sequence: UInt64, streamEpoch: UInt64, samplingFPS: Double,
                                    currentIsDuplicate: Bool,
+                                   contentEvidence: ContentCadencePolicy.PairCadenceEvidence?,
+                                   capturedAdjacentPair: (CVPixelBuffer, UInt64, CMTime, CMTime)? = nil,
+                                   cadenceUniquePair: InputUniquePairSnapshot? = nil,
                                    prefersAdjacentInputPair: Bool = false) -> InterpolationPair? {
         let previousBuffer: CVPixelBuffer
         let previousSequence: UInt64
         let previousPTS: CMTime
+        var currentCanonicalPTS = currentPTS
         if settings.skipsExactDuplicateInterpolation {
             if prefersAdjacentInputPair {
                 guard !currentIsDuplicate,
-                      let adjacent = frames.interpolationPair(sequence: sequence) else { return nil }
+                      let adjacent = capturedAdjacentPair ?? frames.interpolationPair(sequence: sequence) else { return nil }
                 // The raw adjacent comparison is the strict skip decision for this branch;
                 // the previous rendered image may be several captures behind.
                 previousBuffer = adjacent.0
                 previousSequence = adjacent.1
                 previousPTS = adjacent.2
+                currentCanonicalPTS = currentPTS
             } else {
-                guard !currentIsDuplicate, let previous = lastUniqueSource,
-                      previous.streamEpoch == streamEpoch, previous.sequence < sequence else { return nil }
-                previousBuffer = previous.buffer
-                previousSequence = previous.sequence
-                previousPTS = previous.pts
+                if let uniquePair = cadenceUniquePair,
+                   uniquePair.streamEpoch == streamEpoch,
+                   uniquePair.previousSequence < uniquePair.currentSequence,
+                   uniquePair.currentPTS.isNumeric,
+                   CMTimeCompare(uniquePair.currentPTS, currentPTS) <= 0,
+                   ObjectIdentifier(uniquePair.currentBuffer as AnyObject) == ObjectIdentifier(current as AnyObject) ||
+                       VideoFrameDuplicateDetector.areIdentical(uniquePair.currentBuffer, current) {
+                    // The input worker saw two consecutive exact-content endpoints while the
+                    // renderer queue was still showing the previous pair's phases.
+                    previousBuffer = uniquePair.previousBuffer
+                    previousSequence = uniquePair.previousSequence
+                    previousPTS = uniquePair.previousPTS
+                    currentCanonicalPTS = uniquePair.currentPTS
+                } else {
+                    guard !currentIsDuplicate, let previous = lastUniqueSource,
+                          previous.streamEpoch == streamEpoch, previous.sequence < sequence else { return nil }
+                    previousBuffer = previous.buffer
+                    previousSequence = previous.sequence
+                    previousPTS = previous.pts
+                    currentCanonicalPTS = currentPTS
+                }
             }
         } else {
-            guard let adjacent = frames.interpolationPair(sequence: sequence) else { return nil }
+            guard let adjacent = capturedAdjacentPair ?? frames.interpolationPair(sequence: sequence) else { return nil }
             guard lastSourceSequence == adjacent.1 else { return nil }
             previousBuffer = adjacent.0
             previousSequence = adjacent.1
             previousPTS = adjacent.2
+            currentCanonicalPTS = currentPTS
         }
         guard CVPixelBufferGetWidth(previousBuffer) == CVPixelBufferGetWidth(current),
               CVPixelBufferGetHeight(previousBuffer) == CVPixelBufferGetHeight(current),
               previousPTS.isNumeric, currentPTS.isNumeric,
               let period = ContentCadencePolicy.uniquePairPeriod(
-                previousPTS: CMTimeGetSeconds(previousPTS), currentPTS: CMTimeGetSeconds(currentPTS), signalFPS: signalFPS) else { return nil }
+                previousPTS: CMTimeGetSeconds(previousPTS),
+                currentPTS: CMTimeGetSeconds(currentCanonicalPTS),
+                samplingFPS: samplingFPS,
+                contentEvidence: contentEvidence,
+                endpointsStrictlyUnique: settings.skipsExactDuplicateInterpolation && !currentIsDuplicate),
+              FrameInterpolationPolicy.admittedPairContentFPS(
+                pairPeriod: period, samplingFPS: samplingFPS,
+                usesUniquePairTiming: settings.skipsExactDuplicateInterpolation,
+                measuredContentFPS: contentEvidence?.contentFPS) != nil else { return nil }
         return InterpolationPair(previousBuffer: previousBuffer, previousSequence: previousSequence,
-                                 previousPTS: previousPTS, currentPTS: currentPTS, period: period)
+                                 previousPTS: previousPTS, currentPTS: currentCanonicalPTS, period: period)
     }
 
     private func endpointIsFresh(_ pending: PendingSource, target: Double? = nil) -> Bool {
@@ -926,10 +966,13 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         forceDraw = false
 
         let encodingStarted = CACurrentMediaTime()
-        guard let fresh = frames.latestSnapshot(), fresh.streamEpoch == streamEpoch else {
+        guard let freshState = frames.latestSnapshotWithInterpolationPair(),
+              freshState.snapshot.streamEpoch == streamEpoch else {
             queuedFrames.removeAll(); frames.setActiveMultiplier(nil)
             forceDraw = true; inFlight.signal(); requestRender(); return
         }
+        let fresh = freshState.snapshot
+        var capturedAdjacentPair = freshState.pair
         // A drawable may have waited for presentation. Always take the newest frame afterwards.
         if endpointPresentation == nil {
             (buffer, sequence, receivedAt) = (fresh.buffer, fresh.sequence, fresh.receivedAt)
@@ -951,26 +994,52 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         var generatedBatch = false
         var presentationTime = endpointPresentation
         var sourceImage = queuedImage ?? CIImage(cvPixelBuffer: buffer)
-        let mediaFPS = frames.sourceFrameRate()
-        let sourceFPS = FrameInterpolationPolicy.nominalInputFPS(mediaFPS ?? 0) ?? 0
+        // Sampling cadence and content cadence have different supported ranges. A 120 Hz
+        // window stream is valid input even when its unique pictures update at 20 FPS.
+        let sourceFPS = FrameInterpolationPolicy.samplingFPS(frames.sourceFrameRate() ?? 0) ?? 0
         let interpolationRequested = settings.enhancementEnabled && settings.frameInterpolation != .off
         let displayFPS = min(observedDisplayFPS, Double(window.screen?.maximumFramesPerSecond ?? 60))
-        let inputCadenceSnapshot = frames.inputContentCadenceSnapshot()
-        let inputCadenceReady = inputCadenceSnapshot?.fps != nil
-        let inputCadenceEvidenceMatchesFrame: Bool = {
+        let inputCadenceSnapshot = frames.inputContentCadenceSnapshot(maxAge: 0.5)
+        let inputCadenceEvidence: ContentCadencePolicy.PairCadenceEvidence? = {
             guard let inputCadenceSnapshot,
                   inputCadenceSnapshot.streamEpoch == streamEpoch,
                   let measuredSequence = inputCadenceSnapshot.sequence,
-                  measuredSequence <= sequence,
-                  inputCadenceSnapshot.fps != nil else { return false }
-            return true
+                  measuredSequence <= sequence else { return nil }
+            let contentFPS: Double
+            let measuredEnd: CMTime
+            let tolerantIsUnknown: Bool
+            if case .unknown = inputCadenceSnapshot.state { tolerantIsUnknown = true }
+            else { tolerantIsUnknown = false }
+            if let tolerantFPS = inputCadenceSnapshot.fps,
+               let tolerantEnd = inputCadenceSnapshot.measurementEndPTS {
+                contentFPS = tolerantFPS
+                measuredEnd = tolerantEnd
+            } else if tolerantIsUnknown,
+                      inputCadenceSnapshot.strictRepeatedCadenceConfirmed,
+                      let strictFPS = inputCadenceSnapshot.strictUniqueFPS,
+                      let strictEnd = inputCadenceSnapshot.strictUniqueMeasurementEndPTS {
+                // A small moving region can stay below the tolerant whole-frame noise allowance.
+                // Exact repeats prove the sampling pattern without changing that UI tolerance.
+                contentFPS = strictFPS
+                measuredEnd = strictEnd
+            } else {
+                return nil
+            }
+            guard measuredEnd.isNumeric else { return nil }
+            return ContentCadencePolicy.PairCadenceEvidence(
+                contentFPS: contentFPS,
+                measurementEndPTS: CMTimeGetSeconds(measuredEnd),
+                freshForCurrentEpoch: true)
         }()
+        let inputCadenceReady = inputCadenceEvidence != nil
+        let inputCadenceEvidenceMatchesFrame = inputCadenceEvidence != nil
         // Recover exact source identities even while a multi-phase pair drains.
         // A queued endpoint already carries the pair's first-copy PTS and uniqueness.
         // Reclassifying it against a newer mailbox loses that reference when inference
         // takes longer than a capture tick, and the next pair uses an older picture.
         if queuedImage == nil && endpointPresentation == nil {
-            let cadencePair = frames.interpolationPair(sequence: sequence)
+            let cadencePair = capturedAdjacentPair ?? frames.interpolationPair(sequence: sequence)
+            capturedAdjacentPair = cadencePair
             let isExactDuplicate = cadencePair.flatMap {
                 isDuplicatePair(previous: $0.0, current: buffer, sequence: sequence,
                                 previousSequence: $0.1, streamEpoch: streamEpoch) ? true : false
@@ -1037,7 +1106,16 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
         }
         let candidatePair = interpolationRequested && endpointPresentation == nil && !skipInterpolation
             ? interpolationPair(current: buffer, currentPTS: sourcePTS, sequence: sequence,
-                streamEpoch: streamEpoch, signalFPS: sourceFPS, currentIsDuplicate: !sourceIsUniqueContent,
+                // ScreenCaptureKit can omit a callback during a busy frame while PTS remains
+                // on the display clock. The pair still has fresh content evidence and unique
+                // endpoints, so use the observed display clock only for tick classification
+                // when the delivery median is temporarily unavailable. The measured pair PTS
+                // and that evidence still decide admission and the multiplier.
+                streamEpoch: streamEpoch, samplingFPS: sourceFPS > 0 ? sourceFPS : displayFPS,
+                currentIsDuplicate: !sourceIsUniqueContent,
+                contentEvidence: inputCadenceEvidence,
+                capturedAdjacentPair: capturedAdjacentPair,
+                cadenceUniquePair: inputCadenceSnapshot?.uniquePair,
                 prefersAdjacentInputPair: prefersAdjacentInputPair)
             : nil
         if interpolationRequested {
@@ -1076,8 +1154,23 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                     // Use it to select 2x/3x directly; render-sampled repeat windows can miss
                     // duplicates while the phase queue drains and bias a 20 FPS source to 30.
                     // When dedup is disabled, preserve the capture signal's measured cadence.
+                    recentPairPeriods.append(pair.period)
+                    if recentPairPeriods.count > 8 { recentPairPeriods.removeFirst(recentPairPeriods.count - 8) }
+                    let sortedPairPeriods = recentPairPeriods.sorted()
+                    let medianPairPeriod = sortedPairPeriods[sortedPairPeriods.count / 2]
+                    if let measuredContent = inputCadenceEvidence?.contentFPS,
+                       measuredContent.isFinite, measuredContent > 0 {
+                        recentContentRates.append(measuredContent)
+                        if recentContentRates.count > 8 {
+                            recentContentRates.removeFirst(recentContentRates.count - 8)
+                        }
+                    }
+                    let sortedContentRates = recentContentRates.sorted()
+                    let measuredContentMedian = sortedContentRates.isEmpty ? nil
+                        : sortedContentRates[sortedContentRates.count / 2]
                     let stepContentFPS = settings.skipsExactDuplicateInterpolation
-                        ? 1 / pair.period : sourceFPS
+                        ? (measuredContentMedian ?? (1 / medianPairPeriod))
+                        : sourceFPS
                     let requested = FrameInterpolationPolicy.multiplier(
                         contentFPS: stepContentFPS, targetFPS: 60, displayFPS: displayFPS)
                     // Never ask an engine for a phase it cannot supply: the VideoToolbox
@@ -1399,6 +1492,14 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
                 // stream or presentation epoch must not clear the queue, the schedule or
                 // the published pair after a newer generation has already set them.
                 let generationIsCurrent = self.presentationEpoch == epoch && self.sourceStreamEpoch == streamEpoch
+                #if MONIVIEW_PREVIEW_TESTING
+                if !(time > 0) {
+                    self.testZeroPresentedTimeCount += 1
+                    if generationIsCurrent, wasGenerated || wasEndpoint {
+                        self.testZeroPresentedTimePairCount += 1
+                    }
+                }
+                #endif
                 guard time > 0 else {
                     if generationIsCurrent, wasGenerated || wasEndpoint {
                         self.comfortableMidpoints = 0
@@ -1528,8 +1629,8 @@ final class CapturePreviewNSView: MTKView, MTKViewDelegate {
             let cost = FrameInterpolationPolicy.processingCost(cpu: encodedCPUSeconds,
                 gpu: gpuMS / 1000, encodeToCompletion: max(0, callbackAt - encodingStarted))
             #if MONIVIEW_PREVIEW_TESTING
-            if (wasMidpoint || wasCalibration || wasEndpoint), frameSequence % 60 == 0, ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" {
-                print("TIMING seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS)")
+            if (wasCalibration || (wasMidpoint && frameSequence % 60 == 0)), ProcessInfo.processInfo.environment["MONIVIEW_TEST_TRACE"] == "1" {
+                print("TIMING seq=\(frameSequence) mid=\(wasMidpoint) calib=\(wasCalibration) status=\(completed.status.rawValue) CPU=\(encodedCPUSeconds*1000) GPU=\(gpuMS) warmups=\(self?.calibrationWarmupsRemaining ?? -1)")
             }
             #endif
             // Semaphore release and render bookkeeping remain serialized with draw(in:).

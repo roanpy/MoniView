@@ -22,6 +22,19 @@ func requireFixture(_ condition: Bool, _ message: String) {
     exit(1)
 }
 
+func cadenceStateDescription(_ state: InputContentCadenceState) -> String {
+    switch state {
+    case .unknown(let reason): return "unknown(\(reason))"
+    case .estimated(let fps): return String(format: "estimated(%.3f)", fps)
+    case .stale(let last, let reason): return "stale(last=\(last.map { String(format: "%.3f", $0) } ?? "nil"),reason=\(String(describing: reason)))"
+    }
+}
+
+func ptsDescription(_ time: CMTime?) -> String {
+    guard let time, time.isNumeric else { return "nil" }
+    return String(format: "%.6f", CMTimeGetSeconds(time))
+}
+
 // A native window and GPU with synthetic SDR input. This is not a capture-card,
 // picture-quality, HDMI-latency or long-running throughput certification.
 let environment = ProcessInfo.processInfo.environment
@@ -37,7 +50,9 @@ let width = Int(environment["MONIVIEW_TEST_WIDTH"] ?? "1920") ?? 1920
 let height = Int(environment["MONIVIEW_TEST_HEIGHT"] ?? "1080") ?? 1080
 let presentationLimit = 3
 let require120 = environment["MONIVIEW_REQUIRE_120"] == "1"
-let requireCadence = environment["MONIVIEW_REQUIRE_2X"] == "1"
+let require2x = environment["MONIVIEW_REQUIRE_2X"] == "1"
+let require3x = environment["MONIVIEW_REQUIRE_3X"] == "1"
+let requireCadence = require2x || require3x
 let requireForcedAttempts = environment["MONIVIEW_TEST_FORCE_CONTINUOUS"] == "1"
 let repeatDivisor = Int(environment["MONIVIEW_TEST_REPEAT"] ?? (environment["MONIVIEW_TEST_DUPLICATES"] == "1" ? "2" : "1")) ?? 1
 let expectedContentFPS = Double(fps) / Double(max(1, repeatDivisor))
@@ -56,6 +71,9 @@ let testBlankFailure = environment["MONIVIEW_TEST_BLANK_FAILURE"] == "1"
 let followEnabled = environment["MONIVIEW_TEST_FOLLOW"] == "1" || environment["MONIVIEW_TEST_DUPLICATES"] == "1"
 let fault = environment["MONIVIEW_TEST_PRESENTATION_FAILURE"] == "1"
 if testRestart && require120 { skipFixture("the restart test uses the non-strict fixture") }
+if require3x && (require2x || require120) {
+    skipFixture("MONIVIEW_REQUIRE_3X is exclusive with 2x and strict 120 acceptance")
+}
 if testEngineSwitch && !testRestart { skipFixture("engine-switch acceptance requires restart sampling") }
 if testFollowSwitch && (testRestart || testEngineSwitch || require120 || requireCadence || fault) {
     skipFixture("follow-switch acceptance is exclusive with restart, engine-switch, strict, cadence and fault modes")
@@ -106,6 +124,9 @@ if environment["MONIVIEW_TEST_FLOWBLEND"] == "1" {
     testInterpolationMode = .balanced
 } else {
     testInterpolationMode = .efficient
+}
+if require3x && (testInterpolationMode != .flowBlend || expectedMultiplier != 3) {
+    skipFixture("MONIVIEW_REQUIRE_3X requires Flow Blend and an expected 3x content cadence")
 }
 requireFixture(fps > 0 && width >= 640 && height >= 480,
                "MONIVIEW_TEST_FPS must be positive and MONIVIEW_TEST_WIDTH/HEIGHT at least 640x480 (got \(fps) FPS, \(width)x\(height))")
@@ -273,6 +294,7 @@ var cadenceWindows = 0, cadencePassWindows = 0
 var cadenceSources = 0, cadenceGenerated = 0
 var cadenceElapsed = 0.0
 var spatialTargetSamples = 0
+var threeXSourceTargetSamples = 0
 var minimizeObserved = false, restoreObserved = false
 var demotedSamples = 0, demotedGenerationWindows = 0, demotedLateSamples = 0, fullLateSamples = 0
 var activitySamples = 0, missingActivitySamples = 0, mismatchedActivitySamples = 0
@@ -362,6 +384,18 @@ let strictScreenParametersObserver = NotificationCenter.default.addObserver(
         strictEnvironmentFailure = "strict display maximum fell to \(changedScreen.maximumFramesPerSecond) Hz during sampling (120 Hz required)"
     }
 }
+func resolvedSourceSpatialTarget(on screen: NSScreen) -> (edge: Double, size: String)? {
+    let sourceLongEdge = Double(max(width, height))
+    let displayScale = max(1, min(preview.drawableSize.width / Double(width),
+                                  preview.drawableSize.height / Double(height)))
+    let edge = testTarget.processingLongEdge(
+        screenLongEdge: Double(max(screen.frame.width, screen.frame.height) * screen.backingScaleFactor),
+        sourceLongEdge: sourceLongEdge, visibleLongEdge: sourceLongEdge * displayScale,
+        lowLatency: lowLatency)
+    guard edge / sourceLongEdge > 1.01 else { return nil }
+    let scale = edge / sourceLongEdge
+    return (edge, "\(Int((Double(width) * scale).rounded()))×\(Int((Double(height) * scale).rounded()))")
+}
 let stats = DispatchSource.makeTimerSource(queue: .main)
 stats.schedule(deadline:.now()+1, repeating:1)
 stats.setEventHandler {
@@ -369,7 +403,7 @@ stats.setEventHandler {
     tick += 1
     if requireCadence, (1...12).contains(tick) || (testRestart && (21...25).contains(tick)) {
         guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible) else {
-            print("SKIP 2x/restart acceptance: fixture is not visible; exit 2, not a pass")
+            print("SKIP \(Int(expectedMultiplier))x/restart acceptance: fixture is not visible; exit 2, not a pass")
             input.cancel(); stats.cancel(); exit(2)
         }
     }
@@ -420,18 +454,24 @@ stats.setEventHandler {
     if testSpatialOverload, (6...12).contains(tick) {
         guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
               let screen = window.screen else { skipFixture("spatial overload probe window is not visible") }
-        let sourceLongEdge = Double(max(width, height))
-        let displayScale = max(1, min(preview.drawableSize.width / Double(width), preview.drawableSize.height / Double(height)))
-        let edge = testTarget.processingLongEdge(
-            screenLongEdge: Double(max(screen.frame.width, screen.frame.height) * screen.backingScaleFactor),
-            sourceLongEdge: sourceLongEdge, visibleLongEdge: sourceLongEdge * displayScale, lowLatency: lowLatency)
-        guard edge / sourceLongEdge > 1.01 else { skipFixture("spatial overload probe needs a drawable larger than its source") }
-        let scale = edge / sourceLongEdge
-        let expectedSize = "\(Int((Double(width) * scale).rounded()))×\(Int((Double(height) * scale).rounded()))"
+        guard let resolved = resolvedSourceSpatialTarget(on: screen) else {
+            skipFixture("spatial overload probe needs a drawable larger than its source")
+        }
+        let expectedSize = resolved.size
         requireFixture(frames.currentEngine() == "MetalFX" && frames.currentEnhancedSize() == expectedSize,
                        "interpolation overload silently reduced source-frame enhancement: expected \(expectedSize), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine())")
         requireFixture(gen > 0, "overload retained its target but stopped generated presentations at tick \(tick)")
         spatialTargetSamples += 1
+    }
+    if require3x, (6...12).contains(tick) {
+        guard window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
+              let screen = window.screen else { skipFixture("3x acceptance window is not visible") }
+        guard let resolved = resolvedSourceSpatialTarget(on: screen) else {
+            skipFixture("3x acceptance needs a resolved spatial target larger than its source")
+        }
+        requireFixture(frames.currentEngine() == "MetalFX" && frames.currentEnhancedSize() == resolved.size,
+                       "3x acceptance source enhancement expected MetalFX \(resolved.size), got \(frames.currentEnhancedSize() ?? "native") / \(frames.currentEngine()) at tick \(tick)")
+        threeXSourceTargetSamples += 1
     }
     if testSpatialOverload || require120 || requireCadence, (6...16).contains(tick) {
         // An over-budget tier must demote its generated midpoint's spatial pass instead of
@@ -515,7 +555,39 @@ stats.setEventHandler {
     // Count source presentations independently from renderer statistics. The pair
     // shares the same sampling boundary, including native fallback and redraws.
     requireFixture(presented.presentedSource == sourcePresentations, "output statistics differ from drawable presentation callbacks")
-    print("tick=\(tick) newCADcount=\(newCADCount) window=\(String(format: "%.3f", cadWindowDuration))s capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) engine=\(frames.currentEngine()) spatial=\(frames.currentEnhancedSize() ?? "native") work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
+    print("tick=\(tick) newCADcount=\(newCADCount) window=\(String(format: "%.3f", cadWindowDuration))s capture=\(counts.0) GPU-source=\(counts.1) actual-source=\(sourcePresentations) presented-generated=\(gen) output=\(presented.presentedSource + gen) engine=\(frames.currentEngine()) spatial=\(frames.currentEnhancedSize() ?? "native") work=\(frames.currentInterpolationWorkingSize() ?? "—") pairP95=\(String(format: "%.2f",cost.0))ms pairBudget=\(String(format: "%.2f",cost.1))ms zeroTime=\(preview.testZeroPresentedTimeCount)/\(preview.testZeroPresentedTimePairCount) state=\(frames.currentInterpolationState()) display=\(window.screen?.maximumFramesPerSecond ?? 0)Hz observed=\(Int(frames.currentDisplayRates().observed.rounded()))")
+    if requireCadence {
+        let latest = frames.latestSnapshot()
+        let inputSnapshot = frames.inputContentCadenceSnapshot(maxAge: 0.5)
+        let sourceRate = frames.sourceFrameRate()
+        let latestPTS = latest?.pts
+        let inputEnd = inputSnapshot?.measurementEndPTS
+        let strictEnd = inputSnapshot?.strictUniqueMeasurementEndPTS
+        let inputFPS = inputSnapshot?.fps
+        let latestSequence = latest.map { String($0.sequence) } ?? "nil"
+        let latestEpoch = latest.map { String($0.streamEpoch) } ?? "nil"
+        let sequenceCausal: Bool = {
+            guard let snapshot = inputSnapshot, let measured = snapshot.sequence,
+                  let current = latest else { return false }
+            return measured <= current.sequence
+        }()
+        let ptsCausal: Bool = {
+            guard let inputEnd, let latestPTS,
+                  inputEnd.isNumeric, latestPTS.isNumeric else { return false }
+            return CMTimeCompare(inputEnd, latestPTS) <= 0
+        }()
+        let strictPTSCausal: Bool = {
+            guard let strictEnd, let latestPTS,
+                  strictEnd.isNumeric, latestPTS.isNumeric else { return false }
+            return CMTimeCompare(strictEnd, latestPTS) <= 0
+        }()
+        let ageMS: String = {
+            guard let arrival = inputSnapshot?.sampleArrivalUptimeNanoseconds else { return "nil" }
+            let now = DispatchTime.now().uptimeNanoseconds
+            return String(format: "%.1f", Double(now >= arrival ? now - arrival : 0) / 1_000_000)
+        }()
+        print("   cadence sourceFPS=\(sourceRate.map { String(format: "%.3f", $0) } ?? "nil") state=\(inputSnapshot.map { cadenceStateDescription($0.state) } ?? "nil") fps=\(inputFPS.map { String(format: "%.3f", $0) } ?? "nil") strictFPS=\(inputSnapshot?.strictUniqueFPS.map { String(format: "%.3f", $0) } ?? "nil") strictConfirmed=\(inputSnapshot?.strictRepeatedCadenceConfirmed ?? false) strictRepeats=\(inputSnapshot?.strictRepeatPairCount ?? 0) strictUpdates=\(inputSnapshot?.strictUniqueUpdateCount ?? 0) strictEndPTS=\(ptsDescription(strictEnd)) seq=\(inputSnapshot?.sequence.map(String.init) ?? "nil") latestSeq=\(latestSequence) epoch=\(inputSnapshot?.streamEpoch.map(String.init) ?? "nil") latestEpoch=\(latestEpoch) startPTS=\(ptsDescription(inputSnapshot?.measurementStartPTS)) endPTS=\(ptsDescription(inputEnd)) latestPTS=\(ptsDescription(latestPTS)) age=\(ageMS)ms seqCausal=\(sequenceCausal) ptsCausal=\(ptsCausal) strictPtsCausal=\(strictPTSCausal) updates=\(inputSnapshot?.uniqueUpdateCount ?? 0)")
+    }
     if require120 || requireCadence || testSpatialOverload {
         print(String(format: "   midpoint-spatial=%@ intervalMean=%.2f slot", preview.testMidpointSpatialDemoted ? "cheap" : "full", preview.testMeanIntervalRatio))
     }
@@ -657,7 +729,7 @@ stats.setEventHandler {
     }
     if tick == finishAt {
         if requireCadence {
-            print("recent interpolation activity: \(activitySamples) samples at 20Hz, missing \(missingActivitySamples), mismatched \(mismatchedActivitySamples), expected \(expectedMultiplier)x/\(expectedContentFPS) FPS")
+            print("recent interpolation activity: \(activitySamples) samples at 20Hz, missing \(missingActivitySamples), mismatched \(mismatchedActivitySamples), zeroPresentedTime total/pairCleanup=\(preview.testZeroPresentedTimeCount)/\(preview.testZeroPresentedTimePairCount), expected \(expectedMultiplier)x/\(expectedContentFPS) FPS")
             requireFixture(activitySamples >= 100 && missingActivitySamples == 0 && mismatchedActivitySamples == 0,
                          "recent pair readout flickered or changed step during steady interpolation")
         }
@@ -671,17 +743,24 @@ stats.setEventHandler {
             print("PASS stop/start: target generated rate, source rate, pair structure and spacing restored")
         }
         if requireCadence {
-            print("2x acceptance: windows \(cadencePassWindows)/\(cadenceWindows), source \(Double(cadenceSources) / cadenceElapsed) FPS, generated \(Double(cadenceGenerated) / cadenceElapsed) FPS, expected content \(expectedContentFPS) FPS")
+            print("\(Int(expectedMultiplier))x acceptance: windows \(cadencePassWindows)/\(cadenceWindows), source \(Double(cadenceSources) / cadenceElapsed) FPS, generated \(Double(cadenceGenerated) / cadenceElapsed) FPS, expected content \(expectedContentFPS) FPS")
+            if require3x {
+                print("3x source spatial acceptance: \(threeXSourceTargetSamples)/7 steady windows used MetalFX with the resolved source target")
+            }
             requireFixture(cadenceWindows == 7 && cadencePassWindows >= 6,
-                         "2x content-cadence throughput failed; smoke success is not throughput acceptance")
+                         "\(Int(expectedMultiplier))x content-cadence throughput failed; smoke success is not throughput acceptance")
             if followEnabled && repeatDivisor > 1 {
                 requireFixture(Double(cadenceSources) / cadenceElapsed <= expectedContentFPS * 1.10,
                                "duplicate source presentations hid missing generated frames")
             }
             validateCadencePresentations(cadenceEvents, multiplier: Int(expectedMultiplier))
+            if require3x {
+                requireFixture(threeXSourceTargetSamples == 7,
+                               "3x acceptance did not verify source MetalFX target size in all seven steady windows")
+            }
         }
         if followEnabled && repeatDivisor > 1 { requireFixture(totalDuplicateSkips > 0, "identical pairs were not skipped") }
-        if requireCadence, !require120, !testSpatialOverload {
+        if require2x, !require120, !testSpatialOverload {
             // A 2x acceptance run has headroom, so it must return to the full-quality midpoint
             // after any transient shortfall. A trigger that reads a fixed phase offset as a
             // shortfall kept it demoted for the whole run instead, which this catches.
@@ -746,7 +825,7 @@ stats.setEventHandler {
                            "spatial demotion and generated presentations were never observed together")
             print("PASS Match Display retained MetalFX target in all seven steady samples under \(preview.injectedOverBudgetCount) injected overloads; midpoint spatial demotion observed in \(demotedSamples) samples with simultaneous generated frames in \(demotedGenerationWindows) windows and generation in all seven steady samples; no target-FPS claim")
         }
-        print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : ", minimize/restore smoke"); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
+        print("PASS source ordering, drawable bound, disable\(require120 ? ", strict 60→120 synthetic window" : (require3x ? ", 3x synthetic-window acceptance" : ", minimize/restore smoke")); generated=\(total), >=85% target windows=\(steady). This does NOT certify quality, HDMI latency or real UVC.")
         input.cancel(); stats.cancel(); activityProbe.cancel(); app.terminate(nil)
     }
 }

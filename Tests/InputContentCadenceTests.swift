@@ -13,6 +13,9 @@ struct InputContentCadenceTests {
         testCadenceNoiseTolerance()
         testDynamic20To30To60()
         testRepeatedCadencesAcrossWindowStarts()
+        testTwentyFPSIn120HzSampling()
+        testUniquePairSnapshotExcludesRepeatedSamples()
+        testStrictEvidenceForSmallMotion()
         testJitteredFractionalRate()
         testUnquantizedRate()
         testMotionToStaticExpiresEstimate()
@@ -81,6 +84,42 @@ struct InputContentCadenceTests {
         return pixelBuffer!
     }
 
+    private static func makeSmallMotionFrame(offset: Int) -> CVPixelBuffer {
+        let localWidth = 320
+        let localHeight = 240
+        var pixelBuffer: CVPixelBuffer?
+        let attributes = [kCVPixelBufferBytesPerRowAlignmentKey as String: 64] as CFDictionary
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, localWidth, localHeight,
+                                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                         attributes, &pixelBuffer)
+        precondition(status == kCVReturnSuccess && pixelBuffer != nil,
+                     "small-motion CVPixelBufferCreate failed: \(status)")
+        let buffer = pixelBuffer!
+        precondition(CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess,
+                     "small-motion write lock failed")
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            preconditionFailure("small-motion YUV buffer has no base address")
+        }
+        let lumaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let lumaHeight = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        memset(base, 64, lumaStride * lumaHeight)
+        let luma = base.assumingMemoryBound(to: UInt8.self)
+        guard let chromaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else {
+            preconditionFailure("small-motion YUV buffer has no chroma plane")
+        }
+        memset(chromaBase, 128,
+               CVPixelBufferGetBytesPerRowOfPlane(buffer, 1) *
+               CVPixelBufferGetHeightOfPlane(buffer, 1))
+        let start = 20 + offset
+        for row in 40..<80 {
+            for column in start..<(start + 40) {
+                luma[row * lumaStride + column] = 200
+            }
+        }
+        return buffer
+    }
+
     private static func send(_ cadence: InputContentCadence,
                              tick: Int,
                              sequence: UInt64,
@@ -98,6 +137,16 @@ struct InputContentCadenceTests {
                        sequence: sequence,
                        streamEpoch: epoch)
         check(cadence._testWaitUntilIdle(), "worker drains a sequential sample")
+    }
+
+    private static func sendSmallMotion(_ cadence: InputContentCadence,
+                                        tick: Int, offset: Int,
+                                        sequence: UInt64, epoch: UInt64) {
+        cadence.submit(makeSmallMotionFrame(offset: offset),
+                       presentationTime: CMTime(value: Int64(tick), timescale: 120),
+                       sequence: sequence,
+                       streamEpoch: epoch)
+        check(cadence._testWaitUntilIdle(), "worker drains a small-motion sample")
     }
 
     private static func send(_ cadence: InputContentCadence,
@@ -157,12 +206,44 @@ struct InputContentCadenceTests {
               "static snapshot preserves the original PTS")
         check(snapshot.sampleArrivalUptimeNanoseconds != nil,
               "unknown snapshot records a monotonic sample timestamp")
+        check(snapshot.strictUniqueFPS == nil && !snapshot.strictRepeatedCadenceConfirmed,
+              "pure exact repeats do not invent strict unique content")
 
         let stale = cadence.snapshot(maxAge: 0)
         check(stale.state == .stale(lastKnownFPS: nil, reason: .staticContent),
               "a stale unknown snapshot remains explicitly unknown and stale")
         check(stale.streamEpoch == 1 && stale.presentationTime.map { CMTimeCompare($0, CMTime(value: 60, timescale: 60)) == 0 } == true,
               "stale snapshot retains epoch and original PTS")
+        check(stale.strictUniqueFPS == nil && !stale.strictRepeatedCadenceConfirmed,
+              "stale strict evidence is not reusable")
+    }
+
+    private static func testUniquePairSnapshotExcludesRepeatedSamples() {
+        let cadence = InputContentCadence()
+        for tick in 0...65 {
+            send(cadence, tick: tick, sequence: UInt64(tick), epoch: 12,
+                 contentID: tick / 6)
+        }
+        let snapshot = cadence.snapshot(maxAge: 60)
+        guard let pair = snapshot.uniquePair else {
+            check(false, "repeated high-rate sampling retains its newest unique pair")
+            return
+        }
+        check(pair.streamEpoch == 12, "unique pair stays within the current stream epoch")
+        check(pair.previousSequence == 54 && pair.currentSequence == 60,
+              "unique pair skips repeated capture frames and retains consecutive content")
+        check(CMTimeCompare(pair.currentPTS, CMTime(value: 60, timescale: 60)) == 0,
+              "unique pair retains the first-copy PTS rather than the newest repeated sample")
+        check(!VideoFrameDuplicateDetector.areIdentical(pair.previousBuffer, pair.currentBuffer),
+              "unique pair contains two distinct pictures")
+
+        cadence.setUniquePairRetentionEnabled(false)
+        check(cadence.snapshot(maxAge: 60).uniquePair == nil,
+              "disabling interpolation releases retained unique-pair buffers")
+
+        cadence.reset(streamEpoch: 13)
+        check(cadence.snapshot(maxAge: 0).uniquePair == nil,
+              "stream reset clears unique-pair buffers")
     }
 
     private static func testCadenceNoiseTolerance() {
@@ -247,6 +328,63 @@ struct InputContentCadenceTests {
         }
         assertEstimated(cadence.snapshot(maxAge: 60), fps: 59.94, tolerance: 0.2,
                         "59.94 FPS remains accurate with small PTS jitter")
+    }
+
+    private static func testTwentyFPSIn120HzSampling() {
+        let cadence = InputContentCadence()
+        for tick in 0...120 {
+            send(cadence,
+                 presentationTime: CMTime(value: Int64(tick), timescale: 120),
+                 sequence: UInt64(tick),
+                 epoch: 34,
+                 contentID: tick / 6)
+        }
+        let snapshot = cadence.snapshot(maxAge: 60)
+        assertEstimated(snapshot, fps: 20, tolerance: 0.01,
+                        "20 FPS content measured through six repeated 120 Hz samples")
+        check(snapshot.streamEpoch == 34 && snapshot.sequence == 120,
+              "20-in-120 estimate identifies the current sampling epoch and sequence")
+        check(snapshot.presentationTime.map {
+                  CMTimeCompare($0, CMTime(value: 120, timescale: 120)) == 0
+              } == true,
+              "20-in-120 keeps the original high-rate presentation timestamp")
+    }
+
+    private static func testStrictEvidenceForSmallMotion() {
+        let cadence = InputContentCadence()
+        for tick in 0...120 {
+            sendSmallMotion(cadence, tick: tick, offset: tick / 6,
+                            sequence: UInt64(tick), epoch: 35)
+        }
+        let snapshot = cadence.snapshot(maxAge: 60)
+        assertUnknown(snapshot, reason: .staticContent,
+                      "a small moving patch remains below the tolerant UI-noise allowance")
+        check(snapshot.strictRepeatedCadenceConfirmed,
+              "exact repeats independently confirm the repeated-sampling cadence")
+        check(snapshot.strictUniqueFPS.map { abs($0 - 20) < 0.01 } == true,
+              "strict evidence measures the 20 FPS unique cadence inside 120 Hz sampling")
+        check(snapshot.strictUniqueUpdateCount >= 4 && snapshot.strictRepeatPairCount >= 2,
+              "strict evidence contains both unique transitions and exact repeats")
+        check(snapshot.strictUniqueMeasurementEndPTS.map {
+                  CMTimeCompare($0, CMTime(value: 120, timescale: 120)) == 0
+              } == true,
+              "strict evidence preserves the real high-rate endpoint PTS")
+
+        sendSmallMotion(cadence, tick: 200, offset: 3, sequence: 121, epoch: 35)
+        let gap = cadence.snapshot(maxAge: 60)
+        check(gap.state == .unknown(.timestampDiscontinuity),
+              "a PTS gap invalidates pooled content evidence")
+        check(gap.strictUniqueFPS == nil && !gap.strictRepeatedCadenceConfirmed,
+              "a PTS gap cannot leave strict cadence reusable")
+
+        let unique = InputContentCadence()
+        for tick in 0...120 {
+            sendSmallMotion(unique, tick: tick, offset: tick,
+                            sequence: UInt64(tick), epoch: 36)
+        }
+        let noRepeats = unique.snapshot(maxAge: 60)
+        check(!noRepeats.strictRepeatedCadenceConfirmed,
+              "unique 120 Hz pixels cannot masquerade as a repeated low-rate cadence")
     }
 
     private static func testUnquantizedRate() {

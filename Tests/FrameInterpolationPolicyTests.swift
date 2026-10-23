@@ -75,10 +75,36 @@ struct FrameInterpolationPolicyTests {
             check(admitted(fps, 120), "Nominal 60 to 120 admitted")
             check(!admitted(fps, 60), "60 Hz cannot display nominal 120")
         }
-        for invalid in [0.0, -1, 19.99, 60.25001, 90, 120, Double.nan, Double.infinity, -Double.infinity] {
+        for invalid in [0.0, -1, 10, 15, 19.49, 60.25001, 90, 120, Double.nan, Double.infinity, -Double.infinity] {
             check(P.nominalInputFPS(invalid) == nil, "Reject unsupported source rate")
             check(!admitted(invalid, 240), "Invalid source never admitted")
         }
+        check(P.nominalInputFPS(19.98).map { abs($0 - 19.98) < 0.000_001 } == true,
+              "A slightly under-nominal 20 FPS content measurement survives normal evidence noise")
+        for fps in [10.0, 59.94, 60, 120, 144, 240] {
+            check(P.samplingFPS(fps) == fps, "Delivered sampling rate is validated separately from content")
+        }
+        for invalid in [0.0, 9.99, 240.001, Double.nan, Double.infinity, -Double.infinity] {
+            check(P.samplingFPS(invalid) == nil, "Invalid delivered sampling rate is rejected")
+        }
+        check(P.nominalInputFPS(120) == nil && P.samplingFPS(120) == 120,
+              "A 120 Hz signal remains valid sampling while 120 FPS content stays outside the supported range")
+        check(P.multiplierFittingPair(2, pairPeriod: 1.0 / 120, displayFPS: 120) == 1,
+              "Genuine 120 FPS content remains native because a pair has no extra display slot")
+        check(P.admittedPairContentFPS(pairPeriod: 1.0 / 19.98, samplingFPS: 120,
+                                       usesUniquePairTiming: true).map { abs($0 - 19.98) < 0.000_001 } == true,
+              "A measured 19.98 FPS pair remains supported content")
+        check(P.admittedPairContentFPS(pairPeriod: 1.0 / 120, samplingFPS: 240,
+                                       usesUniquePairTiming: true) == nil,
+              "Genuine 120 FPS content stays outside the renderer content range on a 240 Hz signal")
+        check(P.admittedPairContentFPS(pairPeriod: 4 * (1.0 / 60), samplingFPS: 60,
+                                       usesUniquePairTiming: true) == nil,
+              "A 15 FPS pair stays outside the renderer content range")
+        check(P.admittedPairContentFPS(pairPeriod: 1.0 / 120, samplingFPS: 60,
+                                       usesUniquePairTiming: false) == 60 &&
+              P.admittedPairContentFPS(pairPeriod: 1.0 / 120, samplingFPS: 240,
+                                       usesUniquePairTiming: false) == nil,
+              "Capture-adjacent timing still enforces the independent content range")
         for invalid in [0.0, -1, Double.nan, Double.infinity, -Double.infinity] {
             check(!admitted(30, invalid), "Invalid display never admitted")
         }

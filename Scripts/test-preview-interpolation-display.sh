@@ -17,10 +17,11 @@ Configuration is supplied through environment variables:
   MONIVIEW_TEST_WINDOW_WIDTH / _HEIGHT       (fixture window size; default 960x540)
   MONIVIEW_TEST_VIVID=1                      (apply the shipped Vivid preset: contrast, saturation, vibrance, highlight recovery)
   MONIVIEW_TEST_FOLLOW=1                     (enable content-rate Follow; does not repeat synthetic frames)
-  MONIVIEW_TEST_REPEAT=1|2|3                 (synthetic content repeat divisor; default 1, or 2 with DUPLICATES=1)
+  MONIVIEW_TEST_REPEAT=<positive integer>    (synthetic content repeat divisor; e.g. 1|2|3|6; default 1, or 2 with DUPLICATES=1; FPS=120 REPEAT=6 gives 20 FPS content)
   MONIVIEW_TEST_DUPLICATES=1                 (legacy alias for Follow plus default repeat divisor 2; REPEAT can override)
   MONIVIEW_REQUIRE_120=1                     (run the unchanged strict 60→120 gate)
-  MONIVIEW_REQUIRE_2X=1                      (require 2x throughput in 6/7 steady windows; duplicates use content FPS)
+  MONIVIEW_REQUIRE_2X=1                      (require 2x throughput in 6/7 steady windows; includes the 2x-only full-midpoint restoration assertion)
+  MONIVIEW_REQUIRE_3X=1                      (require the same throughput/activity/phase/P95/queue gate at 3x; requires Flow and expected multiplier 3)
   MONIVIEW_TEST_RESTART=1                    (stop, re-enable the same engine, and verify generated presentations resume)
   MONIVIEW_TEST_SWITCH=1                     (with RESTART: switch to quality and back; verify original target rate)
   MONIVIEW_TEST_FOLLOW_SWITCH=1              (tick 16 disable Follow, tick 20 restore; needs Follow, 60 FPS, repeat=2, 120 Hz)
@@ -49,6 +50,12 @@ Follow on with unique 60 FPS input (strict 60→120 gate):
 Follow off/on transition with repeated 60 FPS input carrying 30 FPS content:
   MONIVIEW_TEST_FPS=60 MONIVIEW_TEST_REPEAT=2 MONIVIEW_TEST_FOLLOW=1 \
   MONIVIEW_TEST_FOLLOW_SWITCH=1 Scripts/test-preview-interpolation-display.sh
+
+Flow 3x acceptance with 60 FPS sampling carrying 20 FPS content:
+  MONIVIEW_REQUIRE_3X=1 MONIVIEW_TEST_FPS=60 MONIVIEW_TEST_REPEAT=3 \
+  MONIVIEW_TEST_FOLLOW=1 MONIVIEW_TEST_FLOWBLEND=1 MONIVIEW_TEST_FORCE=1 \
+  MONIVIEW_TEST_TARGET=screen MONIVIEW_TEST_REQUIRE_METALFX=1 \
+  Scripts/test-preview-interpolation-display.sh
 
 Example joint MetalFX + interpolation run (uses the native display/GPU):
   MONIVIEW_REQUIRE_120=1 MONIVIEW_TEST_FPS=60 MONIVIEW_TEST_FULLSCREEN=1 \
