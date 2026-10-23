@@ -278,12 +278,35 @@ enum FrameInterpolationPolicy {
         return cap
     }
 
-    /// Preserve fractional broadcast rates; normalize only the small UVC overshoot
-    /// around nominal 60. Callers should prefer configured rate / precise PTS cadence
+    /// Validate the delivered sampling rate independently of the content-rate range below.
+    /// ScreenCaptureKit window capture commonly samples at 120 Hz while its content updates
+    /// at 20 FPS. This value must never be passed to `nominalInputFPS` as if it were content.
+    static func samplingFPS(_ measuredFPS: Double) -> Double? {
+        guard measuredFPS.isFinite, measuredFPS >= 10, measuredFPS <= 240 else { return nil }
+        return measuredFPS
+    }
+
+    /// Preserve fractional broadcast content rates; normalize only the small UVC overshoot
+    /// around nominal 60. Callers should prefer configured content rate / precise PTS cadence
     /// over integer FPS counters, and use the result consistently for slot timing.
     static func nominalInputFPS(_ inputFPS: Double) -> Double? {
-        guard inputFPS.isFinite, inputFPS >= 20, inputFPS <= 60.25 else { return nil }
+        // A one-second unique-content window can land just under a nominal 20 FPS source.
+        // Admit that measurement noise without opening the door to 10/15 FPS content.
+        guard inputFPS.isFinite, inputFPS >= 19.5, inputFPS <= 60.25 else { return nil }
         return min(inputFPS, 60)
+    }
+
+    /// Content admission for a real pair. Unique-pair timing supplies the measured content
+    /// period; capture-adjacent timing supplies only the sampling signal. This guard prevents
+    /// a high sampling rate from becoming an invented high-rate content request.
+    static func admittedPairContentFPS(pairPeriod: Double, samplingFPS: Double,
+                                       usesUniquePairTiming: Bool,
+                                       measuredContentFPS: Double? = nil) -> Double? {
+        guard pairPeriod.isFinite, pairPeriod > 0,
+              let sampling = Self.samplingFPS(samplingFPS) else { return nil }
+        let measured = usesUniquePairTiming
+            ? (measuredContentFPS ?? 1 / pairPeriod) : sampling
+        return nominalInputFPS(measured)
     }
 
     /// inputValid includes stable measured cadence, valid increasing PTS and no stream

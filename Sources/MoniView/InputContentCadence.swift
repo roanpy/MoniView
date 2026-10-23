@@ -22,6 +22,19 @@ enum InputContentCadenceState: Equatable {
     case stale(lastKnownFPS: Double?, reason: InputContentCadenceUnknownReason?)
 }
 
+/// Consecutive exact-content endpoints observed by the input worker. A display-rate window
+/// stream repeats one picture across several capture callbacks; keeping these two buffers lets
+/// the renderer pair real updates even when queued 3× phases advance the mailbox in between.
+struct InputUniquePairSnapshot {
+    let previousBuffer: CVPixelBuffer
+    let previousSequence: UInt64
+    let previousPTS: CMTime
+    let currentBuffer: CVPixelBuffer
+    let currentSequence: UInt64
+    let currentPTS: CMTime
+    let streamEpoch: UInt64
+}
+
 struct InputContentCadenceSnapshot {
     /// Only a fresh estimate is usable as a rate. Stale snapshots retain their last value
     /// separately so a caller cannot accidentally consume it as current.
@@ -34,6 +47,17 @@ struct InputContentCadenceSnapshot {
     let measurementEndPTS: CMTime?
     let measurementDuration: TimeInterval?
     let uniqueUpdateCount: Int
+    /// Independent exact-pixel evidence from the same contiguous window. The rate is
+    /// diagnostic; long-pair admission additionally requires repeat confirmation.
+    let strictUniqueFPS: Double?
+    let strictRepeatedCadenceConfirmed: Bool
+    let strictUniqueMeasurementStartPTS: CMTime?
+    let strictUniqueMeasurementEndPTS: CMTime?
+    let strictUniqueUpdateCount: Int
+    let strictRepeatPairCount: Int
+    /// The newest consecutive unique endpoints in this stream. Repeated captures of the same
+    /// picture are intentionally absent from this pair.
+    let uniquePair: InputUniquePairSnapshot?
     /// Monotonic time at which the newest processed sample was submitted.
     let sampleArrivalUptimeNanoseconds: UInt64?
 
@@ -96,6 +120,11 @@ final class InputContentCadence {
         var activeStreamEpoch: UInt64?
         var lastSequence: UInt64?
         var transitionPTS: [CMTime] = []
+        var strictTransitionPTS: [CMTime] = []
+        var strictRepeatPTS: [CMTime] = []
+        var strictComparisonPTS: [CMTime] = []
+        var previousUniqueSample: Sample?
+        var latestUniqueSample: Sample?
 
         mutating func clear() {
             self = MeasurementState()
@@ -111,6 +140,13 @@ final class InputContentCadence {
         var measurementEndPTS: CMTime?
         var measurementDuration: TimeInterval?
         var uniqueUpdateCount = 0
+        var strictUniqueFPS: Double?
+        var strictRepeatedCadenceConfirmed = false
+        var strictUniqueMeasurementStartPTS: CMTime?
+        var strictUniqueMeasurementEndPTS: CMTime?
+        var strictUniqueUpdateCount = 0
+        var strictRepeatPairCount = 0
+        var uniquePair: InputUniquePairSnapshot?
         var sampleArrivalUptimeNanoseconds: UInt64?
 
         var value: InputContentCadenceSnapshot {
@@ -122,8 +158,24 @@ final class InputContentCadence {
                                         measurementEndPTS: measurementEndPTS,
                                         measurementDuration: measurementDuration,
                                         uniqueUpdateCount: uniqueUpdateCount,
+                                        strictUniqueFPS: strictUniqueFPS,
+                                        strictRepeatedCadenceConfirmed: strictRepeatedCadenceConfirmed,
+                                        strictUniqueMeasurementStartPTS: strictUniqueMeasurementStartPTS,
+                                        strictUniqueMeasurementEndPTS: strictUniqueMeasurementEndPTS,
+                                        strictUniqueUpdateCount: strictUniqueUpdateCount,
+                                        strictRepeatPairCount: strictRepeatPairCount,
+                                        uniquePair: uniquePair,
                                         sampleArrivalUptimeNanoseconds: sampleArrivalUptimeNanoseconds)
         }
+    }
+
+    private struct StrictCadenceSnapshot {
+        var fps: Double?
+        var repeatedCadenceConfirmed = false
+        var measurementStartPTS: CMTime?
+        var measurementEndPTS: CMTime?
+        var uniqueUpdateCount = 0
+        var repeatPairCount = 0
     }
 
     private let condition = NSCondition()
@@ -135,6 +187,7 @@ final class InputContentCadence {
     /// A reset pins accepted submissions to its epoch, preventing late callbacks from an
     /// older capture stream from repopulating the just-cleared estimator.
     private var pinnedStreamEpoch: UInt64?
+    private var retainsUniquePair = true
     private var measurementState = MeasurementState()
     private var storedSnapshot = StoredSnapshot()
 
@@ -166,6 +219,19 @@ final class InputContentCadence {
         measurementState.clear()
         storedSnapshot = StoredSnapshot(state: .unknown(.warmingUp), streamEpoch: streamEpoch)
         condition.broadcast()
+        condition.unlock()
+    }
+
+    /// Pair retention exists only while interpolation needs frame history. Stopping interpolation
+    /// must release these buffers even if no newer sample arrives to rebuild the snapshot.
+    func setUniquePairRetentionEnabled(_ enabled: Bool) {
+        condition.lock()
+        retainsUniquePair = enabled
+        if !enabled {
+            measurementState.previousUniqueSample = nil
+            measurementState.latestUniqueSample = nil
+            storedSnapshot.uniquePair = nil
+        }
         condition.unlock()
     }
 
@@ -234,6 +300,13 @@ final class InputContentCadence {
                                            measurementEndPTS: stored.measurementEndPTS,
                                            measurementDuration: stored.measurementDuration,
                                            uniqueUpdateCount: stored.uniqueUpdateCount,
+                                           strictUniqueFPS: nil,
+                                           strictRepeatedCadenceConfirmed: false,
+                                           strictUniqueMeasurementStartPTS: nil,
+                                           strictUniqueMeasurementEndPTS: nil,
+                                           strictUniqueUpdateCount: 0,
+                                           strictRepeatPairCount: 0,
+                                           uniquePair: nil,
                                            sampleArrivalUptimeNanoseconds: stored.sampleArrivalUptimeNanoseconds)
     }
 
@@ -276,7 +349,17 @@ final class InputContentCadence {
         var nextMeasurement = measurementState
         condition.unlock()
 
-        let nextSnapshot = advance(sample, measurement: &nextMeasurement)
+        var nextSnapshot = advance(sample, measurement: &nextMeasurement)
+        if let previous = nextMeasurement.previousUniqueSample,
+           let current = nextMeasurement.latestUniqueSample,
+           previous.streamEpoch == current.streamEpoch,
+           previous.sequence < current.sequence {
+            nextSnapshot.uniquePair = InputUniquePairSnapshot(
+                previousBuffer: previous.pixelBuffer, previousSequence: previous.sequence,
+                previousPTS: previous.presentationTime,
+                currentBuffer: current.pixelBuffer, currentSequence: current.sequence,
+                currentPTS: current.presentationTime, streamEpoch: current.streamEpoch)
+        }
 
         #if INPUT_CONTENT_CADENCE_TESTING
         condition.lock()
@@ -291,6 +374,11 @@ final class InputContentCadence {
         guard generation == resetGeneration else {
             condition.unlock()
             return
+        }
+        if !retainsUniquePair {
+            nextMeasurement.previousUniqueSample = nil
+            nextMeasurement.latestUniqueSample = nil
+            nextSnapshot.uniquePair = nil
         }
         measurementState = nextMeasurement
         storedSnapshot = nextSnapshot
@@ -364,7 +452,22 @@ final class InputContentCadence {
 
         let equivalent = VideoFrameDuplicateDetector.areEquivalentForCadence(previousPixelBuffer,
                                                                                 sample.pixelBuffer)
+        // The tolerant judge supplies the UI estimate. Exact equality is recorded independently
+        // so a small moving region is not required to exceed a whole-frame noise allowance before
+        // it can prove a repeated-sampling period. This stays inside the existing serial worker.
+        let strictlyEquivalent = equivalent &&
+            VideoFrameDuplicateDetector.areIdentical(previousPixelBuffer, sample.pixelBuffer)
         if !equivalent { measurement.transitionPTS.append(sample.presentationTime) }
+        if !strictlyEquivalent { measurement.strictTransitionPTS.append(sample.presentationTime) }
+        else { measurement.strictRepeatPTS.append(sample.presentationTime) }
+        if !strictlyEquivalent {
+            // Keep both sides of the newest real transition. This state is independent of
+            // renderer queue occupancy; every source update gets a chance to become the next
+            // interpolation pair even while the previous pair's phases are on screen.
+            measurement.previousUniqueSample = measurement.latestUniqueSample
+            measurement.latestUniqueSample = sample
+        }
+        measurement.strictComparisonPTS.append(sample.presentationTime)
         measurement.previousPixelBuffer = sample.pixelBuffer
         measurement.previousPTS = sample.presentationTime
         measurement.activeLayout = layout
@@ -385,11 +488,16 @@ final class InputContentCadence {
                                          reason: .timestampDiscontinuity, measurement: &measurement)
         }
         measurement.transitionPTS.removeAll { CMTimeCompare($0, windowStart) <= 0 }
+        measurement.strictTransitionPTS.removeAll { CMTimeCompare($0, windowStart) <= 0 }
+        measurement.strictRepeatPTS.removeAll { CMTimeCompare($0, windowStart) <= 0 }
+        measurement.strictComparisonPTS.removeAll { CMTimeCompare($0, windowStart) <= 0 }
+        let strict = strictCadenceSnapshot(measurement, sample: sample)
 
         let updates = measurement.transitionPTS.count
         guard let firstChangePTS = measurement.transitionPTS.first,
               let lastChangePTS = measurement.transitionPTS.last else {
-            return makeSnapshot(sample, state: .unknown(.staticContent), uniqueUpdateCount: 0)
+            return makeSnapshot(sample, state: .unknown(.staticContent), uniqueUpdateCount: 0,
+                                strict: strict)
         }
 
         let changeDuration = updates >= 2
@@ -403,7 +511,8 @@ final class InputContentCadence {
                                 measurementStartPTS: intervalStartPTS,
                                 measurementEndPTS: intervalEndPTS,
                                 measurementDuration: changeDuration,
-                                uniqueUpdateCount: updates)
+                                uniqueUpdateCount: updates,
+                                strict: strict)
         }
 
         guard updates >= Self.minimumUniqueUpdates,
@@ -412,7 +521,8 @@ final class InputContentCadence {
                                 measurementStartPTS: intervalStartPTS,
                                 measurementEndPTS: intervalEndPTS,
                                 measurementDuration: changeDuration,
-                                uniqueUpdateCount: updates)
+                                uniqueUpdateCount: updates,
+                                strict: strict)
         }
 
         let fps = Double(updates - 1) / changeDuration
@@ -421,13 +531,15 @@ final class InputContentCadence {
                                 measurementStartPTS: firstChangePTS,
                                 measurementEndPTS: lastChangePTS,
                                 measurementDuration: changeDuration,
-                                uniqueUpdateCount: updates)
+                                uniqueUpdateCount: updates,
+                                strict: strict)
         }
         return makeSnapshot(sample, state: .estimated(fps: fps),
                             measurementStartPTS: firstChangePTS,
                             measurementEndPTS: lastChangePTS,
                             measurementDuration: changeDuration,
-                            uniqueUpdateCount: updates)
+                            uniqueUpdateCount: updates,
+                            strict: strict)
     }
 
     private func resetForCurrentSample(_ sample: Sample,
@@ -448,10 +560,15 @@ final class InputContentCadence {
                              layout: PixelLayout,
                              measurement: inout MeasurementState) {
         measurement.previousPixelBuffer = sample.pixelBuffer
+        measurement.previousUniqueSample = nil
+        measurement.latestUniqueSample = sample
         measurement.previousPTS = sample.presentationTime
         measurement.coverageStartPTS = sample.presentationTime
         measurement.activeLayout = layout
         measurement.transitionPTS.removeAll(keepingCapacity: true)
+        measurement.strictTransitionPTS.removeAll(keepingCapacity: true)
+        measurement.strictRepeatPTS.removeAll(keepingCapacity: true)
+        measurement.strictComparisonPTS.removeAll(keepingCapacity: true)
     }
 
     private func makeSnapshot(_ sample: Sample,
@@ -459,7 +576,8 @@ final class InputContentCadence {
                               measurementStartPTS: CMTime? = nil,
                               measurementEndPTS: CMTime? = nil,
                               measurementDuration: TimeInterval? = nil,
-                              uniqueUpdateCount: Int = 0) -> StoredSnapshot {
+                              uniqueUpdateCount: Int = 0,
+                              strict: StrictCadenceSnapshot = StrictCadenceSnapshot()) -> StoredSnapshot {
         StoredSnapshot(state: state,
                        streamEpoch: sample.streamEpoch,
                        sequence: sample.sequence,
@@ -468,7 +586,44 @@ final class InputContentCadence {
                        measurementEndPTS: measurementEndPTS,
                        measurementDuration: measurementDuration,
                        uniqueUpdateCount: uniqueUpdateCount,
+                       strictUniqueFPS: strict.fps,
+                       strictRepeatedCadenceConfirmed: strict.repeatedCadenceConfirmed,
+                       strictUniqueMeasurementStartPTS: strict.measurementStartPTS,
+                       strictUniqueMeasurementEndPTS: strict.measurementEndPTS,
+                       strictUniqueUpdateCount: strict.uniqueUpdateCount,
+                       strictRepeatPairCount: strict.repeatPairCount,
                        sampleArrivalUptimeNanoseconds: sample.arrivalUptimeNanoseconds)
+    }
+
+    private func strictCadenceSnapshot(_ measurement: MeasurementState,
+                                       sample: Sample) -> StrictCadenceSnapshot {
+        var result = StrictCadenceSnapshot()
+        result.uniqueUpdateCount = measurement.strictTransitionPTS.count
+        result.repeatPairCount = measurement.strictRepeatPTS.count
+        guard let first = measurement.strictTransitionPTS.first,
+              let last = measurement.strictTransitionPTS.last,
+              measurement.strictTransitionPTS.count >= Self.minimumUniqueUpdates,
+              let duration = secondsBetween(first, last), duration > 0,
+              let changeAge = secondsBetween(last, sample.presentationTime),
+              changeAge <= Self.maximumContentChangeAge else { return result }
+
+        let intervals = zip(measurement.strictTransitionPTS,
+                            measurement.strictTransitionPTS.dropFirst())
+            .compactMap { secondsBetween($0.0, $0.1) }
+        guard intervals.count >= Self.minimumUniqueUpdates - 1 else { return result }
+        let sorted = intervals.sorted()
+        let median = sorted[sorted.count / 2]
+        let close = intervals.filter { abs($0 - median) <= median * 0.12 }.count
+        guard median > 0, close * 4 >= intervals.count * 3 else { return result }
+
+        result.fps = Double(measurement.strictTransitionPTS.count - 1) / duration
+        result.measurementStartPTS = first
+        result.measurementEndPTS = last
+        let comparisons = measurement.strictComparisonPTS.count
+        let repeatFraction = comparisons > 0
+            ? Double(result.repeatPairCount) / Double(comparisons) : 0
+        result.repeatedCadenceConfirmed = result.repeatPairCount >= 2 && repeatFraction >= 0.5
+        return result
     }
 
     private func follows(_ previous: UInt64, _ current: UInt64) -> Bool {

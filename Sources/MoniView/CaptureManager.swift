@@ -311,7 +311,6 @@ final class LatestVideoFrame {
         let sameSize = buffer.map { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pixelBuffer) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pixelBuffer) } ?? false
         let interval = CMTimeGetSeconds(CMTimeSubtract(pts, self.pts))
         if sameSize, self.pts.isNumeric, pts.isNumeric, interval.isFinite, interval >= 1 / 240.0, interval <= 0.1 {
-            if let last = sourceIntervals.last, abs(interval - last) > last * 0.1 { sourceIntervals.removeAll(keepingCapacity: true) }
             sourceIntervals.append(interval); sourceIntervals = Array(sourceIntervals.suffix(12))
         } else {
             sourceIntervals.removeAll(keepingCapacity: true)
@@ -341,8 +340,8 @@ final class LatestVideoFrame {
         stored.notify?()
     }
     /// Input-side measurement remains valid when rendering skips or pauses drawing.
-    func inputContentCadenceSnapshot() -> InputContentCadenceSnapshot? {
-        let value = inputContentCadence.snapshot()
+    func inputContentCadenceSnapshot(maxAge: TimeInterval = 1.0) -> InputContentCadenceSnapshot? {
+        let value = inputContentCadence.snapshot(maxAge: maxAge)
         lock.lock(); let currentEpoch = streamEpoch; let hasInput = buffer != nil; lock.unlock()
         guard hasInput, value.streamEpoch == currentEpoch else { return nil }
         return value
@@ -358,6 +357,22 @@ final class LatestVideoFrame {
         guard let buffer else { return nil }
         return (buffer, sequence, receivedAt, streamEpoch, pts)
     }
+    /// Take the displayed endpoint and its immediately preceding capture in one lock. Reading
+    /// them separately lets a 120 Hz producer advance the mailbox between the two reads: the
+    /// endpoint is then valid, but its adjacent history no longer matches its sequence and a
+    /// perfectly good pair is discarded as a race rather than an evidence failure.
+    func latestSnapshotWithInterpolationPair() -> (
+        snapshot: (buffer: CVPixelBuffer, sequence: UInt64, receivedAt: UInt64,
+                   streamEpoch: UInt64, pts: CMTime),
+        pair: (CVPixelBuffer, UInt64, CMTime, CMTime)?
+    )? {
+        lock.lock(); defer { lock.unlock() }
+        guard let buffer else { return nil }
+        let snapshot = (buffer: buffer, sequence: sequence, receivedAt: receivedAt,
+                        streamEpoch: streamEpoch, pts: pts)
+        let pair = previous.map { ($0.0, $0.1, $0.2, pts) }
+        return (snapshot, pair)
+    }
     /// Keep capture metadata paired with its buffer. Only the current description is retained.
     func latestFormatSnapshot() -> (buffer: CVPixelBuffer, description: CMFormatDescription?)? {
         lock.lock(); defer { lock.unlock() }
@@ -367,10 +382,7 @@ final class LatestVideoFrame {
     /// Actual media timestamps, not selected/rounded FPS or callback arrival jitter.
     func sourceFrameRate() -> Double? {
         lock.lock(); let intervals = sourceIntervals; lock.unlock()
-        guard intervals.count >= 8 else { return nil }
-        let sorted = intervals.sorted(), median = sorted[sorted.count / 2]
-        guard median > 0, sorted.allSatisfy({ abs($0 - median) <= median * 0.05 }) else { return nil }
-        return 1 / median
+        return ContentCadencePolicy.samplingFPS(from: intervals)
     }
     func streamGeneration() -> UInt64 {
         lock.lock(); defer { lock.unlock() }; return streamEpoch
@@ -379,6 +391,7 @@ final class LatestVideoFrame {
         lock.lock(); defer { lock.unlock() }
         historyEnabled = enabled
         if !enabled { previous = nil }
+        inputContentCadence.setUniquePairRetentionEnabled(enabled)
     }
     func interpolationPair(sequence expected: UInt64) -> (CVPixelBuffer, UInt64, CMTime, CMTime)? {
         lock.lock(); defer { lock.unlock() }
@@ -713,7 +726,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     @Published private(set) var skippedDuplicatePairsPerSecond = 0
     @Published private(set) var detectedContentFPS: Double?
     @Published private(set) var stableContentFPS: Double?
-    private var contentFPSStabilityStreak = 0
+    private var contentRateStability = ContentCadencePolicy.StabilityTracker()
     private var lastContentMeasurementIdentity: (epoch: UInt64, sequence: UInt64)?
     @Published private(set) var presentationIntervalP95MS = 0.0
     /// Total presented output: source frames plus generated midpoints.
@@ -1679,7 +1692,7 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     private func resetContentRateObservation() {
         detectedContentFPS = nil
         stableContentFPS = nil
-        contentFPSStabilityStreak = 0
+        contentRateStability.reset()
         lastContentMeasurementIdentity = nil
     }
     private static func frameRates(for format: AVCaptureDevice.Format) -> [Double] {
@@ -2072,10 +2085,17 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // Measure every input frame, independently of preview load. Unknown or stale
             // results are not reused as evidence for capture or interpolation decisions.
             let inputMeasurement = self.frames.inputContentCadenceSnapshot()
-            let detectedContentFPS = ContentCadencePolicy.boundedObservedRate(
-                inputMeasurement?.fps, signalFPS: self.frames.sourceFrameRate())
+            let detectedContentFPS = ContentCadencePolicy.normalizedStatisticsRate(
+                ContentCadencePolicy.boundedObservedRate(
+                    inputMeasurement?.fps, signalFPS: self.frames.sourceFrameRate()))
             let isNewMeasurement: Bool
             if let epoch = inputMeasurement?.streamEpoch, let sequence = inputMeasurement?.sequence {
+                if self.lastContentMeasurementIdentity.map({ $0.epoch != epoch }) == true {
+                    // A restart is a new source even when its observed rate happens to match.
+                    self.detectedContentFPS = nil
+                    self.stableContentFPS = nil
+                    self.contentRateStability.reset()
+                }
                 isNewMeasurement = self.lastContentMeasurementIdentity.map {
                     $0.epoch != epoch || $0.sequence != sequence
                 } ?? true
@@ -2087,13 +2107,12 @@ final class CaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             // second let an old result accumulate "stability" with no new evidence, which
             // then justified switching the capture rate on stale information.
             if detectedContentFPS != nil && isNewMeasurement {
-                self.contentFPSStabilityStreak = ContentCadencePolicy.nextStabilityStreak(
-                    previous: self.detectedContentFPS, current: detectedContentFPS, streak: self.contentFPSStabilityStreak)
+                self.stableContentFPS = self.contentRateStability.observe(detectedContentFPS)
             } else {
-                self.contentFPSStabilityStreak = 0
+                self.contentRateStability.reset()
+                self.stableContentFPS = nil
             }
             self.detectedContentFPS = detectedContentFPS
-            self.stableContentFPS = ContentCadencePolicy.stableRate(detectedContentFPS, streak: self.contentFPSStabilityStreak)
             if let (buffer, _, _) = self.frames.latest() {
                 self.isPortraitSource = CVPixelBufferGetHeight(buffer) > CVPixelBufferGetWidth(buffer)
             }
